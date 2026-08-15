@@ -1,0 +1,33 @@
+# Truncated payee token -> canonical display name.  SPEC §3, D10.
+#
+# Copy to payee_aliases.yaml and fill in from `passbook payees` output.
+# The real file is gitignored because it names real counterparties; this
+# example is the committed one.
+#
+# Keys MUST be the token exactly as the bank emits it. Canara truncates the UPI
+# counterparty name to about ten characters, so the key is the whole truncated
+# token, not a prefix of the real name — and two different counterparties can
+# collide on one token. Do not try to reconstruct full names.
+#
+# Two things that will bite:
+#   * Double spaces are real. A token like `MURZEP  X` has two, and the key must
+#     match byte-for-byte. Quote any key with leading, trailing or repeated
+#     spaces, or yaml will eat them and the alias will silently never fire.
+#   * Aliasing is per TOKEN, not per transaction. Every row carrying a token
+#     gets the same display name, whatever its amount or time of day. If one
+#     token genuinely covers two things, an alias cannot separate them.
+#
+# An alias changes the DISPLAY NAME ONLY: it sets Firefly's description and
+# destination/source account name. The raw narration is still stored verbatim
+# in Firefly's notes, and `Transaction.payee` keeps the original token.
+#
+# Aliases apply at push time. Rows already in Firefly keep the name they were
+# pushed under.
+
+aliases:
+  # Several tokens may share one display name — e.g. one vendor with two QR
+  # codes, which shows up as two tokens with non-overlapping masked VPAs.
+  # EXAMPLE TOKEN A: Some Vendor
+  # EXAMPLE TOKEN B: Some Vendor
+  #
+  # "DOUBLE  SP": Quoted Because Of The Double Space

@@ -1,0 +1,70 @@
+# Firefly III categorisation rules.  SPEC §8, D10.
+#
+# Copy to rules.yaml and fill in from `passbook payees` output.
+# The real file is gitignored because it names real counterparties.
+#
+# ONLY the three rules SPEC §8 mandates ship here: bank charges, interest
+# income, and the large-one-off tag. There are deliberately no merchant rules.
+#
+# Canara truncates the UPI counterparty to about ten characters and most of the
+# traffic is person-to-person, so a shipped rule matching "Swiggy" or "Zomato"
+# would never fire — and would create false confidence that categorisation is
+# working. Of ten tokens read from the fragment alone, four were wrong: a
+# measured 40% error rate (D10). Categories are yours to derive from
+# `passbook payees` output, never ours to guess.
+#
+#
+# MATCHING. Rules key on `description`, which passbook pushes as
+# "<display name> (<channel>)". The display name is the alias from
+# payee_aliases.yaml when one exists, otherwise the bank's raw truncated token.
+# Two tokens sharing one alias — a vendor with two QR codes, say — are
+# therefore covered by a single trigger.
+#
+# Matching on description rather than notes is deliberate. The R01 reversal's
+# raw narration carries no payee at all, so a notes-based matcher would miss it;
+# its description does carry one, because narration.py backfills it by UTR.
+#
+# `strict: false` means ANY trigger matches (Firefly's own semantics), which is
+# what lets one rule per category list several payees.
+#
+# Every categorisation rule sets `stop_processing: false` so it never
+# short-circuits a later rule — SPEC §8 requires this. `large-oneoff` is
+# ordered last so the categories it excludes are already assigned.
+
+rule_group:
+  title: passbook
+  description: Generated from config/rules.yaml by `passbook bootstrap`.
+
+rules:
+  - title: Bank charges
+    category: Bank Charges
+    notes_contains: CHARGES
+
+  - title: Interest income
+    category: Interest Income
+    notes_starts: SBINT
+
+# ── what is not spending ──────────────────────────────────────────────────────
+# Read by the charts (SPEC §18), not by Firefly: these categories are money
+# MOVING, not money leaving. Counting them as spend was measured at three times
+# the true figure on one real ledger — not roughly right, and entirely plausible
+# on a chart.
+#
+# Config rather than code because these are your own category names. A category
+# named here that does not exist simply excludes nothing.
+#
+# `large_oneoff.exclude_categories` below is a different list on purpose: it
+# guards a TAG on unusual spending, where a ₹1 penny-drop verification is
+# irrelevant. Here Verification matters, because it is not spending either.
+# Fill in with your own category names once `passbook payees` has produced
+# them. Empty means every withdrawal counts as spend.
+not_spend: []
+
+large_oneoff:
+  title: Large one-off
+  tag: large-oneoff
+  # Exclusions must name the INCOMING description/notes. Excluding by
+  # `category_is` is inert at store time — see SPEC §8.
+  exclude_payees: []
+  exclude_notes: []
+  exclude_categories: []

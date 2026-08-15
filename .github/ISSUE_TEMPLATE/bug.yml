@@ -1,0 +1,103 @@
+name: Bug report
+description: Something behaves wrongly, crashes, or produces a figure you cannot explain.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Redact before you paste.** Logs, tracebacks and error messages from
+        this project can carry an account number, a payee's name, or a
+        statement path. Replace them — `****1111`, `PAYEE A` — before posting.
+        A public issue is forever.
+
+        If this is a security vulnerability, close this and use the private
+        route in `SECURITY.md` instead.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, and what you saw instead of what you expected.
+      placeholder: |
+        Ran `make sync` on this week's statement. It reported "pushed 0,
+        duplicates 47" — but the ledger only holds 12 rows.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows it.
+      placeholder: |
+        1. make backup
+        2. uv run passbook purge --confirm --yes
+        3. uv run passbook purge --resume
+        4. uv run passbook verify-ledger
+    validations:
+      required: true
+
+  - type: textarea
+    id: verdict
+    attributes:
+      label: "`passbook verify-ledger` output"
+      description: >-
+        If it involves the ledger at all, this is the single most useful thing
+        you can attach — it names the figure and the drift rather than
+        "mismatch". Redact the balances if you would rather not share them; the
+        check *names* are what matter.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`git rev-parse --short HEAD`, or the release tag."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows + Docker Desktop
+        - macOS + Docker Desktop
+        - Linux + Docker Desktop
+        - Linux + Docker Engine
+        - WSL2 + Docker Engine (the author's setup, SPEC D8)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: bank
+    attributes:
+      label: Bank and export format
+      description: Which bank, and was the file `.xls`, CSV, HTML or PDF?
+      placeholder: Canara, .xls from net banking
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traceback
+      description: >-
+        `docker compose logs --tail=100`, or the traceback. **Redacted.**
+      render: text
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed real account numbers, payee names, balances and UTRs from everything above.
+          required: true
+        - label: I have attached no statement file, screenshot of a real ledger, or backup.
+          required: true

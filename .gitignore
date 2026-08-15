@@ -1,0 +1,75 @@
+# ── Secrets and financial data. SPEC §11. None of this is ever committed. ────
+.env
+.env.*
+!.env.example
+inbox/
+archive/
+backups/
+
+# Names real counterparties. config/payee_aliases.example.yaml is the committed
+# one. SPEC §11 counts counterparty identities as PII.
+config/payee_aliases.yaml
+config/rules.yaml
+config/bills.yaml
+# Names real account numbers (§11). Carried in make backup's config tarball,
+# which is its only copy. SPEC §21.4.
+config/accounts.yaml
+!config/*.example.yaml
+
+# Per-install state, not repository state: which migrations this ledger has had
+# applied. SPEC §22.2. Detection reads the ledger, so losing this file costs a
+# re-check, never a re-run of finished work.
+config/schema-version
+
+# Web UI credentials: password hash, TOTP secret, backup-code digests. SPEC §16.2.
+config/web-auth.json
+config/*.json.tmp
+
+# `passbook payees` output: a ranked list of real counterparties with amounts.
+# Derived from the statement, so it is statement data.
+payees.md
+
+# UI screenshots (`scripts/shoot.py`). They render the LIVE ledger — payee
+# names, balances, the masked account — so they are statement data too.
+#
+# docs/screenshots/ is the tracked one, and everything in it is generated from
+# the fixture by scripts/demo_ledger.py. See docs/screenshots/README.md.
+docs/shots/
+
+# Extracted by `make restore` from the config tarball; holds APP_KEY.
+recovery/
+
+# ── Build artefacts ──────────────────────────────────────────────────────────
+# The React bundle, produced by the Node stage in Dockerfile (or `make
+# web-build`). Never committed: a stale checked-in bundle would silently
+# outrank a fresh build, and the mismatch only shows up at runtime.
+src/passbook/web/dist/
+
+# ── Frontend ─────────────────────────────────────────────────────────────────
+node_modules/
+*.tsbuildinfo
+.vite/
+npm-debug.log*
+yarn-error.log*
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# ── Editors / OS ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

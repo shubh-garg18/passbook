@@ -1,0 +1,125 @@
+name: New bank support
+description: You bank somewhere passbook does not read yet.
+labels: [new-bank]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Adding a bank is **one new file** in `src/passbook/banks/` plus a
+        redacted fixture. No changes to the loaders, the validator, the pusher
+        or the UI. [`docs/adding-a-bank.md`](../../blob/main/docs/adding-a-bank.md)
+        is the whole job, and you need neither Docker nor a Firefly instance to
+        do it.
+
+        Open this issue either way — to say you are working on one, or to ask
+        for one. Filling in what you know below is most of the analysis.
+
+        **Never attach a statement file.** Not even one you think is redacted.
+
+  - type: input
+    id: bank
+    attributes:
+      label: Bank
+      placeholder: HDFC Bank
+    validations:
+      required: true
+
+  - type: input
+    id: country
+    attributes:
+      label: Country and account type
+      description: >-
+        Banks vary their export format by product, so this matters more than it
+        looks.
+      placeholder: India, savings account, retail net banking
+    validations:
+      required: true
+
+  - type: dropdown
+    id: format
+    attributes:
+      label: What does the export download as?
+      description: >-
+        Check the real bytes rather than the extension —
+        `head -c 8 statement.xls | xxd`. Banks mislabel these constantly.
+      options:
+        - ".xls — starts D0 CF 11 E0 (a genuine OLE2 file)"
+        - ".xls — but starts with `<` (an HTML table in disguise)"
+        - ".xlsx — starts 50 4B 03 04 (a ZIP)"
+        - "CSV or another delimited text file"
+        - "PDF"
+        - "I do not know"
+    validations:
+      required: true
+
+  - type: textarea
+    id: header
+    attributes:
+      label: The header row, verbatim
+      description: >-
+        Column names exactly as the file writes them — **including any
+        misspellings**. Canara ships `Trasnaction ID`, and matching that typo as
+        written is the difference between a parser and a wish.
+      placeholder: "Date | Narration | Chq./Ref.No. | Value Dt | Withdrawal Amt. | Deposit Amt. | Closing Balance"
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: narration
+    attributes:
+      label: Two or three narration lines, with the details changed
+      description: >-
+        The **shape** is what matters, so keep the separators, the field order
+        and the string lengths, and replace every name, number and reference
+        with invented ones of the same length. This is the part of the work that
+        cannot be guessed from anywhere else.
+      placeholder: |
+        UPI-ZEPKV JYX-zepkvjyx@ybl-YESB0000001-412345678901-Payment from phone
+        NEFT CR-ZABK0000123-ZEPKV JYX-NYXN XWUBQ-412345678902
+      render: text
+
+  - type: dropdown
+    id: txnid
+    attributes:
+      label: Does the export carry a transaction ID column?
+      description: >-
+        passbook uses the bank's own ID as the ledger key, so this decides how
+        much work the dedup path needs.
+      options:
+        - "Yes, one per row"
+        - "No, there is no ID column at all"
+        - "There is a reference number, but it repeats or is sometimes blank"
+        - "I do not know"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sentinels
+    attributes:
+      label: Are there opening and closing balance rows?
+      description: >-
+        passbook seeds its continuity check from the opening balance and asserts
+        the last row lands on the closing one.
+      options:
+        - "Yes, both"
+        - "Only a closing balance"
+        - "Neither — just transaction rows"
+        - "I do not know"
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Are you working on this?
+      options:
+        - label: I am writing the dialect and will open a PR.
+        - label: I can test a PR against my own statements.
+        - label: I am only reporting that the bank exists.
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have attached no statement file, and every value above is invented.
+          required: true

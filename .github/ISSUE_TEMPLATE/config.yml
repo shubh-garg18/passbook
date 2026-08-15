@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/shubh-garg18/passbook/security/advisories/new
+    about: >-
+      Report privately, never in a public issue. This project handles bank
+      statements — see SECURITY.md.
+  - name: Adding your bank
+    url: https://github.com/shubh-garg18/passbook/blob/main/docs/adding-a-bank.md
+    about: >-
+      The whole job, start to finish. You do not need Docker or a Firefly
+      instance to write a new bank dialect.
+  - name: Firefly III itself
+    url: https://github.com/firefly-iii/firefly-iii/issues
+    about: >-
+      Ledger, rules engine, or the Firefly UI at :8080 — that is upstream.
+      passbook pins an official image and calls its REST API.

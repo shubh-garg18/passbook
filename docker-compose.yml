@@ -1,0 +1,195 @@
+# passbook — Phase 1 Docker stack.  SPEC §5.
+#
+# Deliberate deviations from the upstream Firefly III compose file, all decided
+# in SPEC §2 — do not "fix" these back:
+#   * postgres, not mariadb            (D1)
+#   * no fireflyiii/data-importer      (D3 — we push via REST)
+#   * no cron container                (D7 — WSL2 sleeps; automation is `make`)
+#   * ports bound to 127.0.0.1 only    (D9)
+#
+# Verified against fireflyiii/core:version-6.6.6 on 2026-08-07:
+#   - env var names come from that tag's .env.example, not from memory
+#   - `pgsql` is the documented DB_CONNECTION value for PostgreSQL
+#   - the image ships its own HEALTHCHECK which probes
+#     http://localhost:8080$$HEALTHCHECK_PATH, so we point that at /health
+#     rather than writing our own probe
+
+name: passbook
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: passbook_db
+    restart: unless-stopped
+    # Not port-published. Firefly reaches it over the compose network. SPEC §5.
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:?set DB_DATABASE in .env — run `make env`}
+      POSTGRES_USER: ${DB_USERNAME:?set DB_USERNAME in .env — run `make env`}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env — run `make env`}
+      TZ: ${TZ:-Asia/Kolkata}
+      PGTZ: ${TZ:-Asia/Kolkata}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -q so a healthy container does not spam the daemon log every 5s.
+      test: ["CMD-SHELL", "pg_isready -q -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  app:
+    image: fireflyiii/core:version-6.6.6
+    container_name: passbook_firefly
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Host side is configurable; the container side never moves — `web` and
+      # `caddy` reach it as `app:8080` on the compose network and do not care.
+      # Configurable because on WSL with `networkingMode=mirrored` (.wslconfig)
+      # Windows and the distro share one port space, so any Windows service
+      # holding 8080 makes this bind fail with "address already in use" while
+      # `ss` inside the distro shows nothing listening. Measured on this
+      # machine: AgentService.exe on 0.0.0.0:8080. Set FIREFLY_HOST_PORT and
+      # match APP_URL and FIREFLY_URL to it.
+      - "127.0.0.1:${FIREFLY_HOST_PORT:-8080}:8080"
+    volumes:
+      - fireflyupload:/var/www/html/storage/upload
+    environment:
+      # Turns the image's built-in healthcheck into a real database check:
+      # /health runs User::count() and returns 200 OK. Root would only prove
+      # nginx is answering.
+      HEALTHCHECK_PATH: /health
+
+      APP_KEY: ${APP_KEY:?set APP_KEY in .env — run `make env`}
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      SITE_OWNER: ${SITE_OWNER:-you@example.com}
+      DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-en_US}
+      TZ: ${TZ:-Asia/Kolkata}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-**}
+
+      # Set explicitly rather than inherited, so `make logs` behaviour is
+      # visible here instead of buried in Firefly's config defaults.
+      # `stack` fans out to ['daily', 'stdout'] (config/logging.php:29,41) —
+      # stdout is what reaches `make logs`, daily keeps a 7-day file inside the
+      # container. Valid alternatives are the six in $validChannels: single,
+      # papertrail, stdout, daily, syslog, errorlog. `docker_out` is NOT one of
+      # them in v6.6.6 — it would land in `default` with no matching channel and
+      # LogManager would throw "Log [docker_out] is not defined".
+      LOG_CHANNEL: ${LOG_CHANNEL:-stack}
+      # Firefly's own fallback is `info`; upstream's .env.example says `notice`.
+      # Pinned to info — an AUDIT line per request is worth having on a laptop.
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-info}
+
+      DB_CONNECTION: ${DB_CONNECTION:-pgsql}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: ${DB_DATABASE}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+
+  # ── Phase 10: local web UI. SPEC §16. ─────────────────────────────────────
+  # An additional front end over the same code the CLI runs, not a replacement.
+  # Everything still works from the terminal.
+  #
+  # Built in two stages (Dockerfile): a Node stage compiles the React
+  # bundle and is discarded, so the running image has no Node in it. Flask
+  # serves that bundle and the JSON API from the same origin — one port, one
+  # container, no CORS.
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: passbook/web:local
+    container_name: passbook_web
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    # 127.0.0.1 only, exactly like Firefly. D9. Phase 8 (Tailscale) changes the
+    # reachability story, which is why this ships with a password already.
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      # The UI writes uploads into inbox/ and moves files to archive/ on a
+      # successful push — the same directories the CLI uses, so the two front
+      # ends never diverge.
+      - ./inbox:/app/inbox
+      - ./archive:/app/archive
+      # Writable: the payees page edits these after showing a diff.
+      - ./config:/app/config
+    environment:
+      # Inside the compose network Firefly is `app`, not localhost.
+      FIREFLY_URL: http://app:8080
+      FIREFLY_TOKEN: ${FIREFLY_TOKEN:?set FIREFLY_TOKEN in .env — the UI pushes}
+      PASSBOOK_ACCOUNT_NUMBER: ${PASSBOOK_ACCOUNT_NUMBER:?required for the §6.7 assertion}
+      PASSBOOK_ASSET_ACCOUNT: ${PASSBOOK_ASSET_ACCOUNT:?which Firefly account to post into}
+      LARGE_TXN_THRESHOLD: ${LARGE_TXN_THRESHOLD:-10000}
+      # Auth lives in config/web-auth.json (already mounted, and writable so
+      # the change-password form and TOTP enrolment can write it). Nothing
+      # credential-shaped passes through .env or compose. SPEC §15.5, §16.2.
+      # Signs the session cookie. Rotating it signs everyone out, which is
+      # the desired behaviour and not a data loss.
+      PASSBOOK_WEB_SECRET: ${PASSBOOK_WEB_SECRET:?run `make env` or set one}
+      # Phase 8 (Tailscale, with a real certificate) sets this to 1 so the
+      # session and device cookies carry Secure. Over plain http on 127.0.0.1
+      # a Secure cookie would simply never be sent, so it stays off today.
+      PASSBOOK_WEB_SECURE_COOKIES: ${PASSBOOK_WEB_SECURE_COOKIES:-0}
+      # Read-only listing of the off-site archives. No rclone binary and no
+      # credentials are in this container — see §15.3.
+      PASSBOOK_RCLONE_REMOTE: ${PASSBOOK_RCLONE_REMOTE:-}
+      TZ: ${TZ:-Asia/Kolkata}
+    healthcheck:
+      # /api/session answers without auth and exercises Flask, the blueprint
+      # and the credential file — a better liveness signal than the static
+      # bundle, which would return 200 even with the API broken.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8081/api/session', timeout=4).status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Phase 11: clean URLs. SPEC §17.3, D9. ─────────────────────────────────
+  # A third listener, and the only one on a privileged port. Still 127.0.0.1
+  # only — D9 is about reachability, not port numbers, and nothing here is
+  # bound to 0.0.0.0.
+  #
+  # 8080 and 8081 keep working exactly as before: this is an additional way in,
+  # not a replacement. The runbook, the DR drill and every healthcheck
+  # reference the numbered ports and must keep doing so — they run when Caddy
+  # may not be up.
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: passbook_caddy
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+      web:
+        condition: service_started
+    ports:
+      - "127.0.0.1:80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    environment:
+      TZ: ${TZ:-Asia/Kolkata}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "--header", "Host: passbook.localhost", "http://127.0.0.1/api/session"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+# Named volumes, not bind mounts: a bind mount under /mnt/c breaks Postgres
+# file permissions outright. SPEC D8.
+volumes:
+  pgdata:
+  fireflyupload:
+  caddydata:
+  caddyconfig:
