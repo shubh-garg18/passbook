@@ -1,0 +1,51 @@
+# Clean URLs for the local stack. SPEC §17.3, D9.
+#
+#   http://passbook.localhost  -> the passbook web UI
+#   http://khata.localhost     -> Firefly III
+#
+# Chromium resolves *.localhost to 127.0.0.1 itself (RFC 6761), so there is no
+# hosts-file edit and no DNS involved. Verified in Chromium 149, not assumed.
+
+{
+	# Plain HTTP, explicitly. Caddy's default is to provision certificates for
+	# every site it serves, and for a `.localhost` name it would mint one from
+	# its own internal CA and try to install that CA into the system trust
+	# store — which needs root, fails in a container, and produces browser
+	# warnings for a service that is already loopback-only. Off, deliberately.
+	auto_https off
+
+	# No admin API. It is another listener on a box where the whole point of
+	# D9 is that nothing is exposed beyond loopback.
+	admin off
+
+	# Access logs to stdout so `docker compose logs caddy` shows them, matching
+	# how the other two services behave.
+	log {
+		output stdout
+		format console
+	}
+}
+
+# The passbook UI. Same container that answers on 8081.
+http://passbook.localhost {
+	reverse_proxy web:8081
+}
+
+# Firefly III. `khata` (खाता) is the account book itself — the ledger this
+# whole pipeline feeds.
+http://khata.localhost {
+	reverse_proxy app:8080 {
+		# Firefly builds absolute URLs from APP_URL, and reads these when
+		# TRUSTED_PROXIES is set (it is: `**` in docker-compose.yml). Without
+		# them a login redirect would bounce the browser back to :8080.
+		header_up Host {host}
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
+
+# Anything else that reaches this listener gets a plain answer rather than a
+# confusing default page.
+http:// {
+	respond "passbook: use http://passbook.localhost or http://khata.localhost" 404
+}

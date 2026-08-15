@@ -1,0 +1,63 @@
+name: tests
+
+# The documentation rule (CLAUDE.md non-negotiable 14) is only worth anything if
+# something enforces it, so `audit-docs` runs here as its own job — a red cross
+# on a PR that pastes a real balance into a comment.
+#
+# Nothing in this workflow needs Docker, Firefly, or a bank account. The whole
+# suite runs on fixtures; `test_stack.py` auto-skips when no stack is up, which
+# on a runner is always.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the runtime image ships. 3.13 is what a contributor is
+        # most likely to have installed, and it caught nothing so far — which is
+        # the point of running both.
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  audit-docs:
+    # Tracked documentation cites FIXTURE values, never a live ledger.
+    # A one-time scrub that nothing enforces is undone by the next commit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run pytest tests/test_docs.py -q
+
+  frontend:
+    # A typecheck is not a build, so this does both: the build is what the
+    # screenshots and the runtime image actually serve.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - run: npx tsc --noEmit
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend

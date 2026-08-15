@@ -1,0 +1,44 @@
+[project]
+name = "passbook"
+version = "0.2.0"
+description = "Canara Bank statement -> Firefly III ingest pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    # SPEC D4: the Canara export is a genuine OLE2 .xls. xlrd 2.x reads only
+    # .xls; openpyxl reads only .xlsx. That pairing is correct, not a mistake.
+    "xlrd>=2.0.1",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer>=0.12",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "flask>=3.0",
+    "waitress>=3.0",
+    "ruamel-yaml>=0.18",
+    # Phase 10 second factor. pyotp is the RFC 6238 implementation; segno draws
+    # the enrolment QR as SVG and is pure Python — no Pillow, no native build,
+    # which keeps the web image a plain python:slim with no compiler in it.
+    "pyotp>=2.9",
+    "segno>=1.6",
+    "pikepdf>=10.11.0",
+    "pdfplumber>=0.11.10",
+]
+
+[project.scripts]
+passbook = "passbook.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "xlwt==1.3.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/passbook"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

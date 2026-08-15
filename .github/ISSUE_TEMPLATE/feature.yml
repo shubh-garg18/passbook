@@ -1,0 +1,76 @@
+name: Feature request
+description: Something passbook should do and does not.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Some things are **deliberately not built**, and SPEC.md says why. Worth
+        a look before writing:
+
+        - **Automatic bank sync** — India's Account Aggregator framework is
+          closed to individuals; only registered financial information users
+          can get access. Scraping net banking breaks constantly and violates
+          the bank's terms. (SPEC §1)
+        - **Email or SMS notifications** — that means an app password sitting in
+          `.env` permanently, for a job a weekly calendar reminder does better.
+          (SPEC D7)
+        - **A cron container** — WSL2 stops when Windows sleeps, so nothing
+          scheduled is reliable, and a scheduler that silently stops is worse
+          than none. (SPEC D7)
+        - **Shipped merchant rules** — the bank truncates payee names to about
+          ten characters, so a rule matching "Swiggy" never fires. Measured 40%
+          error rate on guessing what a truncated token means. (SPEC D10)
+        - **Metabase / a second analytics store** — it would need a second
+          definition of "spend" kept in sync by memory. (SPEC §9)
+
+        Arguing with one of these is fine — say what changed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What are you trying to do, and where does passbook get in the way?
+        Describe the situation, not the solution.
+      placeholder: >-
+        I have two accounts at different banks and I want one number for what I
+        spent this month. Today I read two figures and add them in my head.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you have tried instead
+      description: Including "nothing" — that is a useful answer too.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Parser / statement formats
+        - Categorisation rules and payees
+        - The web UI
+        - Charts and figures
+        - Backups and recovery
+        - Setup and installation
+        - CLI
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Would you like to build it?
+      options:
+        - label: I would be willing to open a PR for this.
