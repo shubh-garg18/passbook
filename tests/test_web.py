@@ -733,6 +733,10 @@ def test_ops_only_ever_executes_rclone():
 # the rendered geometry, not merely that an <svg> came back.
 
 import re as _re
+# A package attribute is not a patch seam: a route resolves the name in its
+# own module's globals, so the fake goes on `_base` — the one place a client
+# is ever constructed.
+from passbook.web.api import _base as _api_base
 
 
 def _qr_root(svg: str) -> str:
@@ -928,7 +932,7 @@ def _fake_firefly(monkeypatch, splits, **kwargs):
 
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
-        api_module, "FireflyClient", lambda *a, **k: FakeFirefly(splits, **kwargs)
+        _api_base, "FireflyClient", lambda *a, **k: FakeFirefly(splits, **kwargs)
     )
 
 
@@ -1053,7 +1057,7 @@ def test_an_unreachable_firefly_is_a_502_not_a_500(signed_in, monkeypatch):
     def explode(*a, **k):
         raise FireflyError("connection refused")
 
-    monkeypatch.setattr(api_module, "FireflyClient", explode)
+    monkeypatch.setattr(_api_base, "FireflyClient", explode)
     r = signed_in.get("/analysis")
     assert r.status_code == 502
     assert r.get_json()["code"] == "firefly"
@@ -1241,7 +1245,7 @@ def test_reapply_reports_whether_a_recent_dump_exists(signed_in, tmp_path, monke
 
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([], 0))
-    monkeypatch.setattr(api_module, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+    monkeypatch.setattr(_api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
 
     body = signed_in.get("/reapply").get_json()
     assert body["dump"]["fresh"] is False
@@ -1280,11 +1284,13 @@ def test_the_refusal_happens_before_anything_is_copied_or_deleted(
 
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     called = []
+    from passbook.web.api import reapply as _api_reapply
+
     monkeypatch.setattr(
-        api_module, "_run_config_backup", lambda: called.append("config") or "x"
+        _api_reapply, "_run_config_backup", lambda: called.append("config") or "x"
     )
     monkeypatch.setattr(
-        api_module, "FireflyClient", lambda *a, **k: called.append("firefly") or FakeFirefly([])
+        _api_base, "FireflyClient", lambda *a, **k: called.append("firefly") or FakeFirefly([])
     )
 
     assert signed_in.post("/reapply/run").status_code == 409
@@ -1297,7 +1303,7 @@ def test_a_dump_that_is_exactly_at_the_limit_still_counts(signed_in, tmp_path, m
 
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([], 0))
-    monkeypatch.setattr(api_module, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+    monkeypatch.setattr(_api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
 
     _dump(tmp_path, minutes_old=ops.REAPPLY_DUMP_MAX_AGE_MINUTES)
     assert signed_in.get("/reapply").get_json()["dump"]["fresh"] is True

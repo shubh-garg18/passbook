@@ -31,6 +31,10 @@ from passbook.config import (
 )
 from passbook.loaders import xls
 from passbook.validate import UnknownAccount
+# A package attribute is not a patch seam: a route resolves the name in its
+# own module's globals, so the fake goes on `_base` — the one place a client
+# is ever constructed.
+from passbook.web.api import _base as _api_base
 
 SECOND_ACCOUNT = "888800001111"
 
@@ -384,7 +388,7 @@ def _fake_firefly_two(monkeypatch, per_account):
             name = list(per_account)[int(account_id) - 1]
             return [{"attributes": {"transactions": per_account[name][1]}}]
 
-    monkeypatch.setattr(api_module, "FireflyClient", lambda *a, **k: Fake())
+    monkeypatch.setattr(_api_base, "FireflyClient", lambda *a, **k: Fake())
 
 
 def _split(external_id, amount="10", kind="withdrawal", category="Shopping"):

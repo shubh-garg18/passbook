@@ -4322,3 +4322,50 @@ check, and this is the record that it has to be made every time a page crosses.
 - [x] Brand, theme names and storage key are passbook's.
 - [x] Both themes, both widths, looked at.
 
+---
+
+## 29. One blueprint, twelve modules
+
+`api.py` reached 2,900 lines and 36 routes. Sign-in sat above the ledger sat
+above the bank profile editor, and finding anything meant knowing roughly where
+it had been added. It is a package now, split by subject: `signin`, `accounts`,
+`registering`, `banks`, `statements`, `ledger`, `payees`, `reapply`, `ops`, over
+`_base`, `_scope` and `_reconcile`.
+
+The split changed no behaviour — the same 36 decorators, the same URL map rule
+for rule, before and after.
+
+### 29.1 What registers a route is importing the module
+
+The blueprint is shared; a route exists because the module declaring it was
+imported. `__init__.py` does that with a hand-written list, and **that list is
+the failure mode**: a module nobody imports is a route that quietly does not
+exist. No error, no warning, a 404 on a page that used to work.
+
+This is not hypothetical. Cleaning unused imports during the split dropped that
+list and the app served **3 routes instead of 39** — and every module still
+imported, so nothing raised. `tests/test_routes.py` reads the decorators out of
+the source and asserts the URL map agrees, plus a bare count so a route lost to
+a bad merge is caught even when both sides lose it together.
+
+### 29.2 A package attribute is not a patch seam
+
+A route resolves a name in **its own module's** globals. Patching
+`passbook.web.api.FireflyClient` therefore reaches nothing — the package
+attribute and the module global are different bindings.
+
+The consequence is worse than a failed assertion: the fake is silently ignored,
+the route builds a real client, and the test hangs on a network call to a store
+that is not there. That is how this was found.
+
+So there is exactly one place a client is constructed — `_base._client()` — and
+that is the seam a test patches. Every route goes through it, which is also why
+one request now shares one client instead of opening three.
+
+### 29.3 Definition of done
+
+- [x] Twelve modules, none over 520 lines, split by subject rather than by size.
+- [x] The same 36 routes, asserted against the source and by count.
+- [x] One client per request, constructed in one place.
+- [x] 967 tests green, unchanged in behaviour.
+

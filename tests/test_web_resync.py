@@ -19,6 +19,10 @@ import pytest
 # them re-registers them here, which is pytest's own mechanism for sharing a
 # fixture between modules without moving it.
 from test_web import api, app, signed_in  # noqa: F401
+# A package attribute is not a patch seam: a route resolves the name in its
+# own module's globals, so the fake goes on `_base` — the one place a client
+# is ever constructed.
+from passbook.web.api import _base as _api_base
 
 
 @pytest.fixture
@@ -51,7 +55,7 @@ def firefly(monkeypatch):
     FakeClient.instances = []
     import passbook.web.api as api_mod
 
-    monkeypatch.setattr(api_mod, "FireflyClient", FakeClient)
+    monkeypatch.setattr(_api_base, "FireflyClient", FakeClient)
     monkeypatch.setenv("FIREFLY_TOKEN", "t")
     return FakeClient
 
@@ -87,10 +91,10 @@ def test_nothing_compared_is_never_reported_as_ok(signed_in, firefly, monkeypatc
     `remaining` of `None` is *unverified* — the third state — and must not make
     `ok` true even when zero rows failed.
     """
-    import passbook.web.api as api_mod
+    from passbook.web.api import reapply as _api_reapply
 
     monkeypatch.setattr(
-        api_mod,
+        _api_reapply,
         "_sync_now",
         lambda client, st: {
             "considered": 0,
