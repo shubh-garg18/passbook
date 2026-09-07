@@ -1,6 +1,6 @@
 name: tests
 
-# The documentation rule (CLAUDE.md non-negotiable 14) is only worth anything if
+# The documentation rule (non-negotiable 14) is only worth anything if
 # something enforces it, so `audit-docs` runs here as its own job — a red cross
 # on a PR that pastes a real balance into a comment.
 #

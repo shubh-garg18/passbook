@@ -1,6 +1,6 @@
 # Using it
 
-[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · **Usage** · [Backups](backups.md) · [Operations](operations.md) · [Add a bank](adding-a-bank.md)
+[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · **Usage** · [Backups](backups.md) · [Operations](operations.md)
 
 > **On Windows?** `make` is a Unix tool and Windows does not ship it. Every
 > `make …` below has a one-line equivalent —
@@ -146,11 +146,25 @@ data.
 
 ### Re-applying after an edit
 
-Rules and aliases apply **at push time**, so editing them cannot reach rows
-already in Firefly — and re-pushing just hits dedup. The Payees page shows a
-count whenever the ledger disagrees with config, and offers to reconcile.
+Rules and aliases apply **at push time**, so editing them does not reach rows
+already in Firefly. Renaming a payee on the Payees page now writes those rows in
+the same action; **Re-apply** shows you what would move before it does.
 
 From a terminal:
+
+```bash
+uv run passbook resync            # dry run: what config would change
+uv run passbook resync --confirm  # write it, in place
+```
+
+**`resync` deletes nothing and needs no backup.** It sends the description, the
+category, the payee account on the other side, and the tags your rules derive —
+and nothing else. Amount, date and the raw narration are not in the request, so
+they cannot move. Running it twice is the same as running it once.
+
+It also cannot fix everything, and says so instead of implying otherwise: a row
+that is **missing** from the ledger, or one whose amount is wrong, comes from
+the statement. Those need a rebuild:
 
 ```bash
 make backup                     # always — the next step is a delete
@@ -162,6 +176,12 @@ uv run passbook purge --resume  # pushes every archived statement back
 `purge` only removes rows carrying an `external_id`, which is exactly what
 passbook pushed — your opening balance has none, so it is never a candidate.
 That is structural, not a date guard. There is deliberately no `make purge`.
+
+> **"All 0 transactions already match" is not a pass.** Zero *compared* and zero
+> *differing* are different answers, and a version of this once reported the
+> first as the second, in green, for every row. If you see nothing was compared,
+> check `passbook verify-ledger` and that `PASSBOOK_ASSET_ACCOUNT` names the
+> account your rows went into.
 
 ---
 

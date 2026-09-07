@@ -5,16 +5,22 @@ body:
   - type: markdown
     attributes:
       value: |
-        Adding a bank is **one new file** in `src/passbook/banks/` plus a
-        redacted fixture. No changes to the loaders, the validator, the pusher
-        or the UI. [`docs/adding-a-bank.md`](../../blob/main/docs/adding-a-bank.md)
-        is the whole job, and you need neither Docker nor a Firefly instance to
-        do it.
+        **You do not have to wait for us.** Adding a bank is six column
+        names in a YAML file, written from **Account menu → Add a bank** in
+        about ten minutes. No Python, no PR, and no file leaves your machine.
+        The page shows you your own file, you pick six
+        dropdowns, and **Try it** parses the whole statement and checks the
+        balance chain before anything is saved.
 
-        Open this issue either way — to say you are working on one, or to ask
-        for one. Filling in what you know below is most of the analysis.
+        Open this issue to **contribute your working profile back** so the next
+        person gets it for free, or because something would not parse and you
+        want help. Filling in what you know below is most of the analysis.
 
         **Never attach a statement file.** Not even one you think is redacted.
+        If you need to show us the layout, paste the output of
+        `uv run --with pdfplumber --with pikepdf python scripts/probe.py <file>`
+        — it reduces every word to its shape and position and refuses to print
+        if one word of your statement survives into it.
 
   - type: input
     id: bank
@@ -112,7 +118,7 @@ body:
     attributes:
       label: Are you working on this?
       options:
-        - label: I am writing the dialect and will open a PR.
+        - label: I have a working profile and will open a PR with it.
         - label: I can test a PR against my own statements.
         - label: I am only reporting that the bank exists.
 

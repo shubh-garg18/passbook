@@ -1,6 +1,6 @@
 # Operations
 
-[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · [Usage](usage.md) · [Backups](backups.md) · **Operations** · [Add a bank](adding-a-bank.md)
+[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · [Usage](usage.md) · [Backups](backups.md) · **Operations**
 
 What runs, what it assumes about your threat model, and how to run the tests.
 
@@ -123,4 +123,4 @@ and prints the computed animation values.
 | `make audit-docs` fails on a number you wrote | You cited a live ledger. Use a fixture value, or state a ratio. |
 
 More failure modes, with the measurement behind each, are in
-[`CLAUDE.md`](../CLAUDE.md).
+[`CONTRIBUTING.md`](../CONTRIBUTING.md).

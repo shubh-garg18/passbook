@@ -86,8 +86,9 @@ Only the setup wizard uses it. passbook itself runs in Docker.
 
 ### 3. Download a statement
 
-From your bank's net banking. Canara Bank today; [other banks are one new
-file](docs/adding-a-bank.md).
+From your bank's net banking. Canara, SBI and Union Bank read out of the box;
+for anything else, *Account menu → Add a bank* takes the column mapping once you
+are signed in.
 
 **Never upload it to an online converter.** It carries your account number,
 customer ID, address and your counterparties' details.

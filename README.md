@@ -3,7 +3,7 @@
 [![tests](https://github.com/shubh-garg18/passbook/actions/workflows/ci.yml/badge.svg)](https://github.com/shubh-garg18/passbook/actions/workflows/ci.yml)
 [![stars](https://img.shields.io/github/stars/shubh-garg18/passbook?style=flat&color=blue)](https://github.com/shubh-garg18/passbook/stargazers)
 [![forks](https://img.shields.io/github/forks/shubh-garg18/passbook?style=flat&color=blue)](https://github.com/shubh-garg18/passbook/network/members)
-[![add your bank](https://img.shields.io/badge/add%20your%20bank-one%20file-brightgreen)](docs/adding-a-bank.md)
+[![any bank](https://img.shields.io/badge/any%20bank-no%20code-brightgreen)](#is-it-for-you)
 
 **Your bank statement, turned into a ledger that tells you the truth about your
 spending.** Self-hosted, offline, and it takes one command to install.
@@ -58,7 +58,7 @@ No terminal.
 |---|---|
 | ✅ | You want your own numbers, on your own machine, with nothing uploaded anywhere |
 | ✅ | You are happy downloading a statement once a week |
-| ⚠️ | **Canara Bank only today** — [adding yours is one file](docs/adding-a-bank.md) |
+| ✅ | **Canara, SBI and Union Bank** out of the box — and if yours is not one of them, *Account menu → Add a bank* reads your own file and takes the column mapping, on your laptop, with nothing sent anywhere |
 | ⚠️ | Needs a PC (Windows, macOS or Linux). Not a phone |
 | ❌ | You want automatic bank sync — India's Account Aggregator framework is closed to individuals, so nobody self-hosted can offer it |
 
@@ -85,9 +85,10 @@ wrong number.
 
 Small, self-contained, and genuinely useful:
 
-- **[Add your bank](docs/adding-a-bank.md)** — one file in `src/passbook/banks/`
-  plus a redacted fixture. You need neither Docker nor a Firefly instance to
-  write one, and the guide is the whole job.
+- **Say whether your bank worked.** *Account menu → Add a bank* maps your own
+  file on your own machine — if it parsed, the profile it wrote is worth sharing
+  so the next person gets it for free; if it did not, that is the most useful
+  bug there is.
 - **Try it and say what broke.** [Open an
   issue](https://github.com/shubh-garg18/passbook/issues) — a setup step that was
   wrong on your machine is the most useful bug there is.
@@ -108,8 +109,7 @@ will. There is no install counter and there is not going to be one.
 | [Usage](docs/usage.md) | the weekly cycle, rules, checking the ledger, more than one account |
 | [Backups](docs/backups.md) | `make backup`, off-site, the recovery runbook |
 | [Operations](docs/operations.md) | what runs, the threat model, tests |
-| [Adding a bank](docs/adding-a-bank.md) | start to finish |
-| [Contributing](CONTRIBUTING.md) · [SPEC](SPEC.md) | house rules, and every decision with the measurement behind it |
+| [Contributing](CONTRIBUTING.md) · [SPEC](DECISIONS.md) | house rules, and every decision with the measurement behind it |
 
 ## Licence
 

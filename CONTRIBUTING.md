@@ -3,9 +3,90 @@
 Issues and pull requests are welcome. This page is what you need to know before
 opening either.
 
-The single most useful contribution is **a new bank**, and it has its own guide:
-[`docs/adding-a-bank.md`](docs/adding-a-bank.md). You do not need a Firefly
-instance or a Docker stack to write one.
+**passbook reads your bank without anyone writing code for it.** If yours is
+not one of the three that ship, open **Account menu → Add a bank**: it shows you
+your own file, you say which column is which, and the balance chain tells you
+whether you got it right. All of it on your machine, and nobody needs to see
+your statement.
+
+---
+
+## The rules that do not bend
+
+1. **Money is `Decimal`, never `float`.** Anywhere. No exceptions.
+2. **Strip the trailing `DD/MM/YYYY HH:MM:SS` from UPI narrations before
+   splitting on `/`.** The timestamp contains slashes and will otherwise produce
+   four spurious tokens. SPEC §6.5.
+3. **The balance-continuity invariant must pass before anything is pushed.** It
+   is verified to hold cleanly on real data — 93 rows, 0 breaks — and on the
+   committed fixture. So if it fails, the parser is wrong, not the data. Fail
+   loudly with the row index. **Never soften or skip this check to make a test
+   pass.**
+4. **Never log or commit** the account number in full, the customer ID, or the
+   Firefly token. Mask account numbers to last 4.
+5. **The customer ID is a credential** wherever it appears — including inside
+   `PMSBY` narration strings.
+6. **Nothing under `inbox/`, `archive/`, `backups/`, or `.env` gets committed.**
+7. **Never suggest uploading a statement to an online converter.** Privacy-fatal.
+8. **Do not ship guessed merchant rules.** Canara truncates UPI payee names to
+   ~10 chars and the traffic is mostly person-to-person. A rule matching
+   `"Swiggy"` will never fire and will create false confidence. Rules come from
+   `passbook payees` output. SPEC D10.
+9. **Never total the ledger by hand.** Every spend or earnings figure — a card,
+   a chart, a CLI line — comes from `service.ledger_analysis`, which applies
+   SPEC §8/§8.1. Firefly counts every withdrawal as spend and every deposit as
+   income *by type*; measured on one real three-month ledger, that read **three
+   times** the true spend and **1.6 times** the true earnings. Investments,
+   Transfers, Credit Card and Verification are movement, not spending
+   (`not_spend` in `config/rules.yaml`); `not-earnings`-tagged deposits are
+   money coming back, not earned. A naive sum is not approximately right, and it
+   looks fine.
+10. **Never key anything on `txn_id` across accounts.** The bank sequences it
+    per account, so two Canara accounts emit identical ids — measured on the two
+    committed fixtures: 93 of 93, and the same masked last four. `external_id`
+    is `<slug>-<txn_id>` (SPEC §21.1); reads go through `service.txn_id_of`,
+    writes through `Account.external_id`. A dict keyed on the bare id merged two
+    accounts and kept 93 of 186 rows with no error at all.
+11. **A green tick for something you did not check is a lie.** `Check.ok` is
+    tri-state — `True`, `False`, `None` — and `None` renders as *unverified*, in
+    ochre, never as a pass. A ledger once held 21 of 93 rows for seven hours
+    behind an all-green strip (SPEC §19, §20).
+12. **Never repair a ledger from a check.** `verify-ledger` reports, names the
+    remedy, exits 7. Recovery starts with a verified backup (§19.5); a check
+    that silently fixed things would be the most dangerous thing in this repo.
+13. **A rule matches the display name, so a rename must carry its category.**
+    `description` is pushed as `<alias or token> (<channel>)`, and rules are
+    `description_starts` on that. Relabelling a payee without rewriting its
+    entry in `rules.yaml` moves the row out from under its own rule and it
+    silently loses the category — measured, `Canteen` → `Mess` gave `''`. This
+    is not D10 being relaxed: following a rename infers nothing, it preserves a
+    decision the operator already made. SPEC §24.4.
+14. **An in-place ledger update sends only what config owns.** Description,
+    category, counterparty and the *managed* tags. Never `amount`, `date`,
+    `type`, `external_id` or `notes` — that omission is the only reason a
+    rename cannot corrupt a ledger, because Firefly's update is sparse and an
+    absent field is an untouched one. `reversal` and `large-oneoff` are carried
+    through, never predicted. SPEC §24.2.
+15. **Two palettes, and which one a mark uses is a question about the mark.**
+    `--cat-1..8` encodes **identity** — a category, a payee, an account.
+    `--ramp-1..5` encodes **rank or magnitude** — one series measured over
+    time, where eight hues would claim eight different things.
+    This replaced "the ramp and nothing else": ten categories separated only by
+    density are ten shades of the same answer. What did **not** change, because
+    it was never aesthetics:
+    * **`--stamp` acts, `--ochre` asks, `--verdigris` reconciles, `--alarm`
+      failed. No chart mark may use those tokens, and no bank theme may
+      redefine them** — tests enforce the second half.
+    * **Money is never coloured by sign.** Indigo/cyan on the month pair is
+      series identity; red/green would be a verdict. SPEC §16.4.
+    * Every hue is **measured**, not chosen: the graphical floor is 3:1 (WCAG
+      1.4.11) against its card, 4.5:1 for anything with text on it, in both
+      themes. **Contrast is not saturation, and both get measured** — a set can
+      clear the ratio and still look washed out, which is what happens when
+      only the first is ever checked. SPEC §28.
+16. **Tracked documentation cites FIXTURE values, never live ledger values.**
+    This one gets its own section, because it is the rule most easily broken by
+    accident.
 
 ---
 
@@ -23,7 +104,7 @@ Not yours, and certainly not anyone else's. That means:
   still holds;
 - **no real balances, payee tokens, account numbers or UTRs in documentation,
   comments, tests or example config.** Tracked files cite the fixture's values,
-  which are listed in `CLAUDE.md`. `make audit-docs` fails the build on a
+  which are listed above. `make audit-docs` fails the build on a
   figure that is not one of them;
 - **no screenshots of a real ledger.** `docs/shots/` is gitignored for exactly
   this reason. Published screenshots are generated from the fixture by
@@ -52,7 +133,7 @@ merged. The same goes for `verify-ledger`, which reports and exits rather than
 repairing — a check that silently fixed a ledger would be the most dangerous
 thing in this repository.
 
-There is a longer list in `CLAUDE.md` under "Non-negotiables". It is worth
+The full list is at the top of this page. It is worth
 reading once; most of the entries exist because something went silently wrong.
 
 ---
@@ -91,7 +172,7 @@ so readability beats cleverness and the reasoning has to survive being forgotten
   repo look like *"measured: eight codes plus two devices reported as 10, in the
   direction that suppresses the warning"* — not *"count the backup codes"*.
 - **If you could not verify something, say so.** A sentence admitting a fact is
-  unconfirmed is worth more here than a confident guess. `CLAUDE.md` has a table
+  unconfirmed is worth more here than a confident guess. `DECISIONS.md` has a table
   of six times a plausible guess turned out to be wrong.
 - **No absolute paths anywhere**, in code or tests. Anchor on
   `conftest.REPO_ROOT`. Four tests once hardcoded one checkout and passed on
@@ -119,8 +200,7 @@ The rest:
 | `src/passbook/web/` | the JSON API; the UI is a front end over `service.py`, never a second implementation |
 | `frontend/` | React 19 + Vite, build-time only — no Node in the runtime image |
 | `scripts/` | fixture generation, screenshots, setup, backups, DR drill |
-| `SPEC.md` | what gets built, and why each decision was made |
-| `CLAUDE.md` | how to work here |
+| `DECISIONS.md` | what gets built, and why each decision was made |
 
 The user-facing docs are [`SETUP.md`](SETUP.md) and, under `docs/`,
 [`usage.md`](docs/usage.md), [`backups.md`](docs/backups.md) and
@@ -244,7 +324,7 @@ point of this machinery is that nobody has to find out from a broken ledger.
 - If you changed the shape of stored data, ship a migration
   (see below) — users pull, and a migration
   nobody runs is a broken ledger.
-- If reality contradicted `SPEC.md`, update `SPEC.md` in the same PR and say
+- If reality contradicted `DECISIONS.md`, update `DECISIONS.md` in the same PR and say
   what moved. A stale spec is worse than no spec.
 
 ## Reporting a bug

@@ -5,11 +5,6 @@ contact_links:
     about: >-
       Report privately, never in a public issue. This project handles bank
       statements, so a public write-up is an exploit anyone can copy.
-  - name: Adding your bank
-    url: https://github.com/shubh-garg18/passbook/blob/main/docs/adding-a-bank.md
-    about: >-
-      The whole job, start to finish. You do not need Docker or a Firefly
-      instance to write a new bank dialect.
   - name: Firefly III itself
     url: https://github.com/firefly-iii/firefly-iii/issues
     about: >-

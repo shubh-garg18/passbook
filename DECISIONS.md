@@ -1,17 +1,16 @@
-# passbook — Canara Bank → Firefly III ingest pipeline
+# passbook — design decisions
 
-**Version:** 8.0 — Phase 15: the public release (§22)
-**Target environment:** Docker Desktop on Windows, macOS or Linux — one machine,
-one operator, everything bound to `127.0.0.1`. Docker Engine inside WSL2 is the
-author's own setup and stays documented as an alternative (D8).
-**Status:** Phases 1–4, 6, 7, 9–15 complete. Phases 5 and 8 not started.
+Every section here is a thing that was plausible, built, and then measured. The
+ones that turned out wrong are kept, with what the measurement said, because a
+decision log that only records the correct answers teaches nothing about which
+answers to distrust.
 
-> **Figures in this file come from `tests/fixtures/statement.xls`**, never from a
-> live ledger — CLAUDE.md non-negotiable 14, enforced by `make audit-docs`. The
-> fixture is a real export with its metadata, narrations and amounts rewritten
-> and its balance chain recomputed, so every count and every shape below is the
-> bank's; only the values are synthetic. Where a lesson needs a magnitude, it is
-> stated as a ratio.
+Figures come from `tests/fixtures/statement.xls`, never from a live ledger —
+enforced by `make audit-docs`. Where a lesson needs a magnitude, it is stated as
+a ratio.
+
+**Status:** Canara, SBI and Union parse. Every page is in the browser; the
+CLI is there when you want it.
 
 > **v8.0 changelog.** §22: the repository becomes public. Documentation is
 > scrubbed of live-ledger values and the rule is enforced by a test rather than
@@ -93,7 +92,7 @@ author's own setup and stays documented as an alternative (D8).
 > tests and **never looked at**; screenshotting every page found five plan
 > failures and five defects the plan never anticipated, the worst being that
 > the Payees page truncated every category value to five characters. All fixed.
-> CLAUDE.md gains a standing rule: *tests cannot see*. Caddy joins the stack on
+> the working notes gain a standing rule: *tests cannot see*. Caddy joins the stack on
 > `127.0.0.1:80` routing `passbook.localhost` and `khata.localhost` by Host,
 > with `auto_https off`; D9 updated for the third listener. PWA manifest and
 > maskable icons drawn from the Day Rail. Motion, toasts and skeletons added;
@@ -395,8 +394,8 @@ passbook/
 ├── Dockerfile                # the only image we build, §16
 ├── pyproject.toml            # uv-managed
 ├── README.md
-├── CLAUDE.md
-├── SPEC.md
+├── CONTRIBUTING.md
+├── DECISIONS.md
 ├── config/
 │   ├── rules.yaml            # starts empty — populated from `passbook payees`
 │   ├── bills.yaml            # operator fills in
@@ -1326,7 +1325,7 @@ Widened in v2.0 — the real statement carries more PII than v1 assumed.
   found this by deliberately restoring under a different role. Archives taken
   before this change still need a role of that name.
 - **Source lives off-machine too.** `config-*.tar.gz` holds four yaml files;
-  `SPEC.md`, `CLAUDE.md` and `src/` are not in it and must not be stuffed into
+  `DECISIONS.md`, `CONTRIBUTING.md` and `src/` are not in it and must not be stuffed into
   it. A git remote is the fix. Document that backups are plaintext
   financial history living only on this laptop.
 - README warning: no HTTPS, no auth beyond Firefly's own login. Never expose
@@ -1615,7 +1614,7 @@ that would end up managing a modal.
 balance invariant. The CLI does everything it did before.
 
 **Money crosses the boundary as a decimal string, never a JSON number.** A JSON
-number is an IEEE double the moment `JSON.parse` sees it, and CLAUDE.md's first
+number is an IEEE double the moment `JSON.parse` sees it, and the project's first
 non-negotiable does not stop at the process boundary. The client groups the
 digits itself (`lib/money.ts`) and never calls `Number()` on an amount.
 
@@ -1999,7 +1998,7 @@ with a throwaway credential injected in memory — `config/web-auth.json` is
 never read or written. Output goes to `docs/shots/<tag>/`, **gitignored**: the
 shots render real payees and balances, so they are statement data under §11.
 
-CLAUDE.md carries the standing rule: *any change to rendered UI must be
+CONTRIBUTING.md carries the standing rule: *any change to rendered UI must be
 screenshotted and looked at before it is reported done.*
 
 #### Against the Phase 10 plan
@@ -2645,7 +2644,7 @@ the sweep is the ordering — the largest category arrives first. The hatched
 excluded part is delayed 220ms behind the counted part, so the eye reads the
 figure before the caveat.
 
-Per CLAUDE.md, a static screenshot cannot see any of this, and `shoot.py`
+Per CONTRIBUTING.md, a static screenshot cannot see any of this, and `shoot.py`
 actively waits for loading to finish. Observed with `scripts/motion.py` against
 the shipped bundle:
 
@@ -3324,7 +3323,7 @@ forever. So the rule is stated once and enforced by a test.
 > report to the operator, in a terminal, or in a gitignored file. Never in
 > something git tracks.
 
-CLAUDE.md carries it as non-negotiable 14, with the fixture's whole vocabulary
+CONTRIBUTING.md carries it as non-negotiable 14, with the fixture's whole vocabulary
 tabulated so there is one obvious answer to "what number do I write here".
 
 **`tests/test_docs.py`, also `make audit-docs`.** It reads **prose, not program
@@ -3541,7 +3540,7 @@ have been dumped into the manual fallback with no explanation.
 So: the prompt says 16, the failure is read out of Firefly's own `alert-danger`
 block and shown verbatim, and the user is asked again rather than abandoned.
 `tests/test_setup_wizard.py` pins both the minimum and the parsing. This is the
-same shape as every other entry in CLAUDE.md's "verify, don't recall" table: the
+same shape as every other entry in the project's "verify, don't recall" table: the
 belief was plausible, the failure was silent, and one measurement settled it.
 
 #### Docker is diagnosed per machine, not described in general
@@ -3618,6 +3617,13 @@ one mechanism that keeps a pulled migration from breaking their ledger.
 
 ### 22.5 The bank registry
 
+> **Superseded by §23.** The `Bank` value object described here shipped and was
+> right about its invariants — every one of them survives — but wrong about its
+> seam: a bank was a *Python module*, so adding one meant either writing Python
+> or sending somebody your statement. §23 replaces the module with a YAML
+> profile the operator writes from the browser. This subsection stays because
+> its four decisions are why the replacement is shaped the way it is.
+
 Phase 14 put `bank` in the account registry from day one and supported exactly
 one value. Publishing makes that field's promise real, because "I bank with
 HDFC" is the first thing a stranger will say.
@@ -3649,7 +3655,7 @@ Four decisions worth recording:
   the registry. A second hardcoded list is the drift shape this project has been
   bitten by three times (§9).
 
-`docs/adding-a-bank.md` is the whole job in one page: the interface, the
+A contributor guide covered the whole job in one page: the interface, the
 magic-byte sniffer, the registry's `bank` field, the continuity invariant a new
 dialect must satisfy, how to build a redacted fixture, and the five tests a PR
 needs. `tests/test_banks.py` registers a complete second dialect in nine lines
@@ -3743,3 +3749,576 @@ now does.
   `.env.example`, `docker-compose.yml`'s `${FIREFLY_HOST_PORT:-8080}`,
   `config.py`'s default and `test_stack.py`'s fallback all say 8080, and
   `preflight` warns when it is held. That is a code audit, not a bind.
+
+---
+
+## 23. A bank is a YAML file, not a Python module
+
+§22.5 made "adding a bank" one new file instead of a fork, and that was a real
+improvement over a hardcoded dialect. It was still the wrong seam, and the
+reason is the question that page opened with:
+
+> **Whose statement does anyone need to see?**
+
+Under §22.5 the answer was *somebody's*. A person who banks with HDFC and does
+not write Python had exactly two options: learn enough Python to write a `Bank`
+value against a file format they cannot describe, or send their statement — with
+their account number, address, customer ID and every counterparty they have paid
+— to a stranger on the internet so that stranger could write it for them. The
+project's own privacy rule (non-negotiable 7, "never suggest uploading a
+statement to an online converter") applied to everyone except the one person
+being asked to contribute.
+
+So the answer is now **nobody's**.
+
+### 23.1 What a profile is
+
+Six column headings, the label printed beside the account number, and a date
+format. `config/banks/<slug>.yaml`:
+
+```yaml
+bank: union
+columns:
+  "Date": date
+  "Chq": txn_id
+  "Particulars": narration
+  "Withdrawal": debit
+  "Deposit": credit
+  "Balance": balance
+metadata:
+  "Account Number": account_number
+  "IFSC": ifsc
+dates: ["%d-%m-%Y"]
+```
+
+Keys are matched **tolerantly** — case, spaces and punctuation are stripped
+before comparison — so `Ref No./Cheque No.` also matches `REF NO / CHEQUE NO`.
+Banks change capitalisation between exports and nobody should have to chase it.
+
+**A profile cannot soften a check.** It says where the columns are. The
+balance-continuity invariant, the `Decimal` handling and the duplicate-id check
+are the same code for every bank, and `from_rows` is still the one function no
+bank may replace. That is unchanged from §22.5 and it is what makes shipping
+defaults safe: a stale profile refuses loudly rather than importing something
+wrong.
+
+### 23.2 Where profiles come from, and which one wins
+
+Three layers, and the order matters:
+
+| | |
+|---|---|
+| built-in Canara aliases | in `loaders/_table.py`, the default when nothing else names a field |
+| `src/passbook/banks/*.yaml` | ships with the install — Canara, SBI, Union |
+| `config/banks/*.yaml` | the operator's own, and **wins on a name clash** |
+
+A shipped profile is a **good default and never a constraint**. When a bank
+re-skins its export, the operator fixes it once on *Add a bank* and their
+version takes over — nobody waits for a release. This is also why
+`supported_banks()` resolves through `known_banks()` on every call rather than
+being a constant: a profile dropped into `config/banks/` is picked up without a
+restart, which is the whole point of a profile.
+
+A broken profile makes **that** profile fail, not every bank: `supported_banks()`
+swallows `ProfileError` and the parser raises it loudly at the point it actually
+matters. A YAML typo must not make a working install claim it supports nothing.
+
+### 23.3 PDFs, for any bank
+
+The §22.5 reader was Canara-specific because it matched on Canara's headings.
+`loaders/pdf_table.py` recovers the columns from **where the words sit on the
+page**, so a password-protected PDF — which is what most Indian banks hand out —
+is read the same way a spreadsheet is.
+
+Three things that had to be learned, each of which looked right and was not:
+
+* **A figure does not line up with its heading.** Only if the bank
+  right-aligns both. Union *centres* its headings, 13–45 points from their own
+  data. Column edges are **learned from the values**, not from the header.
+* **Clustering the x-positions chains.** Single-linkage on a sparse column
+  swallowed the neighbouring one. A column start is where *many* rows begin a
+  word — count first.
+* **One page of test data is not enough.** Repeated page headers sit at the
+  heading positions with offset zero and beat everything else. Six pages showed
+  it; one never could.
+
+`tests/fixtures/{centred_headings,declared_columns,straddled_narration}.py`
+reconstruct these layouts **from a geometry dump, not from a statement**: the
+coordinates are measured and every character is invented, which is enough to
+reproduce the bugs because the bugs are made of geometry.
+
+### 23.4 Banks that print no reference number
+
+Union's `Chq` column is blank on every UPI and NEFT row, which is most of them.
+`external_id` needs a per-row key that is stable across re-downloads, so those
+rows get one **derived from the row itself** — a hash of the whole row, prefixed
+`d-`. It is automatic and the profile does not have to ask for it; the Add-a-bank
+page carries a checkbox and the caveat is written on the checkbox rather than
+hidden in a tooltip.
+
+`_NAMESPACED` had to learn the second form. It accepted 14 digits only, so
+`union-2222-d-0f4b…` matched nothing and every read of it was wrong in a
+different way — `slug_of` said `None`, `txn_id_of` handed back the whole
+namespaced string, and `verify-ledger` reported every row as carrying "the
+bank's bare id" and told the operator to run a migration that had already been
+run. **A red cross for something that is fine is the same failure as a green
+tick for something that is not** (non-negotiable 11).
+
+### 23.5 Helping without seeing anything
+
+`scripts/probe.py` prints the whole document as coordinates and token shapes —
+`92-92-94@50.0-91.9` for a date, `A5` for a payee — and **audits its own output,
+refusing to print if a single word of the source survives into it.** Two account
+numbers of the same length are identical in it and there is no way back.
+
+That is not a nicety. It is how the last four bugs in the PDF reader were found,
+on a file the author was never permitted to open, and it is what a maintainer
+should ask for in an issue instead of a statement. `.github/ISSUE_TEMPLATE/new-bank.yml`
+asks for it by name and requires a tick confirming no statement is attached.
+
+### 23.6 What this cost, and what it did not
+
+`src/passbook/banks/__init__.py` and `banks/canara.py` are gone — 324 lines of
+registry and dialect replaced by two YAML files and a loader that reads them.
+`tests/test_banks.py` is replaced by `test_builtin_banks.py`, which loads every
+shipped profile and checks it parses, names only real fields, and does not
+collide with another bank.
+
+**Detection by content survived the swap.** §22.5's rule was that `detect(rows)`
+is asked of every bank and exactly one must answer, so a statement moved into the
+wrong folder cannot change how it is read. A profile keys on header text, which
+is the same idea reached from the other side.
+
+**The value-object argument survived too**, and is now structural rather than a
+convention: a YAML file *cannot* override `from_rows`, because YAML cannot
+override anything. The thing §22.5 asked contributors not to do is no longer
+expressible.
+
+### 23.8 No documentation page
+
+The port arrived with a guide — the terminal path, the browser path, a worked
+example, a troubleshooting table. The operator's objection to it was blunt and
+worth recording verbatim:
+
+> *"I don't think adding a bank is possible without giving an actual statement
+> to you and writing a parser specifically, as all PDFs are different."*
+
+The first half is **false here and measured**: `union.yaml` and `sbi.yaml` were
+both written without anyone reading the statement, from a `probe.py` geometry
+dump (§50, §53), and the balance chain is what confirmed them. The second half
+is **true, and is the reason the design works** — every bank's PDF *is*
+different, which is exactly why `pdf_table.py` recovers columns from where the
+words sit rather than from a per-bank parser.
+
+But the objection lands somewhere real. A guide that walks a stranger through
+mapping columns is a guide that implies mapping columns is hard, and a page
+somebody has to read in another tab **before** the screen makes sense is an
+admission that the screen does not. So the guide is gone and the screen carries
+its own instructions.
+
+What this costs: the `probe.py` escape hatch and the contribute-it-back path are
+now only in `src/passbook/banks/README.md` and the issue template rather than on
+a page of their own. That is the right trade — those two are for the rare case,
+and the common case is a person with their own file who needs six dropdowns and
+a verdict.
+
+**The rule this sets:** a feature whose only door is a documentation page has
+the wrong door. Every reference that pointed at the guide now points at
+*Account menu → Add a bank*, including the `RegistryError` a user actually hits
+when their bank is unregistered.
+
+### 23.7 Definition of done
+
+- [x] `config/banks/*.yaml` and `src/passbook/banks/*.yaml`, the operator's
+      winning on a clash.
+- [x] Canara, SBI and Union parse; `supported_banks()` reads
+      `('canara', 'sbi', 'union')`.
+- [x] `passbook inspect` prints the grid as `repr()` and names the fields it
+      could and could not match.
+- [x] `POST /api/banks/try`, `/api/banks`, `/api/banks/inspect`, and the
+      Add-a-bank page behind **Account menu → Add a bank** — a route with a door.
+- [x] The balance chain is the judge, unchanged, for every bank.
+- [x] Three synthetic layout fixtures, reconstructed from geometry.
+- [x] **No documentation page.** §23.8 — the screen carries its own
+      instructions, and every reference that pointed at a guide now points at
+      the screen. None of them asks anyone for a statement.
+
+---
+
+## 24. A payee edit reaches the ledger
+
+Renaming a payee wrote `config/`, synced the rules to Firefly, and stopped. The
+ledger kept the names it was pushed with.
+
+It is worth being precise about why, because "config applies at push time" is
+true and was never the real obstacle. There **was** a reconciliation step:
+`/reapply/run` — back up, **delete every row on the account**, re-push every
+archived statement, verify. Correct, tested, and gated on a database dump taken
+within the hour, because it deletes.
+
+Nobody deletes a ledger to correct a payee name. So the step existed, was
+correct, and was never taken.
+
+### 24.1 The measurement that reframed it
+
+Before any of this was built, the existing preview was asked what it thought.
+It answered **"All 0 transactions already match. Nothing to do."**
+
+Zero was not the number of rows that matched. It was the number of rows
+**compared**. `reapply_preview` built its lookup keyed on the namespaced
+`external_id` that §21.1 introduced —
+
+```python
+live[split["external_id"]] = split          # "canara-1111-20260509000001"
+...
+current = live.get(txn.txn_id)              # "20260509000001"
+```
+
+— and looked it up with the bank's bare id. The two never matched, for any row,
+and the page reported it in green.
+
+**This shipped in passbook.** It was found by porting the fix and running the
+existing code against it, not by reading either.
+
+The join is now `_match`, which tries the namespaced form first and the bare form
+second — a ledger can hold rows from both sides of the §21.2 migration, and this
+is one asset account's transactions, so a bare-id *fallback* cannot reach across
+accounts the way a bare-id *key* did. And `considered` is returned alongside the
+changes, because **zero compared is an unanswered question, not a pass**
+(non-negotiable 11). The CLI exits 7 on it and the page renders `NothingCompared`
+in ochre with no button, because an update is not the remedy for a ledger nobody
+could read.
+
+Both halves are pinned by a parametrised test over the two id forms. Reverting
+`_match` to the bare-id lookup fails 5 of the 20 — measured, because a
+regression test that cannot fail is not one.
+
+### 24.2 The update, verified against the validating code
+
+A rename changes three fields on rows that already exist, so it does not need
+them deleted. It needs `PUT /api/v1/transactions/{group}`.
+
+Read off the pinned tag (v6.6.6), not remembered:
+
+* **The update is sparse.** `UpdateRequest::getTransactionData()` starts each
+  split from `$current = []` and copies only the keys the request carries.
+  Omitting `amount`, `date` and `type` leaves them untouched — which is the only
+  reason a rename cannot corrupt a ledger. The fields that carry money are not
+  in the request.
+* **`validateJournalIds` returns early** for fewer than two splits, so a
+  single-split group needs no `transaction_journal_id`.
+* **`category_name: ""` clears the category** rather than creating one named
+  empty. Global `ConvertEmptyStringsToNull` makes it null and
+  `CategoryRepository::findCategory` guards its create branch with
+  `'' !== (string) $categoryName`. D10 holds — no category is invented.
+* **`tags` replaces, it does not append.** `JournalServiceTrait::storeTags`
+  syncs, so an omitted tag is a deleted tag. The whole list is sent, built to
+  carry the row's *unmanaged* tags through untouched.
+
+`apply_rules` is deliberately **false**: the rules engine produced the categories
+being corrected, and letting it run on the way in would let a stale rule
+overwrite the value the call was made to write.
+
+### 24.3 What it cannot do, said out loud
+
+An update cannot create a row that is missing from the ledger, and cannot correct
+an amount or a date — those come from the statement. So the destructive rebuild
+stays, demoted into a `<details>` rather than removed, and the page says which
+problem each one solves. Whatever is left over is **re-read from the ledger**
+afterwards and reported: `updated` is a claim about requests, `remaining` is a
+claim about the ledger, and only the second may make `ok` true. A re-read that
+itself fails yields `remaining: null` — *unverified*, the third state, which
+never renders as a pass.
+
+### 24.4 A rename carries its category with it
+
+Rules match the **display name** — `description_starts: Canteen` against a
+description pushed as `Canteen (UPI)`. So relabelling a payee moves the
+description out from under its own rule and the row silently loses the category
+the operator had already chosen. Measured in the private repo this is released
+from: alias `Canteen` → `Mess` left `payees: [Canteen]` in place, and
+`predict_category('Mess (UPI)')` returned `''`.
+
+`plan_categories(..., renames=...)` follows the rename through `rules.yaml`, in
+the **same plan** as the categorisation — two plans over one file do not compose,
+because each diffs against the text on disk and applying both would leave
+whichever ran last. Entries are rewritten in place, so each keeps its position
+and its comment.
+
+This is not D10 being relaxed. Nothing is inferred: the classification already
+exists and the operator has only relabelled the thing it is attached to.
+Dropping it would discard a decision, not withhold a guess.
+
+The stale-tag half is the same shape. `add_tag` cannot un-tag, so renaming a
+payee into an earnings source leaves `not-earnings` behind — and a stale
+`not-earnings` is not cosmetic: non-negotiable 9 excludes those deposits from
+earnings, so the total silently reads low. `predict_tags` reconciles the managed
+tags; `reversal` and `large-oneoff` are carried through, never predicted.
+
+### 24.5 Where it appears
+
+Editing a payee now writes the rows in the **same request**: rules first, then
+the ledger, same order as a push and for the same reason. The toast reports what
+the ledger said rather than what the write attempted — a green "Written" over a
+run that half failed is the tri-state lie again.
+
+`passbook resync` is the same thing from a terminal, dry-run by default.
+
+### 24.6 No migration, deliberately
+
+r2 changes no stored shape: `config/*.yaml` is untouched and nothing in the
+ledger is rewritten without the operator pressing a button. So `make upgrade`
+gains nothing here and none is shipped.
+
+What a user pulling this **will** notice is that Re-apply stops saying "all
+match". That is §24.1 being fixed, not new drift: the rows were always different
+and the page could not see it. The first run may report a large number, and the
+remedy is the button now next to it.
+
+### 24.7 Definition of done
+
+- [x] `_match` tries both `external_id` forms, tested parametrised over each,
+      and the pre-fix lookup demonstrably fails 5 of the 20.
+- [x] `considered == 0` is never rendered or exited as a pass — CLI exits 7,
+      the page renders `NothingCompared`, `ok` requires `remaining == 0`.
+- [x] The sparse update verified against the pinned tag's validating code;
+      `amount`, `date`, `type`, `external_id` and `notes` are not in the request.
+- [x] Renaming a payee keeps its category, comment included.
+- [x] Managed tags reconciled; unmanaged tags survive a sync.
+- [x] Every count re-read from the ledger after the write, never inferred.
+- [x] `/reapply/run` unchanged in behaviour and still dump-gated.
+- [x] 24 new tests, fixtures only. `/reapply` and `/reapply/sync` covered as
+      **routes** — the missing `_change` helper was a 500 that every
+      service-level test passed straight through.
+- [x] Both themes and both widths shot with rows on the page, against an
+      in-memory ledger rather than a real one.
+
+---
+
+## 25. The registry, from the browser
+
+Registering an account, naming it and removing it were CLI-only. That put the
+registry behind a terminal on the one screen where a wrong value is
+**permanent**: the slug namespaces every `external_id` the account will ever
+push (§21.1), so it is immutable once rows exist.
+
+Six routes and two pages, and the interesting parts are the refusals.
+
+### 25.1 The account number is read, never typed
+
+`POST /accounts/inspect` takes the statement and reads the account number out of
+it. One digit typed wrongly would give the account its own `external_id`
+namespace and its own ledger — silently, permanently, and looking exactly like a
+working install until the totals were compared against the bank.
+
+So the number is never an input. The operator confirms a masked value they can
+check against their own file, and the slug is derived.
+
+### 25.2 A name is a decision; a default is not
+
+`display` used to fall back to the **Firefly asset account's name**, which is a
+string chosen in another application for another purpose: it can be anything, it
+can be the same for two accounts until Firefly refuses, and on a fresh install it
+is often just "Checking Account". It is now `Canara ****1111` — bank plus last
+four, the one label that can never name two of these and never needs explaining.
+
+`renamed` travels with the summary so the rename field can show the current name
+without **pre-filling one nobody chose**. Pre-filling a default turns "name this"
+into "edit this", and the operator then has to delete a string they never wrote.
+
+### 25.3 Removing an account says what it is about to stop managing
+
+`GET /accounts/<slug>/removal` reports the rows in the ledger and the files in
+`archive/` before anything happens, and `ledgerRows` is `None` — not `0` — when
+the store could not be asked, with `countReason` saying why. Zero rows and an
+unanswerable question are different facts, and rendering the second as the first
+is non-negotiable 11 in a new place.
+
+Removal takes the account out of the registry. It **deletes nothing** — not the
+ledger rows, not the archive — because a registry entry is a statement about
+what passbook manages, and un-managing is not the same as destroying. What it
+does mean is that those rows stop being reconciled, which is why the count is on
+screen before the button.
+
+### 25.4 Definition of done
+
+- [x] `PATCH /accounts/<slug>` renames; the label is bounded and the bound is
+      stated in the error rather than truncating silently.
+- [x] `GET /accounts/<slug>/removal`, `DELETE /accounts/<slug>` — with the row
+      count, and `null` where it could not be counted.
+- [x] `GET /accounts/candidates`, `POST /accounts/asset`,
+      `POST /accounts/inspect`, `POST /accounts`.
+- [x] `Accounts` and `AddAccount` pages, reachable from **Account menu →
+      Accounts** — which is also the door §23's Add-a-bank page needed.
+- [x] The account number is read from the statement on every path. There is no
+      field for it.
+- [x] Both themes, both widths, looked at.
+
+---
+
+## 26. The window
+
+Every figure answered "over what period" with "everything ever archived", which
+is the one window nobody asks about. A named range (`month`, `last-month`, `3m`,
+`6m`, `year`, `all`) or an explicit `from`/`to`, resolved **server-side** and
+echoed back, so the client renders the scope the server used rather than the one
+it asked for.
+
+Three refusals worth keeping:
+
+* **An explicit `from`/`to` beats a named range**, so a custom window survives a
+  reload and a shared URL.
+* **An unparseable date is ignored, not rejected.** A hand-edited URL should
+  show the ledger, not an error page.
+* **Reversed dates are ordered, not refused.** A date picker can produce them,
+  and an empty result would look like no data.
+
+### 26.1 A split's date is cut, never parsed
+
+Firefly returns an ISO-8601 *datetime with an offset*
+(`2026-08-24T00:00:00+05:30`). The window is a range of calendar days in the
+operator's own timezone, so the string is cut at the `T`. Parsing it into a
+datetime only to drop the time again invites a timezone shift that would move a
+midnight transaction into the previous day — silently, and only for the rows
+that sit at a boundary.
+
+### 26.2 Coverage is the declared period, not the rows
+
+`archived_coverage` reads the statement's own declared period. Deriving it from
+transaction dates instead would let a quiet fortnight at the start of a range
+shorten the month and mark it partial — reporting an absence of spending as an
+absence of data.
+
+`archived_transactions` and `archived_coverage` both read the archive directly.
+That is deliberate for now: **the signature is the contract**, so a cache can
+replace either body later without a single caller learning about it.
+
+---
+
+## 27. Every row, searchable
+
+The page passbook never had, and the last routine reason to open Firefly.
+
+**Two sources, each authoritative for what it carries.** Money, category and
+tags come from the ledger, because the rules engine assigns the category at
+store time (D5). The clock and the raw narration come from the statement,
+because `txn_time` is parsed out of the narration (§6.5) and is never pushed.
+The join is on the namespaced `external_id`, tolerating the bare form — the same
+`_match` discipline as §24.1, and for the same reason.
+
+**There is deliberately no running balance.** §16.4 refuses one on any view that
+can be filtered or reordered, and this view is nothing but filtering and
+reordering: a Balance column over a search result asserts a continuity that is
+not there, and the balance chain is the spine of this project. The statement
+sheet keeps its balance column; this does not get one.
+
+Filters: a text search over payee, category, amount and the bank's own
+narration; direction; category; tag; a size band; and a sort. The size band and
+the sort are applied **after** the text search, so the count in the caption
+reports the same thing either way.
+
+### 27.1 Definition of done
+
+- [x] `GET /transactions`, scoped by account and by window, paged.
+- [x] The clock joined from the archive, on both `external_id` forms.
+- [x] No balance column, anywhere on the page.
+- [x] A nav item rather than a menu entry — four items, still under the six
+      that once made the nav a list to read.
+- [x] Both themes, both widths, shot against an in-memory ledger holding the
+      fixture's rows.
+
+---
+
+## 28. Two palettes, and the reports they made possible
+
+### 28.1 The ramp could not say "which"
+
+§18.4 gave charts **one ink at five densities, ordered by magnitude**, and was
+right about the discipline it was protecting: a palette where every colour means
+something is a palette a reader can trust. But ten categories separated only by
+density are ten shades of the same answer. The chart could say *how much* and
+never *which*.
+
+So there are two palettes now, and **which one a mark uses is a question about
+the mark**:
+
+| | |
+|---|---|
+| `--cat-1..8` | **identity** — a category, a payee, an account |
+| `--ramp-1..5` | **rank or magnitude** — one series measured over time |
+
+The Day Rail keeps the ramp, because it is one series. The category bars take
+the wheel, because an excluded category is still a category.
+
+### 28.2 What did not change
+
+The half that was never aesthetics:
+
+* **`--stamp` acts, `--ochre` asks, `--verdigris` reconciles, `--alarm`
+  failed.** No chart mark may wear those, and no theme may redefine them. Tests
+  enforce the second half.
+* **Money is never coloured by sign.** The month pair is series identity;
+  red/green would be a verdict on the operator's spending.
+* **Every hue is measured.** 3:1 against its card for a graphical object (WCAG
+  1.4.11), 4.5:1 wherever text sits on it.
+
+Two things were learned the hard way and are written into the tokens:
+
+**Vivid is high chroma AND high lightness; pastel is high lightness and LOW
+chroma.** Every earlier attempt moved lightness and left chroma alone, which is
+why "brighter" kept arriving as "more washed out".
+
+**Contrast is not saturation, and both get measured.** A set cleared 5.83:1 and
+still looked washed out, because only the first had ever been checked. Deeper is
+not darker either: a hue dark enough to read as dark on a near-black card cannot
+be seen on it.
+
+The light set is **not a tint of the dark one** — the same eight hue positions
+re-derived for a light ground, so `--cat-4` is the same category slot in both
+and a reader switching themes does not relearn the chart.
+
+### 28.3 Reports
+
+Five views over one analysis: by category, by payee, by tag, over time, and the
+rhythm of the week and the hour. Firefly ships these as separate report screens;
+they are one shape — *a thing, and what it is made of* — so they are one page
+with a control rather than five destinations.
+
+Every figure comes from `service.ledger_analysis`, which applies §8/§8.1. That
+is not a convenience: non-negotiable 9 exists because the naive by-type reading
+of a real ledger was three times the true spend, and a reports page is precisely
+where that error would look most authoritative.
+
+### 28.4 The identity that came with the port
+
+The component tree was taken wholesale from the private repository this one is
+released from, and it arrived carrying **that operator's brand** — the masthead
+name, the theme labels, and the `localStorage` key. All four are now passbook's
+own.
+
+This is the same rule as §22.1, one step further out: a public repository must
+not carry the private one's *figures*, and it must not carry its *identity*
+either. `make audit-docs` catches the first automatically. The second is a human
+check, and this is the record that it has to be made every time a page crosses.
+
+### 28.5 Two guards that caught real drift
+
+* **The browser chrome did not match the header.** `theme_color` in the web
+  manifest was a grey from four phases earlier, so the installed window opened
+  with a strip of the wrong colour above the cover. A test compares it to
+  `--board`, and generated assets are exactly the things that do not update when
+  a palette does.
+* **The second door was still open.** `Caddyfile` still served the ledger store
+  on its own hostname. One app, one door — the store is a service, not a page.
+
+### 28.6 Definition of done
+
+- [x] `--cat-1..8` in both themes, light re-derived rather than tinted.
+- [x] Chart components: bars, stacks, donut, balance line, month columns,
+      category heat, weekday and hour rhythm.
+- [x] Reports, at `/reports`, with five views and the window.
+- [x] The Ledger page rebuilt on the same palette.
+- [x] Signal tokens are not chart inks, and a theme cannot redefine them.
+- [x] Brand, theme names and storage key are passbook's.
+- [x] Both themes, both widths, looked at.
+

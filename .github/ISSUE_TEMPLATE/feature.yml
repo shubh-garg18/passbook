@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Some things are **deliberately not built**, and SPEC.md says why. Worth
+        Some things are **deliberately not built**, and DECISIONS.md says why. Worth
         a look before writing:
 
         - **Automatic bank sync** — India's Account Aggregator framework is

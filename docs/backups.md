@@ -1,6 +1,6 @@
 # Backups and recovery
 
-[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · [Usage](usage.md) · **Backups** · [Operations](operations.md) · [Add a bank](adding-a-bank.md)
+[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · [Usage](usage.md) · **Backups** · [Operations](operations.md)
 
 > **These four are the ones with no native-Windows equivalent** — they are shell
 > scripts that source `.env` and drive `pg_dump`. Run them from WSL2, or from
