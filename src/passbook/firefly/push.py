@@ -1,6 +1,6 @@
 """Build and post transaction payloads. SPEC §7.2.
 
-**Verified against the running instance (v6.6.6), not from memory.** CLAUDE.md
+**Verified against the running instance (v6.6.6), not from memory.** CONTRIBUTING.md
 requires this; the instance serves no OpenAPI document at any path, so the
 shape was read from the code that actually validates the request:
 

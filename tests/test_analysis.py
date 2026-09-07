@@ -1,10 +1,10 @@
 """The exclusion semantics, pinned. SPEC §18, §8, §8.1.
 
 `service.ledger_analysis` is the one place that decides what counts as spend and
-what counts as earnings. Getting it wrong is not a rounding error. Measured on
+what counts as earnings. Getting it wrong is not a rounding error: measured on
 one real three-month ledger, the naive by-type reading was **three times** the
-true spend and **1.6 times** the true earnings — and a chart drawn on the naive
-numbers looks entirely reasonable. So every branch of the rule gets a test.
+true spend and **1.6 times** the true earnings, and a chart of the naive numbers
+looks entirely reasonable. So every branch of the rule gets a test.
 
 No network: the function takes Firefly's split dicts as data, which is the whole
 reason it takes them as data.
@@ -24,7 +24,7 @@ from passbook import service
 # configured anywhere.
 RULES = {
     "rules": [
-        {"category": "Morning Stall", "tag": "food"},
+        {"category": "Day Canteen", "tag": "food"},
         {"category": "Eating Out", "tag": "food"},
         {"category": "Shopping"},
         {"category": "Investments"},
@@ -113,7 +113,7 @@ def test_an_opening_balance_is_neither_spend_nor_income():
     the bank made — `purge` excludes it structurally for the same reason (§7.3)."""
     result = service.ledger_analysis(
         [
-            split("opening balance", "10000.00"),
+            split("opening balance", "12612.64"),
             split("withdrawal", "65.00", category="Shopping"),
         ],
         rules=RULES,
@@ -148,7 +148,7 @@ def test_a_rollup_totals_the_tag_and_lists_the_categories_that_carry_it():
     result = service.ledger_analysis(
         [
             split("withdrawal", "300.00", category="Eating Out", tags=("food",)),
-            split("withdrawal", "45.00", category="Morning Stall", tags=("food",)),
+            split("withdrawal", "45.00", category="Day Canteen", tags=("food",)),
             split("withdrawal", "999.00", category="Shopping"),
         ],
         rules=RULES,
@@ -160,7 +160,7 @@ def test_a_rollup_totals_the_tag_and_lists_the_categories_that_carry_it():
     assert rollup.count == 2
     assert [(p.name, p.amount) for p in rollup.parts] == [
         ("Eating Out", Decimal("300.00")),
-        ("Morning Stall", Decimal("45.00")),
+        ("Day Canteen", Decimal("45.00")),
     ]
     assert sum(p.amount for p in rollup.parts) == rollup.amount
 
@@ -237,7 +237,7 @@ def test_a_month_ending_one_day_short_is_still_partial():
 
 
 def test_every_amount_is_a_decimal_and_the_over_precision_is_quantised():
-    """Firefly sends `'48.000000000000'`. CLAUDE.md non-negotiable #1 does not
+    """Firefly sends `'48.000000000000'`. Non-negotiable #1 does not
     stop at the process boundary, so nothing here ever becomes a float."""
     result = service.ledger_analysis(
         [split("withdrawal", "48.00", category="Shopping")], rules=RULES
@@ -276,7 +276,7 @@ def test_not_spend_and_the_rollups_are_read_from_config_not_hardcoded():
     assert service.load_not_spend({"not_spend": ["Nope"]}) == ["Nope"]
     assert service.load_not_spend({}) == []
     assert service.tag_rollups(RULES) == {
-        "food": ["Morning Stall", "Eating Out"],
+        "food": ["Day Canteen", "Eating Out"],
     }
     assert service.tag_rollups({"rules": [{"category": "X"}]}) == {}
 
@@ -358,3 +358,362 @@ def test_the_day_chart_only_plots_rows_that_count_as_spend(fixture_splits):
 
     assert sum(result.hours) == result.clocked <= result.counted
     assert result.counted < result.withdrawals, "some withdrawals are excluded movement"
+
+
+# --- §57: the balance path, the payee split, and category by month ----------
+
+
+def txn(txn_id: str, day: str, balance: str, *, debit=None, credit=None):
+    """One statement row. The balance is the BANK's running figure (§6.6)."""
+    from passbook.models import Transaction
+
+    return Transaction(
+        txn_id=txn_id,
+        txn_date=date.fromisoformat(day),
+        narration="x",
+        debit=Decimal(debit) if debit else None,
+        credit=Decimal(credit) if credit else None,
+        balance=Decimal(balance),
+    )
+
+
+def test_the_balance_path_is_the_banks_own_figure_never_accumulated():
+    """The whole point of §57's line: it reads balances, it does not add up.
+
+    A chart that accumulated debits and credits would be a second implementation
+    of the continuity invariant and would agree with it right up until it did
+    not — so the test feeds a chain whose movements do NOT reconstruct the
+    balances, and asserts the recorded figures win.
+    """
+    rows = [
+        txn("20260509000001", "2026-05-09", "1000.00", credit="1000.00"),
+        # A movement that does not explain the next balance. The bank's figure
+        # is still the answer.
+        txn("20260510000001", "2026-05-10", "7777.77", debit="1.00"),
+    ]
+    points, opening = service.balance_series(rows)
+    assert opening is None
+    assert [(p.day, p.balance) for p in points] == [
+        ("2026-05-09", Decimal("1000.00")),
+        ("2026-05-10", Decimal("7777.77")),
+    ]
+
+
+def test_a_day_collapses_to_its_closing_figure():
+    rows = [
+        txn("20260509000001", "2026-05-09", "900.00", debit="100.00"),
+        txn("20260509000002", "2026-05-09", "800.00", debit="100.00"),
+        txn("20260509000003", "2026-05-09", "750.00", debit="50.00"),
+    ]
+    points, _ = service.balance_series(rows)
+    assert len(points) == 1
+    assert points[0].balance == Decimal("750.00")
+
+
+def test_rows_out_of_order_still_close_the_day_correctly():
+    """`account_transactions` merges overlapping statements, so arrival order is
+    not sheet order. The id carries `YYYYMMDD` + a daily sequence (§6.1)."""
+    rows = [
+        txn("20260509000003", "2026-05-09", "750.00"),
+        txn("20260509000001", "2026-05-09", "900.00"),
+        txn("20260509000002", "2026-05-09", "800.00"),
+    ]
+    points, _ = service.balance_series(rows)
+    assert points[0].balance == Decimal("750.00")
+
+
+def test_a_window_keeps_the_last_balance_before_it_as_the_opening():
+    """Without this the first in-window transaction reads as the opening
+    balance, which it is not."""
+    rows = [
+        txn("20260501000001", "2026-05-01", "100.00"),
+        txn("20260520000001", "2026-05-20", "200.00"),
+        txn("20260610000001", "2026-06-10", "300.00"),
+        txn("20260720000001", "2026-07-20", "400.00"),
+    ]
+    points, opening = service.balance_series(
+        rows, start=date(2026, 6, 1), end=date(2026, 6, 30)
+    )
+    assert opening is not None
+    # The LAST one before the window, not the first.
+    assert (opening.day, opening.balance) == ("2026-05-20", Decimal("200.00"))
+    assert [p.day for p in points] == ["2026-06-10"]
+
+
+def test_an_empty_account_has_no_line_and_does_not_crash():
+    assert service.balance_series([]) == ([], None)
+
+
+def test_category_months_align_with_months_by_position_and_sum_to_the_category():
+    result = service.ledger_analysis(
+        [
+            split("withdrawal", "100.00", category="Shopping", when="2026-05-04"),
+            split("withdrawal", "40.00", category="Shopping", when="2026-07-09"),
+            split("withdrawal", "7.00", category="Eating Out", when="2026-06-02"),
+        ],
+        rules=RULES,
+    )
+    months = [m.month for m in result.months]
+    assert months == ["2026-05", "2026-06", "2026-07"]
+
+    by_name = {c.name: c for c in result.category_months}
+    # Zero-padded, so a month a category never appears in is a gap rather than
+    # a missing point that shifts every later one left.
+    assert by_name["Shopping"].amounts == [Decimal("100.00"), Decimal(0), Decimal("40.00")]
+    assert by_name["Eating Out"].amounts == [Decimal(0), Decimal("7.00"), Decimal(0)]
+
+    # Same order as `categories`, and the carried total matches — the client
+    # must never add these up itself (§16.1 forbids money through a float).
+    assert [c.name for c in result.category_months] == [s.name for s in result.categories]
+    for series, slice_ in zip(result.category_months, result.categories):
+        assert series.total == slice_.amount == sum(series.amounts)
+
+
+def test_an_excluded_category_never_reaches_the_month_grid():
+    """`not_spend` is movement, not spending (non-negotiable 9). It is absent
+    from `categories`, so it must be absent here or the two disagree."""
+    result = service.ledger_analysis(
+        [
+            split("withdrawal", "500.00", category="Investments", when="2026-05-04"),
+            split("withdrawal", "10.00", category="Shopping", when="2026-05-04"),
+        ],
+        rules=RULES,
+    )
+    assert [c.name for c in result.category_months] == ["Shopping"]
+
+
+def test_payees_and_sources_carry_the_exclusions_like_every_other_figure():
+    """Firefly's own expense/revenue report counts everything. This must not."""
+    rows = [
+        {**split("withdrawal", "500.00", category="Investments"), "destination_name": "Broker"},
+        {**split("withdrawal", "30.00", category="Shopping"), "destination_name": "Shop"},
+        {**split("withdrawal", "20.00", category="Shopping"), "destination_name": "Shop"},
+        {**split("deposit", "900.00", category="Salary"), "source_name": "Employer"},
+        {
+            **split("deposit", "50.00", tags=("not-earnings",)),
+            "source_name": "Self",
+        },
+    ]
+    result = service.ledger_analysis(rows, rules=RULES)
+
+    assert [(p.name, p.amount, p.count) for p in result.payees] == [
+        ("Shop", Decimal("50.00"), 2)
+    ]
+    # §72. Every deposit, including the not-earnings one — "who paid you" and
+    # "what did you earn" are two questions and only the second excludes. The
+    # operator found this: money from family was missing from a report headed
+    # "inside each source, what the money was booked as".
+    assert [(s.name, s.amount) for s in result.sources] == [
+        ("Employer", Decimal("900.00")),
+        ("Self", Decimal("50.00")),
+    ]
+    # Each side reconciles against the figure it belongs to, and they are
+    # deliberately different figures.
+    assert sum(p.amount for p in result.payees) == result.spend
+    assert sum(s.amount for s in result.sources) == result.gross_income
+    assert result.gross_income != result.income
+
+
+def test_net_is_the_change_in_the_balance_not_earned_less_spent():
+    """§62. The KPI card computed `income - spend` and captioned it "earned less
+    spent". Both of those already have movement removed, so their difference
+    counts nothing that moved — it read more than three times the balance's
+    actual movement over one window.
+    """
+    result = service.ledger_analysis(
+        [
+            split("withdrawal", "100.00", category="Shopping"),
+            # Movement: excluded from `spend`, but it really left the account.
+            split("withdrawal", "500.00", category="Investments"),
+            split("deposit", "900.00", category="Salary"),
+        ],
+        rules=RULES,
+    )
+    assert result.spend == Decimal("100.00")
+    assert result.income == Decimal("900.00")
+    # The tempting, wrong figure.
+    assert result.income - result.spend == Decimal("800.00")
+    # What the balance actually did.
+    assert result.net == Decimal("300.00")
+    assert result.net == result.gross_income - result.gross_spend
+
+
+def test_net_does_not_depend_on_which_categories_are_called_movement():
+    """`not_spend` is the operator's list and it changes (§62). `net` must be
+    the same figure either way, because the money moved either way."""
+    rows = [
+        split("withdrawal", "100.00", category="Shopping"),
+        split("withdrawal", "500.00", category="Investments"),
+        split("deposit", "900.00", category="Salary"),
+    ]
+    excluded = service.ledger_analysis(rows, rules={**RULES, "not_spend": ["Investments"]})
+    counted = service.ledger_analysis(rows, rules={**RULES, "not_spend": []})
+    assert excluded.spend != counted.spend
+    assert excluded.net == counted.net == Decimal("300.00")
+
+
+# --- §73: a bill that settles another month's spending -----------------------
+
+
+def test_a_card_bill_paid_early_is_bucketed_to_the_previous_month():
+    """> "I pay Credit Card bill in first 10days of the month but it is of
+    >  previous month"
+
+    Bucketed on its own date the bill puts last month's purchases in this
+    month, and every month chart is then wrong by a bill.
+    """
+    rows = [split("withdrawal", "9000.00", category="Credit Card", when="2026-08-05")]
+    plain = service.ledger_analysis(rows, rules=CARD_RULES)
+    assert {m.month: m.spend for m in plain.months} == {"2026-08": Decimal("9000.00")}
+
+    shifted = service.ledger_analysis(
+        rows,
+        rules=CARD_RULES,
+        attribution=service.Attribution(categories=frozenset({"Credit Card"})),
+    )
+    assert {m.month: m.spend for m in shifted.months} == {"2026-07": Decimal("9000.00")}
+
+
+def test_part_of_a_bill_can_stay_in_the_month_it_was_paid():
+    """The operator's exception: "in this 5000 should be of Aug only"."""
+    rows = [
+        split(
+            "withdrawal", "14160.69", category="Credit Card",
+            when="2026-08-05", external_id="canara-1111-20260805000001",
+        )
+    ]
+    result = service.ledger_analysis(
+        rows,
+        rules=CARD_RULES,
+        attribution=service.Attribution(
+            categories=frozenset({"Credit Card"}),
+            keep={"canara-1111-20260805000001": Decimal("5000.00")},
+        ),
+    )
+    assert {m.month: m.spend for m in result.months} == {
+        "2026-07": Decimal("9160.69"),
+        "2026-08": Decimal("5000.00"),
+    }
+
+
+def test_attribution_moves_no_money_only_which_month_it_lands_in():
+    """The invariant that makes this safe. A reporting shift that changed a
+    total would be inventing or destroying money."""
+    rows = [
+        split("withdrawal", "9000.00", category="Credit Card", when="2026-08-05"),
+        split("withdrawal", "100.00", category="Shopping", when="2026-08-06"),
+    ]
+    a = service.Attribution(categories=frozenset({"Credit Card"}))
+    plain = service.ledger_analysis(rows, rules=CARD_RULES)
+    shifted = service.ledger_analysis(rows, rules=CARD_RULES, attribution=a)
+    assert plain.spend == shifted.spend == Decimal("9100.00")
+    assert plain.net == shifted.net
+    assert sum(m.spend for m in plain.months) == sum(m.spend for m in shifted.months)
+    # And the category grid agrees with the month buckets, both ways.
+    for result in (plain, shifted):
+        by_month = {m.month: m.spend for m in result.months}
+        grid: dict[str, Decimal] = {}
+        for series in result.category_months:
+            for name, value in zip([m.month for m in result.months], series.amounts):
+                grid[name] = grid.get(name, Decimal(0)) + value
+        assert grid == by_month
+
+
+def test_a_bill_paid_late_in_the_month_is_not_a_settlement():
+    """`before_day` is the whole discrimination: a card payment on the 25th is
+    this month's, and shifting it would be worse than not shifting at all."""
+    rows = [split("withdrawal", "9000.00", category="Credit Card", when="2026-08-25")]
+    result = service.ledger_analysis(
+        rows, rules=CARD_RULES,
+        attribution=service.Attribution(categories=frozenset({"Credit Card"})),
+    )
+    assert {m.month: m.spend for m in result.months} == {"2026-08": Decimal("9000.00")}
+
+
+def test_a_keep_larger_than_the_bill_cannot_invent_money():
+    rows = [
+        split("withdrawal", "500.00", category="Credit Card",
+              when="2026-08-05", external_id="x"),
+    ]
+    result = service.ledger_analysis(
+        rows, rules=CARD_RULES,
+        attribution=service.Attribution(
+            categories=frozenset({"Credit Card"}), keep={"x": Decimal("99999")}
+        ),
+    )
+    assert sum(m.spend for m in result.months) == Decimal("500.00")
+
+
+def test_configuring_nothing_changes_nothing():
+    """The default has to be exactly today's behaviour, or every existing
+    figure moves the day this ships."""
+    rows = [
+        split("withdrawal", "9000.00", category="Credit Card", when="2026-08-05"),
+        split("deposit", "900.00", category="Salary", when="2026-08-09"),
+    ]
+    assert service.ledger_analysis(rows, rules=CARD_RULES) == service.ledger_analysis(
+        rows, rules=CARD_RULES, attribution=service.Attribution()
+    )
+
+
+CARD_RULES = {
+    "rules": [{"category": "Credit Card"}, {"category": "Shopping"}, {"category": "Salary"}],
+    "not_spend": [],
+}
+
+
+def test_a_shift_never_creates_a_month_the_window_excludes():
+    """§73. `/analysis` filters splits to the window and only then calls this,
+    so a shift that mints its own bucket grows a column for a month the range
+    picker says is excluded — seeded by one settled bill and nothing else.
+
+    When the target is outside, the money stays where it was paid: visibly in
+    the wrong month beats invisibly in a month you did not ask for. The total
+    is unchanged either way, which is the invariant that matters.
+    """
+    from datetime import date as _date
+
+    rows = [split("withdrawal", "9000.00", category="Credit Card", when="2026-08-05")]
+    a = service.Attribution(categories=frozenset({"Credit Card"}))
+
+    # A window covering August alone: July is not in scope, so nothing moves.
+    august = service.ledger_analysis(
+        rows, rules=CARD_RULES, attribution=a,
+        coverage=(_date(2026, 8, 1), _date(2026, 8, 31)),
+    )
+    assert {m.month for m in august.months} == {"2026-08"}
+    assert sum(m.spend for m in august.months) == Decimal("9000.00")
+
+    # A window that reaches into July: the shift happens.
+    both = service.ledger_analysis(
+        rows, rules=CARD_RULES, attribution=a,
+        coverage=(_date(2026, 7, 1), _date(2026, 8, 31)),
+    )
+    assert {m.month for m in both.months} == {"2026-07"}
+    assert sum(m.spend for m in both.months) == Decimal("9000.00")
+
+
+def test_a_settlement_is_dated_to_the_anchor_day_in_either_month():
+    """§94. > "always put credit card on 22 of the month whether current or
+    previous"
+
+    A bill is not spent on the day it is paid; it is the month's card activity,
+    and the anchor is the statement date. The settled part lands on the 22nd of
+    the previous month and the kept part on the 22nd of this one.
+    """
+    from datetime import date as _date
+
+    a = service.Attribution(categories=frozenset({"Credit Card"}), to_day=22)
+    paid = _date(2026, 8, 5)
+
+    # The kept part: 22nd of the month it was paid in, not the 5th.
+    assert a.anchor("Credit Card", paid) == _date(2026, 8, 22)
+    # A category that does not settle is untouched.
+    assert a.anchor("Shopping", paid) == paid
+    # A payment after `before_day` is not a settlement, so it keeps its date.
+    assert a.anchor("Credit Card", _date(2026, 8, 25)) == _date(2026, 8, 25)
+
+    # And February, where the 22nd exists but the naive `replace(day=…)` on a
+    # longer `to_day` would not.
+    late = service.Attribution(categories=frozenset({"Credit Card"}), to_day=28)
+    assert late.anchor("Credit Card", _date(2026, 2, 3)) == _date(2026, 2, 28)

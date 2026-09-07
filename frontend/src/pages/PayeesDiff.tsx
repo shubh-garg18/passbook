@@ -15,7 +15,7 @@ import { useState } from 'react'
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 
 import { api } from '../lib/api'
-import type { DiffResponse, ReapplyPreview } from '../lib/types'
+import type { DiffResponse, ReapplyPreview, SyncResult } from '../lib/types'
 import { ReconcileCall } from '../components/reconcile'
 import { Card, Diff, Notice } from '../components/ui'
 import { Progress, Skeleton, describe, useToast } from '../components/feedback'
@@ -35,14 +35,26 @@ export function PayeesDiff() {
 
   const apply = useMutation({
     mutationFn: () =>
-      api.post<{ summary: string; reapplyHint: boolean }>('/payees/apply', {
+      api.post<{ summary: string; synced: SyncResult | null }>('/payees/apply', {
         aliases: state?.aliases ?? {},
         categories: state?.categories ?? {},
       }),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['payees'] })
       queryClient.invalidateQueries({ queryKey: ['reapply'] })
-      toast({ kind: 'ok', title: 'Written', detail: result.summary })
+      queryClient.invalidateQueries({ queryKey: ['overview'] })
+      queryClient.invalidateQueries({ queryKey: ['analysis'] })
+      // §24. Writing config is only half of it; the same request now writes the
+      // rows already in the ledger. A green toast for a run that partly failed
+      // would be the tri-state lie again (non-negotiable 11), so the toast is
+      // whatever the ledger actually reported.
+      const s = result.synced
+      const clean = !s || (s.failed === 0 && s.remaining === 0)
+      toast({
+        kind: clean ? 'ok' : 'bad',
+        title: clean ? 'Written' : 'Written, ledger not fully updated',
+        detail: result.summary,
+      })
       // Stay here. The next step is the reconcile card below, not a page the
       // operator has to know about.
       setWritten(result.summary)

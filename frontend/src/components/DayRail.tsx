@@ -7,7 +7,7 @@
  * Canara's does: 85 of 93 rows embed `DD/MM/YYYY HH:MM:SS` in the narration,
  * and §6.5 strips that before tokenising without discarding it. Time of day is
  * real signal — a canteen at 01:51 is a different thing from one at 16:30, and
- * that distinction is why a morning vendor and a small-hours one are separate
+ * that distinction is why Day Canteen and Night Canteen are separate
  * categories at all.
  *
  * SVG, not Unicode block characters. Block glyphs do not align across fonts,
@@ -16,6 +16,8 @@
  * carries an aria-label with the actual time.
  */
 
+import { TipBody, useTip } from './charts'
+
 const W = 240
 const H = 16
 const NIGHT_END = 6
@@ -23,7 +25,7 @@ const NIGHT_END = 6
 type RailProps = {
   /** `HH:MM:SS`, or null for the rows whose narration carries no clock. */
   time: string | null
-  /** Included in the label so a screen reader gets "ZEPKV JYX at 01:51". */
+  /** Included in the label so a screen reader gets "VIKAS KAU at 01:51". */
   label?: string
   /** Row position, for the staggered entrance. Capped in CSS terms below. */
   index?: number
@@ -93,7 +95,10 @@ export function DayRail({ time, label, index = 0 }: RailProps) {
         width="4"
         height={H}
         rx="1"
-        fill="var(--stamp)"
+        // Ramp, not stamp — same rule as the histogram bars (non-negotiable
+        // 15). This tick locates one transaction on a track; it is a chart
+        // mark, and chart marks are ink.
+        fill="var(--ramp-1)"
       />
     </svg>
   )
@@ -119,11 +124,13 @@ type HistogramProps = {
   /** Every transaction on this row, including the ones with no clock. */
   count: number
   height?: number
+  /** Show the count axis. Off in a 26px table cell, on for the big one. */
+  axis?: boolean
 }
 
 /**
- * The same primitive at aggregate scale — the analysis that split Morning Stall
- * from Late Counter by hand in Phase 4, made permanent.
+ * The same primitive at aggregate scale — the analysis that split Day Canteen
+ * from Night Canteen by hand in Phase 4, made permanent.
  *
  * The two denominators are different and the label must say which is which.
  * The bars sum to the *clocked* transactions; the row's count is *all* of
@@ -131,7 +138,30 @@ type HistogramProps = {
  * the chart "N transactions" with N = clocked told a screen-reader user that
  * `Bank Charges` had 0 transactions when the row beside it said 2.
  */
-export function HourHistogram({ hours, label, count, height = 40 }: HistogramProps) {
+/** One hour's reading, in the shared tooltip's shape. */
+function HourTip({ at, n }: { at: string; n: number }) {
+  return (
+    <TipBody
+      name={at}
+      figure={`${n} transaction${n === 1 ? '' : 's'}`}
+      sub="spend rows carrying a clock"
+    />
+  )
+}
+
+export function HourHistogram({
+  hours,
+  label,
+  count,
+  height = 40,
+  axis = false,
+}: HistogramProps) {
+  // Only the axis form is a standalone chart on a card; the inline per-payee
+  // rails are 40px tall inside a table cell and a tooltip there would fight
+  // the row. So the hook is created either way (hooks cannot be conditional)
+  // and only wired up when this is the big one.
+  const tipState = useTip()
+  const tip = axis ? tipState : null
   const peak = Math.max(1, ...hours)
   const clocked = hours.reduce((a, b) => a + b, 0)
   const night = hours.slice(0, NIGHT_END).reduce((a, b) => a + b, 0)
@@ -162,7 +192,7 @@ export function HourHistogram({ hours, label, count, height = 40 }: HistogramPro
     }
   }
 
-  return (
+  const plot = (
     <svg
       className="hist"
       viewBox={`0 0 ${W} ${height}`}
@@ -175,23 +205,67 @@ export function HourHistogram({ hours, label, count, height = 40 }: HistogramPro
       <line x1="0" y1={height - 0.5} x2={W} y2={height - 0.5} stroke="var(--grid)" strokeWidth="1" />
       {hours.map((count, hour) => {
         const h = count === 0 ? 0 : Math.max(2, (count / peak) * (height - 2))
+        const at = `${String(hour).padStart(2, '0')}:00`
         return (
           <rect
             key={hour}
-            className="bar"
+            className={count > 0 ? 'bar mark' : 'bar'}
             style={{ ['--bar-delay' as string]: `${hour * 12}ms` }}
             x={hour * (barWidth + gap)}
             y={height - h}
             width={barWidth}
             height={h}
+            /* **No `rx`.** Rounded caps were tried and looked wrong for a
+               reason no amount of tuning fixes: this SVG is
+               `preserveAspectRatio="none"`, so a corner radius in user units
+               is stretched horizontally with the bar and every column
+               rendered as a lozenge — rounded on the BASELINE too, which a
+               column standing on an axis must never be. `vector-effect` does
+               not apply to `rx`. Flat columns are what a histogram is, and the
+               hover target below is what actually modernises this chart. */
+            tabIndex={count > 0 ? 0 : undefined}
+            role={count > 0 ? 'button' : undefined}
+            aria-label={count > 0 ? `${at}, ${txns(count)}` : undefined}
+            onMouseMove={count > 0 ? (e) => tip?.show(e, <HourTip at={at} n={count} />) : undefined}
+            onMouseLeave={count > 0 ? tip?.hide : undefined}
+            onFocus={count > 0 ? (e) => tip?.show(e, <HourTip at={at} n={count} />) : undefined}
+            onBlur={count > 0 ? tip?.hide : undefined}
             // One colour for every bar. Night is already encoded by
             // POSITION — the shaded band behind hours 0-6 — so hue on top of
             // it was a second signal for a fact, and it made ochre mean four
             // different things across the app.
-            fill="var(--stamp)"
+            //
+            // §63. `--cat-1`, not `--ramp-2`. The ramp encodes RANK and these
+            // bars are one series with no ranking — they were grey because
+            // that was the only ink a chart could use, and since §58 it is
+            // not. Still not `--stamp`: that ink means "this acts" and a bar
+            // is not a control.
+            fill="var(--cat-1)"
           />
         )
       })}
     </svg>
+  )
+
+  if (!axis) return plot
+
+  // The bars encode a COUNT, and without a scale the tallest one could be two
+  // transactions or twenty. Peak and half, in HTML beside the plot — the same
+  // reason as the month columns: this SVG stretches to the card width, so text
+  // inside it would be stretched with it.
+  return (
+    <div className="plot chartwrap" ref={tipState.box}>
+      <ul className="scale" aria-hidden="true" style={{ height }}>
+        <li>{peak}</li>
+        <li>{peak > 1 ? Math.round(peak / 2) : ''}</li>
+        <li>0</li>
+      </ul>
+      <div className="plot__area" style={{ height }}>
+        <span className="plot__rule" style={{ top: '0%' }} aria-hidden="true" />
+        {peak > 1 && <span className="plot__rule" style={{ top: '50%' }} aria-hidden="true" />}
+        {plot}
+      </div>
+      {tipState.element}
+    </div>
   )
 }

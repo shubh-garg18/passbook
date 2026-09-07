@@ -39,10 +39,27 @@ sys.path.insert(0, str(ROOT / "src"))
 from passbook import webauth  # noqa: E402
 from passbook.web import create_app  # noqa: E402
 
-CHROME = os.environ.get(
-    "PW_CHROME",
-    str(Path.home() / ".cache/ms-playwright/chromium-1228/chrome-linux64/chrome"),
-)
+def _chrome() -> str | None:
+    """Playwright's own Chromium, whichever build this machine has.
+
+    This was pinned to `chromium-1228`, which is a fact about one machine on one
+    day: the directory is named for Playwright's build number and every upgrade
+    renames it. On any other checkout the harness died before its first shot
+    with "executable doesn't exist" — measured here on chromium-1234.
+
+    `None` lets Playwright resolve its own default, which is the right answer
+    when the glob finds nothing.
+    """
+    if override := os.environ.get("PW_CHROME"):
+        return override
+    builds = sorted(
+        (Path.home() / ".cache/ms-playwright").glob("chromium-*/chrome-linux64/chrome"),
+        key=lambda p: int(p.parent.parent.name.split("-")[-1]),
+    )
+    return str(builds[-1]) if builds else None
+
+
+CHROME = _chrome()
 USER = "shots"
 PASSWORD = "shots-shots-shots"
 SECRET = pyotp.random_base32()
@@ -64,6 +81,13 @@ PAGES = [
     ("/reapply", "reapply", False),
     ("/status", "status", False),
     ("/password", "account", False),
+    # §23. Reads no ledger, so it renders with the stack down — which is also
+    # the state a new user is in when they first need it.
+    ("/banks/add", "add-bank", False),
+    ("/accounts", "accounts", False),
+    ("/accounts/add", "add-account", False),
+    ("/transactions", "transactions", False),
+    ("/reports", "reports", False),
 ]
 
 

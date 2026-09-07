@@ -93,23 +93,38 @@ def _site_block(host: str) -> str:
     return text[open_brace + 1 : index]
 
 
-def test_caddy_routes_both_hosts_over_plain_http():
+def test_caddy_routes_the_one_host_over_plain_http():
     text = CADDYFILE.read_text()
     assert "http://passbook.localhost" in text, "the host must be pinned to http://"
-    assert "http://khata.localhost" in text
-    # Swapping these would serve Firefly at the passbook name, which presents
-    # as a login loop rather than as a routing bug.
     assert "web:8081" in _site_block("passbook.localhost")
-    assert "app:8080" in _site_block("khata.localhost")
 
 
-def test_firefly_gets_the_forwarded_headers_it_needs():
-    """Firefly builds absolute URLs from APP_URL and reads these when
-    TRUSTED_PROXIES is set. Without them a login redirect bounces the browser
-    back to :8080 and off the clean hostname."""
-    khata = _site_block("khata.localhost")
+def test_there_is_only_one_door():
+    """§100. `khata.localhost` served the ledger store's own UI beside this one,
+    and the operator ran both because passbook had no charts, no reports and no
+    transaction browser. It has all three, and the instruction was explicit:
+    *"I want only one localhost and it have all required features"*.
+
+    Asserted on the ROUTE, not on the absence of the word: the block is
+    commented out rather than deleted, so grepping for `khata` still finds it
+    and would pass a test that only looked for that.
+    """
+    text = CADDYFILE.read_text()
+    uncommented = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "khata.localhost" not in uncommented
+    assert "app:8080" not in uncommented, "the store is a service, not a page"
+
+
+def test_the_commented_route_still_carries_the_headers_it_would_need():
+    """A route you can bring back for one debugging session is only useful if it
+    works when you do. The store builds absolute URLs from APP_URL and reads
+    these when TRUSTED_PROXIES is set; without them a login redirect bounces the
+    browser back to :8080 and off the clean hostname."""
+    text = CADDYFILE.read_text()
     for header in ("X-Forwarded-Host", "X-Forwarded-Proto"):
-        assert header in khata, f"{header} missing from the khata route"
+        assert header in text, f"{header} is gone from the route that can be restored"
 
 
 def test_the_numbered_ports_are_still_published():
@@ -231,8 +246,13 @@ def test_kv_cells_outrank_every_generic_cell_background():
             # Only rules that could match a cell inside a .kv table matter.
             if not re.search(r"(^|[\s>+~])(td|th|tr|tbody)\b", part):
                 continue
-            if ".ledger" in part or ".payees" in part:
-                continue  # scoped away from .kv by construction
+            # Scoped away from .kv by construction: each of these names a
+            # specific table, and a key-value table is never nested inside one.
+            # `.txns` (§61) is the same case as the other two, not a new
+            # exemption — if a .kv ever appears inside one of these, the
+            # exclusion is what has to go, not the assertion.
+            if any(name in part for name in (".ledger", ".payees", ".txns")):
+                continue
             assert _specificity(part) < kv, (
                 f"{part!r} can out-specify the .kv rule and repaint key-value tables"
             )
@@ -259,19 +279,65 @@ def test_the_ramp_is_defined_and_derives_from_the_theme_it_is_in():
     assert "--ramp-out:" in css, "the excluded-remainder fill is missing"
 
 
+# The one documented exception, and the reasoning that earns it. §90.
+#
+# `--ochre` means "this wants your attention". The excluded-movement bar is
+# precisely the money the headline figure is asking you to notice it left out,
+# so ochre there is the rule working rather than the rule breaking — and it is
+# hatched, which no status indicator ever is. Everything else stays reserved.
+OCHRE_EXCEPTION = ".bars__fill--out", ".flow__excluded"
+
+
 def test_no_chart_mark_uses_a_colour_that_means_something():
     """Ochre means "needs your decision", verdigris means "reconciled", stamp
-    means "this acts". A chart fill wearing any of them makes the one colour that
-    carried meaning mean nothing — which is the mistake §17.2 and §17.5.1 each
-    had to undo once already.
+    means "this acts". A chart fill wearing any of them makes the one colour
+    that carried meaning mean nothing — the mistake §17.2 and §17.5.1 each had
+    to undo once already. `--alarm` is included: a bar is not a failure.
 
-    `--alarm` is included: a bar is not a failure.
+    **Checks USAGE, not mentions.** The first version scanned for the bare
+    token and so failed on a comment explaining why a token was *not* used —
+    which punishes exactly the documentation this codebase runs on. It now
+    looks for `var(--token)` in a value, and it covers `theme.css` as well as
+    the component: the fills moved to CSS and the check did not follow them.
     """
+    reserved = ("--ochre", "--verdigris", "--alarm", "--stamp")
+
     source = CHARTS.read_text()
-    for token in ("--ochre", "--verdigris", "--alarm", "--stamp"):
-        assert token not in source, (
-            f"{CHARTS.name} references {token}; chart marks use --ramp-* only"
+    for token in reserved:
+        assert f"var({token})" not in source, (
+            f"{CHARTS.name} fills a mark with {token}; chart marks use --cat-* or --ramp-*"
         )
+
+    # In CSS, look only inside the rules that paint a mark.
+    css = CSS.read_text()
+    for selector, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
+        name = selector.strip().split("\n")[-1].strip()
+        # Named explicitly, not pattern-matched. `__bar` caught
+        # `.progress__bar`, which is a CONTROL and for which `--stamp` — "this
+        # acts" — is exactly the right ink. A loose heuristic that flags a
+        # correct usage teaches people to widen the exception list.
+        if not any(
+            k in name
+            for k in (
+                ".bars__fill",
+                ".stack__seg",
+                ".flow__counted",
+                ".flow__excluded",
+                ".cols rect.col",
+                ".hist rect.bar",
+                ".donut__arc",
+                ".week__bar",
+                ".heat__bar",
+                ".line__path",
+            )
+        ):
+            continue
+        if any(allowed in name for allowed in OCHRE_EXCEPTION):
+            continue
+        for token in reserved:
+            assert f"var({token})" not in body, (
+                f"{name} fills a mark with {token} — reserved for meaning, not for data"
+            )
 
 
 def test_the_charts_carry_no_library():
@@ -291,9 +357,15 @@ def test_the_page_and_the_card_are_actually_different_values():
     a future tweak has to keep the gap."""
     css = CSS.read_text()
 
+    # §59 inverted the file (dark is the default block) and §78 moved the light
+    # branch from a media query onto `:root[data-mode='light']`, so the mode is
+    # always stamped and a bank theme can default to light on a dark OS. The
+    # assertion below is untouched — only where each theme's values live moved.
     def token(name: str, block: str) -> str:
-        section = css.split("prefers-color-scheme: dark")[1 if block == "dark" else 0]
-        return re.search(rf"{name}:\s*(#[0-9a-fA-F]{{6}})", section).group(1)
+        section = css.split(":root[data-mode='light']")[1 if block == "light" else 0]
+        match = re.search(rf"{name}:\s*(#[0-9a-fA-F]{{6}})", section)
+        assert match, f"{name} not found in the {block} block"
+        return match.group(1)
 
     def luminance(hex_colour: str) -> float:
         channels = []
@@ -323,6 +395,158 @@ def test_no_ui_string_pluralises_with_a_parenthesis():
     offenders = []
     for path in sorted((ROOT / "frontend/src").rglob("*.tsx")):
         for number, line in enumerate(path.read_text().splitlines(), start=1):
+            stripped = line.strip()
+            # A comment cannot render, and quoting a server message verbatim in
+            # one is worth more than the false positive it costs — §41.2's
+            # comment quotes `unknown field(s): [...]` because that is the
+            # string an operator actually saw.
+            if stripped.startswith(("//", "*", "/*")):
+                continue
             if re.search(r"\w\(s\)", line):
-                offenders.append(f"{path.name}:{number}: {line.strip()[:70]}")
+                offenders.append(f"{path.name}:{number}: {stripped[:70]}")
     assert not offenders, "use lib/money.count instead: " + "; ".join(offenders)
+
+
+def test_both_themes_declare_the_same_token_set():
+    """§28. Two themes, dark and light, and each is a
+    `:root[data-mode='…']` block.
+
+    A token declared in one branch and not the other keeps whatever the other
+    branch left it at. That shipped once: bank themes set `--sheet` and
+    `--board` in dark only, `[data-theme]` matched `:root`'s specificity and
+    sat later in the file, and light mode got navy cards under near-black ink
+    at about 1.15:1. A media query would not have saved it — media queries add
+    no specificity.
+    """
+    css = CSS.read_text()
+    blocks = {}
+    for mode, body in re.findall(r":root\[data-mode='([a-z]+)'\] \{([^}]*)\}", css):
+        blocks.setdefault(mode, set()).update(re.findall(r"(--[a-z0-9-]+)\s*:", body))
+
+    # The dark values live on bare `:root`, so only light is an attribute block;
+    # what matters is that every token light overrides also exists in the base.
+    assert "light" in blocks, "no light theme found — this test is stale"
+    base = set(re.findall(r"(--[a-z0-9-]+)\s*:", css.split(":root[data-mode='light']")[0]))
+    orphans = blocks["light"] - base
+    assert not orphans, (
+        f"light declares {sorted(orphans)} that the dark default never sets — "
+        f"those will be undefined in dark mode"
+    )
+    for needed in ("--stamp", "--stamp-ink", "--sheet", "--paper", "--ink", "--cat-1"):
+        assert needed in blocks["light"], f"light does not override {needed}"
+
+
+def test_no_theme_block_touches_the_reserved_signals_or_the_chart_wheel():
+    """A theme may move the accent and the surfaces. It may never move a
+    signal, because `--ochre` asks, `--verdigris` reconciles and `--alarm`
+    failed — and the chart hues were measured against these grounds.
+
+    The light theme is the one exception the rule is written around: it is a
+    whole second palette, not an overlay, so it redefines everything. What must
+    not happen is a THIRD block appearing that redefines a signal partially.
+    """
+    css = CSS.read_text()
+    partial = re.findall(r"\[data-theme='([a-z]+)'\][^{]*\{([^}]*)\}", css)
+    for name, body in partial:
+        for reserved in ("--ochre", "--verdigris", "--alarm", "--cat-", "--ramp-"):
+            assert reserved not in body, f"{name} overrides {reserved}, which is reserved"
+
+
+def test_every_routed_page_is_screenshotted():
+    """§75. Transactions and Reports both shipped without being in `shoot.py`'s
+    page list — two new pages that the harness which exists so pages get LOOKED
+    at never looked at. Routes and shots drift silently; this makes them not.
+
+    Redirect-only and flow-only routes are exempt by name, because a shot of a
+    redirect is a shot of wherever it went.
+    """
+    app_tsx = (ROOT / "frontend/src/App.tsx").read_text()
+    shoot = (ROOT / "scripts/shoot.py").read_text()
+
+    routed = set(re.findall(r'<Route path="(/[^"*]*)"', app_tsx))
+    # Reached only by completing a flow, and each already has its own shot or
+    # is covered by the harness's own scripted journeys.
+    exempt = {
+        "/", "/preview", "/result", "/payees/diff", "/reapply/done",
+        "/accounts/add", "/banks/add", "/password",
+    }
+    for route in sorted(routed - exempt):
+        assert f'("{route}"' in shoot, (
+            f"{route} is routed but never screenshotted — add it to shoot.py's PAGES"
+        )
+
+
+def test_a_bank_theme_sets_the_same_tokens_in_light_and_dark():
+    """§77. The dark blocks set `--sheet`, `--board` and `--grid-soft`; the
+    light overrides did not. `[data-theme]` has the same specificity as `:root`
+    and sits later in the file, so those dark surfaces won in LIGHT mode too —
+    a light-mode operator who picked a bank accent got navy cards under
+    near-black ink, measured at about 1.15:1.
+
+    A media query adds no specificity. Anything a theme overrides in one branch
+    it must override in the other.
+    """
+    css = CSS.read_text()
+    blocks: dict[str, list[set[str]]] = {}
+    for name, body in re.findall(
+        r"\[data-theme='([a-z]+)'\]\[data-mode='[a-z]+'\]\s*\{([^}]*)\}", css
+    ):
+        blocks.setdefault(name, []).append(set(re.findall(r"(--[a-z-]+)\s*:", body)))
+
+    for name, declared in blocks.items():
+        assert len(declared) == 2, f"{name} is declared {len(declared)} time(s)"
+        dark, light = declared
+        missing = dark - light
+        assert not missing, (
+            f"{name} sets {sorted(missing)} in dark and not in light — those dark "
+            f"values will win in light mode too"
+        )
+        assert not (light - dark), f"{name} sets {sorted(light - dark)} only in light"
+
+
+# --- the account switcher's one shared value. SPEC §100 -----------------------
+
+ACCOUNT_TS = ROOT / "frontend/src/lib/account.ts"
+
+
+def _without_comments(text: str) -> str:
+    """The code, with `/* … */` and `// …` removed. Prose is not usage."""
+    return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+
+
+def test_the_account_selection_is_not_per_component_state():
+    """`useAccounts()` is called by the tab strip, by the Combine checklist and
+    by every page that scopes a query. Held in `useState`, each of those gets
+    its OWN copy — so clicking a tab moved that tab strip's highlight, wrote
+    localStorage, and told nobody. The page underneath kept querying the account
+    it was already showing.
+
+    Not catchable by a screenshot, which shows a settled page, and not by an API
+    test, which never renders two components. A single-account install renders
+    no switcher at all, so nothing could reveal it until a second account was
+    registered.
+
+    Asserted on the source because there is no frontend test runner here. It is
+    a narrow claim — the selection is read from a store every caller shares, not
+    from local state — and it is exactly the property that broke.
+    """
+    text = ACCOUNT_TS.read_text()
+    assert "useSyncExternalStore" in text, "the selection is no longer a shared store"
+    # Comments stripped first. A naive substring scan over this file punishes the
+    # paragraph that explains the bug — which is the same trap §77's chart-token
+    # test fell into, where documenting a token counted as using one.
+    assert "useState" not in _without_comments(text), (
+        "the account selection is back in per-component state; every caller of "
+        "useAccounts() would get its own copy and only one of them would update"
+    )
+
+
+def test_writing_the_selection_notifies_everyone_reading_it():
+    """`localStorage.setItem` fires no event in the tab that made the write —
+    `storage` is for the OTHER tabs. Without the explicit notify the store is
+    shared and still silent, which looks exactly like the bug it replaced."""
+    text = ACCOUNT_TS.read_text()
+    write = text[text.index("function store("):]
+    write = write[: write.index("\n}\n") + 2]
+    assert "notify()" in write, "store() writes localStorage and tells no one"
+

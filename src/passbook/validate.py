@@ -5,7 +5,7 @@ financial data. It is verified to hold cleanly on real data — 93 rows, 0 break
 computed final balance equal to the Closing Balance sentinel exactly.
 
 **So if it fails, the parser is wrong, not the data. Never soften or skip this
-check to make a test pass.** CLAUDE.md non-negotiable #3.
+check to make a test pass.** non-negotiable #3.
 
 Hard failures (raise) are reserved for things that mean the parse is wrong or
 the ledger would be corrupted. Soft failures (warn) are observations about the

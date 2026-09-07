@@ -14,10 +14,58 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 
 import { api } from '../lib/api'
-import type { ReapplyPreview, ReapplyResult } from '../lib/types'
+import type { ReapplyPreview, ReapplyResult, SyncResult } from '../lib/types'
 import { Notice, Tick } from './ui'
 import { Progress, Why, describe, useToast } from './feedback'
 import { count } from '../lib/money'
+
+/** Everything a preview says would move, as one sentence's worth of parts. */
+function parts(data: ReapplyPreview): string {
+  const bits = [
+    data.renames && count(data.renames, 'rename'),
+    data.recats && count(data.recats, 'category change'),
+    data.counterparties && count(data.counterparties, 'payee account rename'),
+    data.retags && count(data.retags, 'tag change'),
+  ].filter(Boolean) as string[]
+  return bits.join(', ')
+}
+
+/** The in-place update. Non-destructive, so it asks for nothing first. */
+export function useLedgerSync() {
+  const queryClient = useQueryClient()
+  const toast = useToast()
+
+  return useMutation({
+    mutationFn: () => api.post<SyncResult>('/reapply/sync'),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['overview'] })
+      queryClient.invalidateQueries({ queryKey: ['analysis'] })
+      queryClient.invalidateQueries({ queryKey: ['reapply'] })
+      queryClient.invalidateQueries({ queryKey: ['payees'] })
+      const clean = result.failed === 0 && result.remaining === 0
+      toast(
+        clean
+          ? {
+              kind: 'ok',
+              title: 'Ledger updated',
+              detail:
+                `${count(result.updated, 'row')} ` +
+                `${result.updated === 1 ? 'now matches' : 'now match'} the config.`,
+            }
+          : {
+              kind: 'bad',
+              title: result.remaining === null ? 'Synced, not verified' : 'Partly synced',
+              detail:
+                `${result.updated} updated, ${result.failed} failed, ` +
+                (result.remaining === null
+                  ? 'and the ledger stopped answering before this could be checked.'
+                  : `${result.remaining} still differ.`),
+            },
+      )
+    },
+    onError: (error) => toast({ kind: 'bad', ...describe(error) }),
+  })
+}
 
 /** The purge-and-re-push mutation, with its toast and its navigation. */
 export function useReapplyRun() {
@@ -58,7 +106,13 @@ export function ReconcileCall({
   data: ReapplyPreview
   showLink?: boolean
 }) {
-  const run = useReapplyRun()
+  const sync = useLedgerSync()
+
+  // Zero compared is not zero differing. This page reported a green "All 0
+  // transactions already match" for a join that matched nothing at all, which
+  // is the failure §24.1 exists to record — so the count of rows actually
+  // looked at gates the tick (non-negotiable 11).
+  if (data.considered === 0) return <NothingCompared />
 
   if (data.changes.length === 0)
     return (
@@ -74,12 +128,90 @@ export function ReconcileCall({
     <>
       <Notice kind="warn">
         <p>
-          <strong>{count(data.changes.length, 'existing transaction')} would change</strong> —{' '}
-          {count(data.renames, 'rename')}, {count(data.recats, 'category change')}, out of{' '}
-          {data.considered} compared. Rules and aliases apply at push time, so the ledger still
-          shows what it was pushed with.
+          <strong>{count(data.changes.length, 'existing transaction')} do not match</strong> —{' '}
+          {parts(data)}, out of {data.considered} compared. Rules and aliases apply at push
+          time, so the ledger still shows what it was pushed with.
         </p>
       </Notice>
+
+      <div className="actions">
+        <button
+          type="button"
+          className="primary"
+          onClick={() => sync.mutate()}
+          disabled={sync.isPending}
+          data-working={sync.isPending}
+        >
+          {sync.isPending
+            ? 'Updating…'
+            : `Update ${count(data.changes.length, 'row')} in the ledger`}
+        </button>
+        {showLink && (
+          <Link className="button" to="/reapply">
+            Review the rows first
+          </Link>
+        )}
+      </div>
+      {sync.isPending && <Progress label="Writing the new names and categories into the ledger" />}
+
+      <Why label="What an update changes, and what it cannot">
+        <p>
+          Only the description, category, payee account and rule tags are sent. Amount,
+          date and the raw narration are not in the request, so they cannot move. Nothing
+          is deleted and running it twice is the same as running it once.
+        </p>
+        <p>
+          It cannot create a row missing from the ledger or fix a wrong amount — those come
+          from the statement, so they need a re-push. Whatever is left over is re-read
+          afterwards and reported.
+        </p>
+      </Why>
+
+      <Rebuild data={data} />
+    </>
+  )
+}
+
+/**
+ * Nothing was compared — which is not the same as nothing differing.
+ *
+ * Stated in ochre, because it is the shape of the bug this phase fixed: rows
+ * exist in Firefly and statements exist in `archive/`, but the join between
+ * them produced no pairs. It says what to check rather than implying all is
+ * well, and it deliberately offers no button: there is nothing to update, and
+ * an update is not the remedy for a ledger nobody could read.
+ */
+export function NothingCompared() {
+  return (
+    <Notice kind="warn">
+      <p>
+        <strong>No rows were compared</strong> — nothing in <code>archive/</code> matched a
+        row in the ledger. That is an unanswered question, not a clean bill of health. Check{' '}
+        <code>passbook verify-ledger</code> and that <code>PASSBOOK_ASSET_ACCOUNT</code>{' '}
+        names the account the rows went into.
+      </p>
+    </Notice>
+  )
+}
+
+/**
+ * The destructive path, demoted but not hidden.
+ *
+ * Kept because it is the only thing that fixes a row that is *absent* or whose
+ * amount is wrong, and kept behind the dump requirement for the same reason as
+ * before: it deletes every row on the account. It is now folded away, because
+ * offering it as the answer to a rename is what made renames never happen.
+ */
+function Rebuild({ data }: { data: ReapplyPreview }) {
+  const run = useReapplyRun()
+
+  return (
+    <Why label="Or rebuild the ledger from the statements (deletes and re-pushes)">
+      <p>
+        A rebuild deletes every row carrying an external id and pushes every archived
+        statement again. Reach for it when a row is <em>missing</em> or its amount is
+        wrong — not for a rename.
+      </p>
 
       <DumpState dump={data.dump} rows={data.changes.length} />
 
@@ -89,31 +221,20 @@ export function ReconcileCall({
           className="danger"
           onClick={() => run.mutate()}
           disabled={run.isPending || !data.dump.fresh}
+          data-working={run.isPending}
         >
-          {run.isPending
-            ? 'Running…'
-            : `Purge and re-push ${count(data.changes.length, 'row')}`}
+          {run.isPending ? 'Running…' : 'Purge and re-push everything'}
         </button>
-        {showLink && (
-          <Link className="button" to="/reapply">
-            Review the rows first
-          </Link>
-        )}
       </div>
       {run.isPending && <Progress label="Copying config, purging, syncing rules, re-pushing" />}
 
-      <Why label="What runs, in order">
-        <p>
-          A copy of <code>config/</code> to <code>backups/</code>; then the purge — only rows
-          carrying an <code>external_id</code>, so the opening balance is excluded structurally,
-          and trashed rows are force-deleted so the re-push is not rejected as duplicates; then
-          rules are synced to Firefly <em>before</em> anything is re-pushed, because rules apply
-          at store time and a rule the engine has not heard of cannot categorise; then every
-          archived statement is pushed again; then the balance is checked.
-        </p>
-      </Why>
-
-    </>
+      <p className="muted">
+        In order: copy <code>config/</code> to <code>backups/</code>; purge only rows with an{' '}
+        <code>external_id</code>, so the opening balance is excluded structurally; sync rules
+        <em> before</em> re-pushing, because a rule the store has not heard of cannot
+        categorise; push every archived statement; check the balance.
+      </p>
+    </Why>
   )
 }
 

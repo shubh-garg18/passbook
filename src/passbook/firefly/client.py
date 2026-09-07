@@ -132,6 +132,21 @@ class FireflyClient:
         """POST /api/v1/transactions. Raises DuplicateTransaction on a dup."""
         return self._request("POST", "/api/v1/transactions", content=json.dumps(payload))
 
+    def update_transaction(self, group_id: str | int, payload: dict) -> dict:
+        """PUT /api/v1/transactions/{group}. A **sparse** update. SPEC §23.
+
+        Read off the pinned tag (v6.6.6), not remembered:
+        `routes/api.php` binds `Route::put('{transactionGroup}', UpdateController@update)`
+        under the `v1/transactions` prefix, and
+        `Requests/Models/Transaction/UpdateRequest::getTransactionData()` builds
+        each split from an empty array, copying only the keys the request
+        actually carries. Fields left out are left alone — which is what makes
+        renaming a payee safe: `amount`, `date` and `type` are never sent.
+        """
+        return self._request(
+            "PUT", f"/api/v1/transactions/{group_id}", content=json.dumps(payload)
+        )
+
     def _paged(self, path: str, **params) -> list[dict]:
         page, out = 1, []
         while True:

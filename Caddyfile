@@ -1,7 +1,17 @@
 # Clean URLs for the local stack. SPEC §17.3, D9.
 #
-#   http://passbook.localhost  -> the passbook web UI
-#   http://khata.localhost     -> Firefly III
+#   http://passbook.localhost  -> passbook, the only door
+#
+# **There used to be two.** `khata.localhost` served the ledger store's own web
+# UI beside this one, and the operator ran both because passbook had no charts,
+# no reports and no transaction browser. It has all three now (§57-§65), and the
+# instruction was explicit: *"I want only one localhost and it have all required
+# features"*. So the hostname is gone and the store is a service, not a page.
+#
+# Nothing else changed. The store still answers on the compose network, so the
+# API, `verify-ledger`, `make backup` and the DR drill are untouched — this
+# removes a door, not a dependency. To open it again for one debugging session,
+# uncomment the block below and `make up`. SPEC §100.
 #
 # Chromium resolves *.localhost to 127.0.0.1 itself (RFC 6761), so there is no
 # hosts-file edit and no DNS involved. Verified in Chromium 149, not assumed.
@@ -31,21 +41,21 @@ http://passbook.localhost {
 	reverse_proxy web:8081
 }
 
-# Firefly III. `khata` (खाता) is the account book itself — the ledger this
-# whole pipeline feeds.
-http://khata.localhost {
-	reverse_proxy app:8080 {
-		# Firefly builds absolute URLs from APP_URL, and reads these when
-		# TRUSTED_PROXIES is set (it is: `**` in docker-compose.yml). Without
-		# them a login redirect would bounce the browser back to :8080.
-		header_up Host {host}
-		header_up X-Forwarded-Host {host}
-		header_up X-Forwarded-Proto {scheme}
-	}
-}
+# The ledger store's own UI. Commented out, not deleted — see the header. The
+# store builds absolute URLs from APP_URL and reads these headers when
+# TRUSTED_PROXIES is set (it is: `**` in docker-compose.yml); without them a
+# login redirect bounces the browser back to :8080.
+#
+# http://khata.localhost {
+# 	reverse_proxy app:8080 {
+# 		header_up Host {host}
+# 		header_up X-Forwarded-Host {host}
+# 		header_up X-Forwarded-Proto {scheme}
+# 	}
+# }
 
 # Anything else that reaches this listener gets a plain answer rather than a
 # confusing default page.
 http:// {
-	respond "passbook: use http://passbook.localhost or http://khata.localhost" 404
+	respond "passbook: use http://passbook.localhost" 404
 }

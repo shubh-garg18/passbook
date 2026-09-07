@@ -58,7 +58,7 @@ def test_deposit_reverses_the_sides():
 
 
 def test_amount_is_a_positive_string_never_a_float():
-    """CLAUDE.md non-negotiable #1: money is Decimal, never float."""
+    """non-negotiable #1: money is Decimal, never float."""
     split = build_payload(txn(), ASSET)["transactions"][0]
     assert split["amount"] == "65.00"
     assert isinstance(split["amount"], str)

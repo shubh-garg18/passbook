@@ -13,7 +13,7 @@ import re
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,7 +30,7 @@ from .config import (
     save_accounts,
 )
 from .firefly.bootstrap import load_rules
-from .firefly.client import FireflyClient
+from .firefly.client import FireflyClient, FireflyError
 from .firefly.push import PushResult, push_transactions
 from .loaders import load as load_statement
 from .models import StatementMeta, Transaction
@@ -64,7 +64,7 @@ def parse_statement(path: Path, aliases: dict[str, str] | None = None) -> Parsed
 
     Propagates ParseError, BalanceBreak and IntegrityError untouched — the
     balance invariant is never softened for a caller's convenience, web
-    included. CLAUDE.md non-negotiable #3.
+    included. non-negotiable #3.
     """
     meta, transactions = load_statement(path)
     narration_mod.enrich(transactions, aliases if aliases is not None else load_payee_aliases())
@@ -137,6 +137,11 @@ class SyncStatus:
     filename: str | None
     headline: str
     detail: str = ""
+    # ISO, or None when nothing has ever been pushed. The masthead stamps it,
+    # so it travels with the age rather than being derived from a second field —
+    # otherwise the date on the stamp and the days in the caption can end up
+    # counting from different files.
+    date: str | None = None
 
 
 def _days(n: int) -> str:
@@ -154,9 +159,10 @@ def sync_status() -> SyncStatus:
             headline="nothing in archive/ — no statement has been pushed yet",
         )
 
-    name, age = synced
+    name, age, when = synced
+    stamped = when.isoformat()
     if age <= SYNC_STALE_DAYS:
-        return SyncStatus("ok", age, name, f"last sync {_days(age)} ago ({name})")
+        return SyncStatus("ok", age, name, f"last sync {_days(age)} ago ({name})", date=stamped)
 
     if age <= SYNC_URGENT_DAYS:
         return SyncStatus(
@@ -164,7 +170,8 @@ def sync_status() -> SyncStatus:
             age,
             name,
             f"last successful sync was {_days(age)} ago ({name})",
-            "Canara only serves statements going back so far, so a gap is data loss "
+            date=stamped,
+            detail="Canara only serves statements going back so far, so a gap is data loss "
             "rather than lateness — rows that age out of the download window are gone "
             "from every copy, including the backups. Download this week.",
         )
@@ -174,7 +181,8 @@ def sync_status() -> SyncStatus:
         age,
         name,
         f"last successful sync was {_days(age)} ago ({name})",
-        "Download today. Past three weeks the oldest missing transactions may already "
+        date=stamped,
+        detail="Download today. Past three weeks the oldest missing transactions may already "
         "sit outside the range Canara will still hand over. Nothing in this project can "
         "bring those back — not `make restore`, not the off-site archives. They only "
         "ever existed at the bank, and only for a while. There is no cron to catch this "
@@ -315,6 +323,57 @@ def predict_category(description: str, narration: str, rules: dict | None = None
     return found
 
 
+def managed_tags(rules: dict | None = None) -> set[str]:
+    """The tags derived from `rules.yaml` that a rename or re-categorisation moves."""
+    rules = rules if rules is not None else load_rules()
+    tags = {str(spec["tag"]) for spec in (rules.get("rules") or []) if spec.get("tag")}
+    not_earnings = (rules.get("not_earnings") or {}).get("tag")
+    if not_earnings:
+        tags.add(str(not_earnings))
+    return tags
+
+
+def predict_tags(
+    description: str, narration: str, kind: str, rules: dict | None = None
+) -> set[str]:
+    """The managed tags this row should carry. Mirrors bootstrap.py, as `predict_category` does.
+
+    Two sources, both read straight out of `rules.yaml`:
+
+    * a category rule's own `tag:` (`food`, `family`). `add_tag` is additive and
+      every rule sets `stop_processing: false`, so **every** match contributes —
+      unlike the category, where the last match wins.
+    * `not_earnings`, which is inverted: a deposit carries the tag unless its
+      description starts with one of `earnings_only`. That is the strict rule in
+      §8.1, and it can never land on a withdrawal.
+
+    This exists because `add_tag` cannot un-tag. Renaming a payee into an
+    earnings source leaves the stale `not-earnings` tag behind, and a stale
+    `not-earnings` is not a cosmetic problem: non-negotiable 9 excludes those
+    deposits from earnings, so the total silently reads low.
+    """
+    rules = rules if rules is not None else load_rules()
+    tags: set[str] = set()
+
+    for spec in rules.get("rules") or []:
+        if not spec.get("tag"):
+            continue
+        matched = any(description.startswith(p) for p in (spec.get("payees") or []))
+        if not matched and spec.get("notes_contains"):
+            matched = spec["notes_contains"] in narration
+        if not matched and spec.get("notes_starts"):
+            matched = narration.startswith(spec["notes_starts"])
+        if matched:
+            tags.add(str(spec["tag"]))
+
+    not_earnings = rules.get("not_earnings") or {}
+    if kind == "deposit" and not_earnings.get("tag"):
+        earnings = [str(p) for p in (not_earnings.get("earnings_only") or [])]
+        if not any(description.startswith(p) for p in earnings):
+            tags.add(str(not_earnings["tag"]))
+
+    return tags
+
 def payee_inventory(
     transactions: list[Transaction],
     aliases: dict[str, str] | None = None,
@@ -381,6 +440,14 @@ def ledger_balance(settings: Settings, client: FireflyClient | None = None) -> D
 
 @dataclass
 class ReapplyChange:
+    """One live row, and what the current config says it should be.
+
+    Carries `group_id` because the fix is now an **update**, not a re-push: it
+    is the id `PUT /api/v1/transactions/{group}` needs, and reading it here is
+    what makes the join provable — a change with no group id never matched a
+    live row and must never be reported as one.
+    """
+
     external_id: str
     date: str
     amount: Decimal
@@ -388,6 +455,12 @@ class ReapplyChange:
     new_description: str
     old_category: str
     new_category: str
+    old_counterparty: str = ""
+    new_counterparty: str = ""
+    old_tags: tuple[str, ...] = ()
+    new_tags: tuple[str, ...] = ()
+    group_id: str = ""
+    kind: str = "withdrawal"
 
     @property
     def name_changed(self) -> bool:
@@ -397,66 +470,260 @@ class ReapplyChange:
     def category_changed(self) -> bool:
         return self.old_category != self.new_category
 
+    @property
+    def counterparty_changed(self) -> bool:
+        return self.old_counterparty != self.new_counterparty
 
-def reapply_preview(
-    client: FireflyClient, settings: Settings, archive: Path = Path("archive")
-) -> tuple[list[ReapplyChange], int]:
-    """What a purge-and-resync would change. Reads only; changes nothing.
+    @property
+    def tags_changed(self) -> bool:
+        return set(self.old_tags) != set(self.new_tags)
 
-    Aliases and rules are applied **at push time**, so editing config leaves
-    rows already in Firefly untouched. This compares what is in the ledger
-    against what the current config would produce, so the operator sees the
-    consequence before anything is deleted.
+    @property
+    def changed(self) -> bool:
+        return (
+            self.name_changed
+            or self.category_changed
+            or self.counterparty_changed
+            or self.tags_changed
+        )
+
+
+def _live_splits(client: FireflyClient, account_id: str) -> dict[str, tuple[str, dict]]:
+    """`external_id -> (group id, split)`, keyed on the id **as Firefly holds it**.
+
+    Keyed on the whole `external_id`, never on the bank's bare `txn_id`
+    (non-negotiable 10). The lookup side does the tolerating, in `_match`.
     """
-    from .firefly.push import build_payload
-
-    account_id = None
-    for account in client.asset_accounts():
-        if account["attributes"]["name"] == settings.passbook_asset_account:
-            account_id = account["id"]
-    if account_id is None:
-        return [], 0
-
-    live: dict[str, dict] = {}
+    live: dict[str, tuple[str, dict]] = {}
     for group in client.account_transactions(account_id):
         for split in group["attributes"]["transactions"]:
             if split.get("external_id"):
-                live[split["external_id"]] = split
+                live[str(split["external_id"])] = (str(group["id"]), split)
+    return live
 
-    aliases = load_payee_aliases()
-    rules = load_rules()
+def _match(
+    live: dict[str, tuple[str, dict]], account: Account | None, txn_id: str
+) -> tuple[str, str, dict] | None:
+    """Find one row, namespaced form first, bare form second. §21.1.
 
+    Both forms are tried because a ledger may hold rows from before the
+    namespacing migration alongside rows from after it, and this is one asset
+    account's transactions — so a bare-id fallback cannot reach across
+    accounts the way a bare-id *key* did.
+
+    This function exists because the join was wrong and silently so: `live` was
+    keyed on the namespaced id and looked up with the bare one, which matched
+    **nothing**. On the reference ledger that is 0 of 113 rows compared, and the
+    page said "All 0 transactions already match. Nothing to do."
+    """
+    for candidate in ([account.external_id(txn_id)] if account else []) + [txn_id]:
+        found = live.get(candidate)
+        if found is not None:
+            return candidate, found[0], found[1]
+    return None
+
+
+def _counterparty(split: dict) -> str:
+    """The name on the other side — the expense or revenue account.
+
+    An alias rename moves this too, because `build_payload` uses the same name
+    for the description and for the counterparty account. Comparing only the
+    description would report a row as reconciled while Firefly's Expense
+    accounts list still carried the old truncated token.
+    """
+    if (split.get("type") or "withdrawal") == "withdrawal":
+        return str(split.get("destination_name") or "")
+    return str(split.get("source_name") or "")
+
+def reapply_preview(
+    client: FireflyClient,
+    settings: Settings,
+    archive: Path = Path("archive"),
+    *,
+    aliases: dict[str, str] | None = None,
+    rules: dict | None = None,
+    accounts: list[Account] | None = None,
+) -> tuple[list[ReapplyChange], int]:
+    """What the current config would change in the ledger. Reads only.
+
+    Aliases and rules are applied **at push time**, so editing config leaves
+    rows already in Firefly untouched. This compares what is in the ledger
+    against what the current config would produce.
+
+    `aliases` and `rules` override what is on disk, so the confirm screen can
+    show the consequence of a config change *before* it is written rather than
+    after.
+    """
+    from .firefly.push import build_payload
+
+    aliases = load_payee_aliases() if aliases is None else aliases
+    rules = load_rules() if rules is None else rules
+    registry = load_accounts(settings=settings) if accounts is None else accounts
+    managed = managed_tags(rules)
+
+    by_name: dict[str, str] = {}
+    for asset in client.asset_accounts():
+        by_name[asset["attributes"]["name"]] = str(asset["id"])
+
+    statements = archived_statements(archive)
     changes: list[ReapplyChange] = []
-    # Statements overlap by design — a weekly download re-covers the previous
-    # weeks — so the same txn_id appears in several files. Count and report it
-    # once, keyed on the bank's own id.
-    seen: set[str] = set()
-    for path in sorted(p for p in archive.rglob("*") if p.is_file() and not p.name.startswith(".")):
-        try:
-            parsed = parse_statement(path, aliases)
-        except Exception:
-            continue
-        for txn in parsed.transactions:
-            current = live.get(txn.txn_id)
-            if current is None or txn.txn_id in seen:
-                continue
-            seen.add(txn.txn_id)
-            split = build_payload(txn, settings.passbook_asset_account or "")["transactions"][0]
-            new_category = predict_category(split["description"], txn.narration, rules)
-            change = ReapplyChange(
-                external_id=txn.txn_id,
-                date=txn.txn_date.isoformat(),
-                amount=(txn.debit or txn.credit or Decimal(0)),
-                old_description=current.get("description") or "",
-                new_description=split["description"],
-                old_category=current.get("category_name") or "",
-                new_category=new_category,
-            )
-            if change.name_changed or change.category_changed:
-                changes.append(change)
+    considered = 0
 
-    changes.sort(key=lambda c: c.date)
-    return changes, len(seen)
+    for account in registry or [None]:
+        target = account.asset_account if account else settings.passbook_asset_account
+        account_id = by_name.get(target or "")
+        if account_id is None:
+            # Skipped, but never silently: `considered` then stays 0, and every
+            # caller is required to read that as "nothing was compared" rather
+            # than as a pass (§23.1). The log says which account went missing.
+            log.warning(
+                "no Firefly asset account named %r; %s compared nothing",
+                target,
+                account.slug if account else "the unregistered ledger",
+            )
+            continue
+        live = _live_splits(client, account_id)
+        mine = statements_for(account, statements) if account else statements
+
+        # Statements overlap by design — a weekly download re-covers earlier
+        # weeks — so the same row appears in several files. Count it once,
+        # keyed on the id it carries in Firefly.
+        seen: set[str] = set()
+        for parsed in mine:
+            try:
+                enriched = parse_statement(parsed.path, aliases)
+            except Exception:  # an unreadable archive must not blank the page
+                continue
+            for txn in enriched.transactions:
+                found = _match(live, account, txn.txn_id)
+                if found is None:
+                    continue
+                external_id, group_id, current = found
+                if external_id in seen:
+                    continue
+                seen.add(external_id)
+
+                split = build_payload(txn, account or (target or ""))["transactions"][0]
+
+                # Only the managed tags are reconciled; everything else the row
+                # carries is preserved verbatim. `reversal` is the pusher's and
+                # `large-oneoff` is the rules engine's — see `managed_tags`.
+                held = {str(t) for t in (current.get("tags") or [])}
+                wanted = (held - managed) | predict_tags(
+                    split["description"], txn.narration, split["type"], rules
+                )
+
+                change = ReapplyChange(
+                    external_id=external_id,
+                    date=txn.txn_date.isoformat(),
+                    amount=(txn.debit or txn.credit or Decimal(0)),
+                    old_description=str(current.get("description") or ""),
+                    new_description=split["description"],
+                    old_category=str(current.get("category_name") or ""),
+                    new_category=predict_category(
+                        split["description"], txn.narration, rules
+                    ),
+                    old_counterparty=_counterparty(current),
+                    new_counterparty=_counterparty(split),
+                    old_tags=tuple(sorted(held)),
+                    new_tags=tuple(sorted(wanted)),
+                    group_id=group_id,
+                    kind=split["type"],
+                )
+                if change.changed:
+                    changes.append(change)
+        considered += len(seen)
+
+    changes.sort(key=lambda c: (c.date, c.external_id))
+    return changes, considered
+
+@dataclass
+class SyncResult:
+    """What an in-place sync actually did. SPEC §23."""
+
+    updated: int = 0
+    failed: int = 0
+    failures: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.failed == 0
+
+
+def sync_ledger(
+    client: FireflyClient,
+    changes: list[ReapplyChange],
+    *,
+    on_progress=None,
+) -> SyncResult:
+    """Write the current config onto rows already in Firefly. SPEC §23.
+
+    **The non-destructive half of re-apply.** A rename or a re-categorisation
+    changes three fields on an existing row and nothing else, so it does not
+    need the row deleted and pushed again — it needs
+    `PUT /api/v1/transactions/{group}`. That removes the database dump from the
+    critical path, because nothing is deleted and the write is idempotent:
+    config is the source of truth, so a failed run is re-run, not recovered.
+
+    **Verified against the validating code on the pinned tag (v6.6.6)**, not
+    from memory — `app/Api/V1/Requests/Models/Transaction/UpdateRequest.php`
+    and the services it feeds:
+
+      * The update is sparse. `getTransactionData()` starts each split from
+        `$current = []` and copies only the keys present in the request, so
+        omitting `amount`, `date` and `type` leaves them untouched. That is why
+        this can never move money: the fields that carry it are not sent.
+      * `validateJournalIds` returns early for a submission of fewer than two
+        splits, so a single-split group needs no `transaction_journal_id`.
+      * `validateSingleUpdate` skips account validation entirely when no
+        `source_*`/`destination_*` key is present, and when one is, it fetches
+        the original other side itself.
+      * `category_name: ""` clears the category rather than creating a category
+        named empty: `ConvertEmptyStringsToNull` (global middleware in
+        `bootstrap/app.php`) turns it into null, and
+        `CategoryRepository::findCategory` guards its create branch with
+        `'' !== (string) $categoryName`, so `storeCategory` reaches
+        `sync([])`. D10 holds — no category is invented.
+
+    `apply_rules` is deliberately **false**. The rules engine is what produced
+    the categories being corrected here; letting it run on the way in would let
+    a stale rule overwrite the value this function was called to write.
+    """
+    result = SyncResult()
+    for change in changes:
+        if not change.group_id:
+            # A change with no group id never matched a live row. Refusing it
+            # is the point: the alternative is a PUT to a guessed id.
+            result.failed += 1
+            result.failures.append((change.external_id, "no ledger group id — not matched"))
+            continue
+
+        split: dict = {"description": change.new_description}
+        if change.category_changed:
+            split["category_name"] = change.new_category
+        if change.counterparty_changed:
+            side = "destination_name" if change.kind == "withdrawal" else "source_name"
+            split[side] = change.new_counterparty
+        if change.tags_changed:
+            # The whole list, not a delta: `JournalServiceTrait::storeTags`
+            # syncs rather than appends, so anything omitted here is removed.
+            # `new_tags` is built to carry the row's unmanaged tags through.
+            split["tags"] = list(change.new_tags)
+
+        try:
+            client.update_transaction(
+                change.group_id,
+                {"apply_rules": False, "fire_webhooks": False, "transactions": [split]},
+            )
+        except FireflyError as exc:
+            result.failed += 1
+            result.failures.append((change.external_id, str(exc)))
+            log.warning("in-place update failed for %s: %s", change.external_id, exc)
+        else:
+            result.updated += 1
+        if on_progress:
+            on_progress(result)
+    return result
 
 
 # --- the ledger, aggregated --------------------------------------------------
@@ -540,24 +807,209 @@ class LedgerAnalysis:
     spend: Decimal
     gross_income: Decimal
     income: Decimal
+    # Every rupee in minus every rupee out, exclusions and all — which is the
+    # change in the balance over the window and the only figure that deserves
+    # the word "net". `income - spend` is NOT that: both sides already have
+    # §8/§8.1's movement taken out, so their difference counts nothing that
+    # moved. Measured on one window: `income - spend` read more than three
+    # times what the balance actually moved, under a card captioned "earned
+    # less spent, over this window" — true of the arithmetic, and read by a
+    # person as "what I kept".
+    net: Decimal
     withdrawals: int
     deposits: int
     categories: list[Slice]       # real spend, largest first
+    payees: list[Slice]           # real spend by counterparty, largest first
+    sources: list[Slice]          # EVERY deposit by counterparty; sums to gross_income
+    # Firefly's Category, Double and Tag reports, which are all the same
+    # question asked three ways: within one thing, what were the others? §64.
+    payees_by_category: list["Breakdown"]   # a category -> who you paid
+    categories_by_payee: list["Breakdown"]  # a payee -> what it was for
+    categories_by_tag: list["Breakdown"]    # a tag -> which categories
+    # The income side. Reports covered only spending, and "Salary or any other
+    # In out entites" is half the ledger — a report screen that can only answer
+    # about money leaving is answering half the question. §68.
+    sources_by_category: list["Breakdown"]  # an income category -> who paid you
+    categories_by_source: list["Breakdown"] # a source -> what it was booked as
+    # Five-number summaries for a box plot. §74.
+    spread: list["Spread"]
     excluded_spend: list[Slice]   # what `not_spend` kept out, largest first
     excluded_income: Slice        # what the not-earnings tag kept out
     refunds: Slice                # reversals: deposits that undo a spend
     rollups: list[RollUp]
     months: list[MonthTotals]
     hours: list[int]              # 24 buckets, real spend only
+    # 7 buckets, Monday first — `date.weekday()`'s own numbering. §76.
+    weekdays: list[int]
+    weekday_spend: list[Decimal]
     clocked: int                  # spend rows with a clock — sums `hours`
     counted: int                  # spend rows in total. NOT the same number.
     uncategorised: Slice
     not_spend: list[str]
+    # One row per category in `categories`, same order, each carrying that
+    # category's real spend in every month of `months`. §57.
+    category_months: list["CategorySeries"]
+
+
+@dataclass(frozen=True)
+class Spread:
+    """A category's transaction sizes, as a five-number summary. SPEC §74.
+
+    The question a bar chart cannot answer: is this category one big payment or
+    forty small ones? Two categories with the same total look identical on
+    every other chart here.
+
+    **Only computed where it means something.** `MIN_FOR_SPREAD` rows are
+    required, because a quartile over three transactions is arithmetic
+    pretending to be a statistic — and a box plot is unusually good at looking
+    authoritative. Categories below the floor are named instead, not drawn.
+    """
+
+    name: str
+    count: int
+    low: Decimal
+    q1: Decimal
+    median: Decimal
+    q3: Decimal
+    high: Decimal
+
+
+# Below this a five-number summary is noise wearing a chart's clothes.
+MIN_FOR_SPREAD = 5
+
+MIN_FOR_SPREAD = 5
+
+
+def _quantile(ordered: list[Decimal], q: float) -> Decimal:
+    """Linear interpolation between order statistics (the R-7 / numpy default).
+
+    Written out rather than pulled in: `statistics.quantiles` works on floats,
+    and every value here is money. Interpolating between two Decimals with a
+    Decimal weight keeps it exact.
+    """
+    if not ordered:
+        return Decimal(0)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = Decimal(str(q)) * (len(ordered) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    frac = pos - lo
+    return (ordered[lo] + (ordered[hi] - ordered[lo]) * frac).quantize(_CENT)
+
+
+@dataclass(frozen=True)
+class Breakdown:
+    """One thing, and what it is made of. SPEC §64.
+
+    Firefly ships this as three separate report screens — Category, Double
+    (expense/revenue account) and Tag — with a controller each. They are one
+    shape: a named total, and the slices of some *other* dimension inside it.
+    Computing them here means all three carry §8/§8.1's exclusions, which
+    Firefly's own versions do not.
+    """
+
+    name: str
+    amount: Decimal
+    count: int
+    parts: list[Slice]
+
+
+@dataclass(frozen=True)
+class CategorySeries:
+    """One category's spend across the months of the analysis. SPEC §57.
+
+    Aligned with `LedgerAnalysis.months` **by position** and padded with zeros,
+    so a month a category never appears in is a gap in the line rather than a
+    missing point that shifts every later one left.
+    """
+
+    name: str
+    amounts: list[Decimal]
+    # The row total, carried rather than left to the client to add up. Summing
+    # `amounts` in JavaScript would put money through a float on its way to
+    # being displayed, which §16.1 forbids — and this figure already exists
+    # exactly, as the matching entry in `categories`.
+    total: Decimal
+
+
+@dataclass(frozen=True)
+class BalancePoint:
+    day: str  # ISO date
+    balance: Decimal
+
+
+@dataclass(frozen=True)
+class BalanceSeries:
+    """One account's balance over time, from the bank's own running figure."""
+
+    slug: str
+    label: str
+    points: list[BalancePoint]
+    # The last balance recorded strictly BEFORE the window, with its real date.
+    # Without it a windowed line starts at the first transaction of the window
+    # and reads as the opening balance, which it is not.
+    opening: BalancePoint | None
+
+
+def balance_series(
+    transactions: Iterable[Transaction],
+    *,
+    start: date | None = None,
+    end: date | None = None,
+) -> tuple[list[BalancePoint], BalancePoint | None]:
+    """The balance path, one point per day: that day's closing figure. SPEC §57.
+
+    **The balance is the bank's, never accumulated here.** Every statement row
+    carries the running balance the bank printed (`Transaction.balance`), and
+    §6.6's continuity check is what guarantees the chain closes — so reading the
+    last figure of each day is exact. Adding up debits and credits to draw the
+    same line would be a second implementation of the one invariant this project
+    is built on, and it would agree with the check right up until it did not.
+
+    **Pass one account's transactions**, already deduped — `account_transactions`
+    does both, and deduping across accounts on `txn_id` is the data loss §21.1
+    exists to prevent (non-negotiable 10).
+
+    One point per *day*, not per row. Within a day the rows are ordered by
+    `txn_id`, which is `YYYYMMDD` + a daily sequence and therefore sheet order
+    for a bank that numbers its rows. For a bank whose ids are derived (§44.4)
+    that intraday order is arbitrary, so the day's figure is *a* balance recorded
+    that day rather than provably the last one — which is why this is a day
+    resolution chart and not an intraday one.
+    """
+    ordered = sorted(transactions, key=lambda t: (t.txn_date, t.txn_id))
+
+    closing: dict[date, Decimal] = {}
+    for txn in ordered:
+        closing[txn.txn_date] = txn.balance  # later row on the same day wins
+
+    opening: BalancePoint | None = None
+    points: list[BalancePoint] = []
+    for day in sorted(closing):
+        point = BalancePoint(day.isoformat(), closing[day])
+        if start and day < start:
+            opening = point  # keeps advancing; the last one before the window
+            continue
+        if end and day > end:
+            continue
+        points.append(point)
+    return points, opening
 
 
 def _split_amount(split: dict) -> Decimal:
     """Firefly sends `'48.000000000000'`. Decimal, never float (non-negotiable #1)."""
     return Decimal(str(split.get("amount") or "0")).quantize(_CENT)
+
+
+def _within_coverage(month: str, coverage: tuple[date, date] | None) -> bool:
+    """Does the analysis window reach into this `YYYY-MM` at all? §73."""
+    if coverage is None:
+        return True
+    year, number = int(month[:4]), int(month[5:7])
+    first = date(year, number, 1)
+    last = date(year, number, calendar.monthrange(year, number)[1])
+    return coverage[0] <= last and coverage[1] >= first
 
 
 def _month_partial(month: str, coverage: tuple[date, date] | None) -> bool:
@@ -575,12 +1027,113 @@ def _month_partial(month: str, coverage: tuple[date, date] | None) -> bool:
     return coverage[0] > first or coverage[1] < last
 
 
+#: The category the settlement shift exists for, used **only** to populate the
+#: picker before anything is configured. SPEC §103.
+#:
+#: Without it the feature could never be switched on from the UI: the list of
+#: rows you can split is filtered by `Attribution.categories`, which is empty
+#: until `config/attribution.yaml` exists, which is written by splitting a row.
+#: So the picker offers this one, says it is not configured yet, and the first
+#: split writes the file — with this same list in it, which is why the constant
+#: is here rather than spelled out twice.
+#:
+#: It is a default and not an inference: the operator's file wins the moment
+#: there is one, and configuring nothing still shifts nothing.
+DEFAULT_SETTLEMENT_CATEGORIES = ("Credit Card",)
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """When a payment settles spending from another month. SPEC §73.
+
+    > "I pay Credit Card bill in first 10days of the month but it is of
+    >  previous month ... in Aug currently [the bill] in this [part of it]
+    >  should be of Aug only I pay for that"
+
+    A card bill paid on the 5th of August settles July's purchases. Bucketed on
+    its own date it puts July's spending in August, and every month chart is
+    then wrong by a bill.
+
+    **This moves a row's REPORTING month and nothing else.** Not its date in
+    Firefly — non-negotiable 14 forbids an update touching `date`, and the
+    balance line is the bank's own running figure on the bank's own days, which
+    must keep matching the statement. Not the window filter either: a row is
+    still in scope on the day the money actually left, because that is the day
+    the balance moved. Only the month buckets and the category grid move.
+
+    `keep` is the exception the operator asked for: part of a bill can be this
+    month's own spending, and that part stays where it is. It is keyed on the
+    namespaced `external_id`, never the bare `txn_id` (non-negotiable 10).
+    """
+
+    # Categories whose rows settle the previous month.
+    categories: frozenset[str] = frozenset()
+    # Only rows paid on or before this day of the month are shifted — a payment
+    # made late in the month is this month's, not a settlement of the last.
+    before_day: int = 10
+    # Which day of the previous month to attribute to.
+    to_day: int = 22
+    # external_id -> the amount that is THIS month's own spending and stays.
+    keep: dict[str, Decimal] = field(default_factory=dict)
+
+    def split(self, external_id: str, category: str, day: date, amount: Decimal):
+        """`(this_month_part, previous_month_part, shifted_month)`.
+
+        Returns the whole amount as `this_month_part` and no shift when the row
+        is not a settlement — which is every row for an operator who configures
+        nothing, so the default is exactly today's behaviour.
+
+        **§94: the DAY is always `to_day`, only the month moves.**
+
+        > "always put credit card on 22 of the month whether current or
+        >  previous"
+
+        A bill is not spent on the day it is paid; it is the month's card
+        activity, and the operator's mental anchor for that is the statement
+        date. So the settled part lands on the 22nd of the previous month and
+        the kept part on the 22nd of *this* one — not on the payment date,
+        which is an artefact of when they happened to sit down and pay.
+
+        This only affects which MONTH BUCKET each part falls in, and at day
+        resolution the two land in the same buckets they would have anyway. It
+        is recorded because it is what was asked for and because it becomes
+        load-bearing the moment anything here reports by week or by day.
+        """
+        if category not in self.categories or day.day > self.before_day:
+            return amount, Decimal(0), None
+        kept = self.keep.get(external_id, Decimal(0))
+        if kept < 0:
+            kept = Decimal(0)
+        if kept > amount:
+            # A `keep` bigger than the bill is a config error, not a licence to
+            # invent money. Clamp and keep the total intact.
+            kept = amount
+        moved = amount - kept
+        if moved == 0:
+            return amount, Decimal(0), None
+        first = day.replace(day=1)
+        previous = first - timedelta(days=1)
+        target = previous.replace(day=min(self.to_day, calendar.monthrange(previous.year, previous.month)[1]))
+        return kept, moved, target.strftime("%Y-%m")
+
+    def anchor(self, category: str, day: date) -> date:
+        """Where a settlement's KEPT part is dated: `to_day` of its own month.
+
+        Separate from `split` because it answers a different question — which
+        day, not which month — and only the day-resolution views need it.
+        """
+        if category not in self.categories or day.day > self.before_day:
+            return day
+        last = calendar.monthrange(day.year, day.month)[1]
+        return day.replace(day=min(self.to_day, last))
+
 def ledger_analysis(
     splits: Iterable[dict],
     *,
     times: dict[str, time | None] | None = None,
     coverage: tuple[date, date] | None = None,
     rules: dict | None = None,
+    attribution: "Attribution | None" = None,
 ) -> LedgerAnalysis:
     """Aggregate Firefly's own splits under §8/§8.1's exclusions.
 
@@ -594,6 +1147,7 @@ def ledger_analysis(
     A pure function over data: no HTTP, no file reads. The tests feed it splits.
     """
     rules = rules if rules is not None else load_rules()
+    attribution = attribution or Attribution()
     not_spend = load_not_spend(rules)
     rollup_members = tag_rollups(rules)
     times = times or {}
@@ -605,8 +1159,28 @@ def ledger_analysis(
     excluded_income = [Decimal(0), 0]
     refunds = [Decimal(0), 0]
     by_tag: dict[str, list[Decimal]] = {}
+    # Firefly's own "expense/revenue account" report, computed here rather than
+    # from the archive so it carries §8/§8.1's exclusions like every other
+    # figure on the page (non-negotiable 9). The counterparty is the name
+    # `build_payload` pushed, which is the alias the operator chose.
+    by_payee: dict[str, list[Decimal]] = {}
+    by_source: dict[str, list[Decimal]] = {}
+    by_category_month: dict[tuple[str, str], Decimal] = {}
+    # The three drill-downs, accumulated in the one pass that already has the
+    # exclusions applied — a second pass would be a second implementation of
+    # §8/§8.1 and would drift from it.
+    cross_cat_payee: dict[tuple[str, str], list] = {}
+    cross_tag_cat: dict[tuple[str, str], list] = {}
+    cross_cat_source: dict[tuple[str, str], list] = {}
+    amounts_by_category: dict[str, list[Decimal]] = {}
     months: dict[str, list[Decimal]] = {}
     hours = [0] * 24
+    # The hour histogram needs a clock, which only 81 of 84 rows carry. A
+    # weekday needs only the DATE, which every row has — so this covers the
+    # whole ledger where the hour chart covers most of it, and the two are
+    # counted separately for that reason. §76.
+    weekdays = [0] * 7
+    weekday_spend = [Decimal(0)] * 7
     clocked = counted = 0
 
     for split in splits:
@@ -629,15 +1203,72 @@ def ledger_analysis(
             bucket = by_category.setdefault(category, [Decimal(0), 0])
             bucket[0] += amount
             bucket[1] += 1
+
+            # §73. Where does this row's spending BELONG, as opposed to where
+            # the money moved? For everything but a configured settlement those
+            # are the same day, `here` is the whole amount and `shifted` is
+            # None — so an operator who configures nothing sees no change.
+            here, moved, shifted = attribution.split(
+                str(split.get("external_id") or ""),
+                category,
+                date.fromisoformat(str(split.get("date") or "")[:10]) if month else date.min,
+                amount,
+            )
+
+            if month and here:
+                # Real spend only, so this sums to the category bar beside it.
+                # An excluded category `continue`s above and never reaches here.
+                by_category_month[(category, month)] = (
+                    by_category_month.get((category, month), Decimal(0)) + here
+                )
+            if shifted and moved:
+                by_category_month[(category, shifted)] = (
+                    by_category_month.get((category, shifted), Decimal(0)) + moved
+                )
+            amounts_by_category.setdefault(category, []).append(amount)
+
+            payee = _counterparty(split) or "(unnamed)"
+            slot = by_payee.setdefault(payee, [Decimal(0), 0])
+            slot[0] += amount
+            slot[1] += 1
+
+            pair = cross_cat_payee.setdefault((category, payee), [Decimal(0), 0])
+            pair[0] += amount
+            pair[1] += 1
+            for tag in tags:
+                if tag in rollup_members:
+                    cell = cross_tag_cat.setdefault((str(tag), category), [Decimal(0), 0])
+                    cell[0] += amount
+                    cell[1] += 1
             for tag in tags:
                 if tag in rollup_members:
                     slot = by_tag.setdefault(tag, [Decimal(0), 0])
                     slot[0] += amount
                     slot[1] += 1
-            if month:
-                months.setdefault(month, [Decimal(0), Decimal(0)])[0] += amount
+            # Same split as above: the month buckets and the category grid have
+            # to agree, so they read one decision rather than making two.
+            if month and here:
+                months.setdefault(month, [Decimal(0), Decimal(0)])[0] += here
+            if shifted and moved:
+                # **Only into a month the window already covers.** `/analysis`
+                # filters splits to the window and only then calls this, so a
+                # shift that mints its own bucket grows a column for a month
+                # the range picker says is excluded — seeded by one settled
+                # bill and nothing else. When the target is outside, the money
+                # stays where it was paid: visibly in the wrong month beats
+                # invisibly in a month you did not ask for, and the total is
+                # unchanged either way.
+                if shifted in months or _within_coverage(shifted, coverage):
+                    months.setdefault(shifted, [Decimal(0), Decimal(0)])[0] += moved
+                else:
+                    months.setdefault(month, [Decimal(0), Decimal(0)])[0] += moved
+                    here, moved, shifted = here + moved, Decimal(0), None
 
             counted += 1
+            if month:
+                wd = date.fromisoformat(str(split.get("date") or "")[:10]).weekday()
+                weekdays[wd] += 1
+                weekday_spend[wd] += amount
             # Tolerant join (§21.1): the split's external_id may be namespaced
             # (`canara-1111-2026…`) or bare, and `times` is keyed on the bank's
             # own id — which is only unique WITHIN an account, so `times` must be
@@ -660,6 +1291,25 @@ def ledger_analysis(
             if REVERSAL_TAG in tags:
                 refunds[0] += amount
                 refunds[1] += 1
+            # **Who paid you is asked of EVERY deposit, before the earnings
+            # test.** §72: this used to sit after the `continue` below, so a
+            # deposit tagged `not-earnings` never reached it — and the operator
+            # noticed exactly the right thing, that money from their mother was
+            # missing from a report headed "inside each source, what the money
+            # was booked as". "Who paid you" and "what did you earn" are two
+            # questions and only the second one excludes.
+            #
+            # So `sources` sums to `gross_income`, not to `income`. The tile
+            # beside the earnings figure says which it is, and a test pins it.
+            source = _counterparty(split) or "(unnamed)"
+            slot = by_source.setdefault(source, [Decimal(0), 0])
+            slot[0] += amount
+            slot[1] += 1
+            in_cat = split.get("category_name") or "(no category)"
+            cell = cross_cat_source.setdefault((str(in_cat), source), [Decimal(0), 0])
+            cell[0] += amount
+            cell[1] += 1
+
             if NOT_EARNINGS_TAG in tags:
                 excluded_income[0] += amount
                 excluded_income[1] += 1
@@ -675,14 +1325,68 @@ def ledger_analysis(
             key=lambda s: (-s.amount, s.name),
         )
 
+    ordered_months = sorted(months)
+
+    def breakdowns(cross: dict[tuple[str, str], list], outer_first: bool) -> list[Breakdown]:
+        """Group a two-key accumulator into `outer -> [inner slices]`.
+
+        `outer_first` says which half of the key is the thing being broken
+        down: the category->payee map is keyed (category, payee) and the
+        payee->category view is the SAME map read the other way round, so it is
+        built once and inverted rather than accumulated twice.
+        """
+        grouped: dict[str, dict[str, list]] = {}
+        for (a, b), (total, n) in cross.items():
+            outer, inner = (a, b) if outer_first else (b, a)
+            slot = grouped.setdefault(outer, {}).setdefault(inner, [Decimal(0), 0])
+            slot[0] += total
+            slot[1] += int(n)
+        out = [
+            Breakdown(
+                name=outer,
+                amount=sum((v[0] for v in inners.values()), Decimal(0)),
+                count=sum(int(v[1]) for v in inners.values()),
+                parts=sorted(
+                    (Slice(k, v[0], int(v[1])) for k, v in inners.items()),
+                    key=lambda s: (-s.amount, s.name),
+                ),
+            )
+            for outer, inners in grouped.items()
+        ]
+        return sorted(out, key=lambda b: (-b.amount, b.name))
+
     return LedgerAnalysis(
         gross_spend=gross_spend,
         spend=spend,
         gross_income=gross_income,
         income=income,
+        net=gross_income - gross_spend,
         withdrawals=withdrawals,
         deposits=deposits,
         categories=slices(by_category),
+        payees=slices(by_payee),
+        sources=slices(by_source),
+        payees_by_category=breakdowns(cross_cat_payee, outer_first=True),
+        categories_by_payee=breakdowns(cross_cat_payee, outer_first=False),
+        categories_by_tag=breakdowns(cross_tag_cat, outer_first=True),
+        sources_by_category=breakdowns(cross_cat_source, outer_first=True),
+        categories_by_source=breakdowns(cross_cat_source, outer_first=False),
+        spread=sorted(
+            (
+                Spread(
+                    name=name,
+                    count=len(values),
+                    low=min(values),
+                    q1=_quantile(sorted(values), 0.25),
+                    median=_quantile(sorted(values), 0.5),
+                    q3=_quantile(sorted(values), 0.75),
+                    high=max(values),
+                )
+                for name, values in amounts_by_category.items()
+                if len(values) >= MIN_FOR_SPREAD
+            ),
+            key=lambda s: (-s.median, s.name),
+        ),
         excluded_spend=slices(excluded),
         excluded_income=Slice(NOT_EARNINGS_TAG, excluded_income[0], int(excluded_income[1])),
         refunds=Slice(REVERSAL_TAG, refunds[0], int(refunds[1])),
@@ -696,10 +1400,20 @@ def ledger_analysis(
             for tag, (total, n) in sorted(by_tag.items(), key=lambda kv: -kv[1][0])
         ],
         months=[
-            MonthTotals(month, totals[0], totals[1], _month_partial(month, coverage))
-            for month, totals in sorted(months.items())
+            MonthTotals(month, months[month][0], months[month][1], _month_partial(month, coverage))
+            for month in ordered_months
+        ],
+        category_months=[
+            CategorySeries(
+                name=s.name,
+                amounts=[by_category_month.get((s.name, m), Decimal(0)) for m in ordered_months],
+                total=s.amount,
+            )
+            for s in slices(by_category)
         ],
         hours=hours,
+        weekdays=weekdays,
+        weekday_spend=weekday_spend,
         clocked=clocked,
         counted=counted,
         uncategorised=Slice(
@@ -717,9 +1431,22 @@ def ledger_analysis(
 # read here therefore tolerates both forms and every write is namespaced.
 
 _BARE_TXN_ID = re.compile(r"^\d{14}$")
-_NAMESPACED = re.compile(r"^(?P<slug>[a-z0-9][a-z0-9-]*)-(?P<txn_id>\d{14})$")
 
-
+#: What a transaction id looks like, in the two forms a bank can give it.
+#:
+#: `20260509000001` — Canara's `YYYYMMDD` plus a per-date ordinal — and
+#: `d-<16 hex>`, which is §44.4's hash of the whole row, used for a bank that
+#: prints no per-row reference at all. Union is that bank.
+#:
+#: **The second form was missing.** SPEC §105: `_NAMESPACED` accepted only 14
+#: digits, so `union-2222-d-0f4b…` matched nothing and every read of it was
+#: wrong in a different way — `slug_of` said None, `txn_id_of` handed back the
+#: whole namespaced string, and `verify-ledger` reported all 32 rows as
+#: carrying "the bank's bare id" and told the operator to run a migration that
+#: had already been run. A red cross for something that is fine is the same
+#: failure as a green tick for something that is not (non-negotiable 11).
+_TXN_ID_FORM = r"\d{14}|d-[0-9a-f]{16}"
+_NAMESPACED = re.compile(rf"^(?P<slug>[a-z0-9][a-z0-9-]*)-(?P<txn_id>{_TXN_ID_FORM})$")
 def txn_id_of(external_id: str) -> str:
     """The bank's own id, from either form.
 
@@ -1136,6 +1863,57 @@ def account_transactions(
         for txn in statement.transactions:
             seen.setdefault(txn.txn_id, txn)
     return list(seen.values())
+
+
+def archived_transactions(
+    accounts: "list[Account]",
+    archive: Path = Path("archive"),
+    start: date | None = None,
+    end: date | None = None,
+) -> list[Transaction]:
+    """The deduped rows for these accounts, optionally inside a window. SPEC §26.
+
+    **Deduped per account and then concatenated** (§21.1). The bank sequences
+    `txn_id` per account, so a dedupe *across* accounts is the silent data loss
+    that rule exists to prevent: two accounts, 186 rows, 93 survive, no error.
+    `account_transactions` narrows to one account first, which is what makes the
+    bank's own id a safe key.
+
+    Reads the archive. This is the seam an index goes behind later — the
+    signature is the whole contract, so a cache can replace the body without any
+    caller learning about it.
+    """
+    out: list[Transaction] = []
+    for account in accounts:
+        rows = account_transactions(account, archive, extra=())
+        out.extend(
+            t
+            for t in rows
+            if (start is None or t.txn_date >= start) and (end is None or t.txn_date <= end)
+        )
+    return out
+
+
+def archived_coverage(
+    accounts: "list[Account]", archive: Path = Path("archive")
+) -> tuple[date, date] | None:
+    """The window these accounts' statements cover. SPEC §26.2.
+
+    The **declared** period, not the span of transaction dates: a quiet
+    fortnight at the start of a range is covered, not missing, and using the
+    rows would silently shorten the month and mark it partial.
+
+    Like `archived_transactions`, this is the seam an index goes behind later.
+    """
+    statements = archived_statements(archive)
+    spans = [
+        span
+        for account in accounts
+        if (span := statement_coverage(statements_for(account, statements)))
+    ]
+    if not spans:
+        return None
+    return min(s[0] for s in spans), max(s[1] for s in spans)
 
 
 def sync_history(archive: Path = Path("archive"), limit: int = 10) -> list[dict]:

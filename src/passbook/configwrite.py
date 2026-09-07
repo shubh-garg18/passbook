@@ -142,8 +142,16 @@ def plan_categories(
     assignments: dict[str, str],
     aliases: dict[str, str],
     path: Path | None = None,
+    *,
+    renames: dict[str, str] | None = None,
 ) -> ConfigChange:
-    """Assign tokens to categories in rules.yaml.
+    """Assign tokens to categories in rules.yaml, following any payee renames.
+
+    `renames` is old display name -> new display name, and is applied FIRST so
+    an explicit category chosen in the same submission overwrites it rather than
+    racing it. It lives here rather than in a plan of its own because two plans
+    over one file do not compose: each would diff against the text on disk, and
+    applying both would leave whichever ran last.
 
     `assignments` is raw token -> category name. Two things make this less
     obvious than it looks:
@@ -163,6 +171,9 @@ def plan_categories(
     rules = data.get("rules")
     if rules is None:
         return ConfigChange(path=path, before=before, after=before)
+
+    if renames:
+        _follow_renames(rules, renames)
 
     by_category = {spec.get("category"): spec for spec in rules if spec.get("category")}
 
@@ -194,6 +205,35 @@ def plan_categories(
 
     return ConfigChange(path=path, before=before, after=_dump(data))
 
+
+def _follow_renames(rules, renames: dict[str, str]) -> None:
+    """Follow a payee rename through the rule payee lists. SPEC §23.4.
+
+    Rules match the **display name** — `description_starts: Canteen` against a
+    description pushed as `Canteen (UPI)`. So renaming an alias moves the
+    description out from under its own rule, and the row silently loses the
+    category the operator had already chosen for it. Measured: alias
+    `Canteen` -> `Mess` left `payees: [Canteen]` in place, and
+    `predict_category('Mess (UPI)')` returned `''`.
+
+    This is not D10's "never invent a category". Nothing is inferred: the
+    classification already exists and the operator has only relabelled the thing
+    it is attached to. Dropping it would discard a decision, not withhold a
+    guess.
+
+    Rewritten in place, so the entry keeps its position and — more to the point
+    — its comment, which is where D10's evidence lives.
+    """
+    for spec in rules:
+        payees = spec.get("payees")
+        if not payees:
+            continue
+        for index, payee in enumerate(payees):
+            renamed = renames.get(str(payee))
+            # A rename onto a name already in the list would duplicate the
+            # entry. Leave it; the loop below de-duplicates on assignment.
+            if renamed and renamed not in payees:
+                payees[index] = renamed
 
 def known_categories(path: Path | None = None) -> list[str]:
     """Categories that already have a rule. The UI offers only these."""

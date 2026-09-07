@@ -343,7 +343,7 @@ upgrade:
 	echo
 	uv run passbook upgrade
 
-# CLAUDE.md non-negotiable 14. A one-time scrub that nothing enforces is undone
+# non-negotiable 14. A one-time scrub that nothing enforces is undone
 # by the next phase, so this runs in `make test` as well.
 audit-docs:
 	@uv run pytest tests/test_docs.py -q

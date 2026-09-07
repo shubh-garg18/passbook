@@ -6,6 +6,7 @@
 
 import json
 import logging
+import sys
 import shutil
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ from .firefly.purge import find_candidates
 from .firefly.purge import purge as purge_transactions
 from .firefly.push import build_payload, push_transactions
 from .loaders import load as load_statement
+from .loaders import read_grid
 from .loaders._table import ParseError
 from .models import Transaction, normalised
 from .validate import (
@@ -170,6 +172,137 @@ def parse(
     )
     for warning in warnings:
         console.print(f"  [yellow]warn[/yellow] {warning}")
+
+
+@app.command()
+def inspect(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    rows: int = typer.Option(18, "--rows", "-n", help="how many rows to show"),
+    password: str = typer.Option(
+        None, "--password", prompt=False, help="for an encrypted PDF; never stored"
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose"),
+) -> None:
+    """Show a statement's raw grid, so you can write a bank profile. SPEC §27.
+
+    **This is the tool that means you never have to send anyone your
+    statement.** It prints what a parser sees — every cell as `repr()`, so a
+    space is visibly a space — and then says which of the six required columns
+    it could already match. Copy the header text it shows into
+    `config/banks/<yourbank>.yaml` and passbook can read your bank. No Python.
+
+    It parses nothing and pushes nothing. Safe on a file from any bank.
+
+    Read the output for these, in order:
+
+      1. Which row is the header, and its EXACT text (typos included).
+      2. How an empty amount cell prints — `' '` is not `''`, and confusing the
+         two is the likeliest silent bug in this whole project.
+      3. The date format.
+      4. Whether amounts carry thousands separators.
+    """
+    _setup_logging(verbose)
+    from .loaders import sniff
+    from .loaders._table import COL_ALIASES, REQUIRED_COLS, _all_aliases, norm
+    from .loaders.profiles import known_banks
+
+    kind = sniff(file)
+    console.print(f"[bold]{file.name}[/bold] — container: [cyan]{kind}[/cyan]")
+    profiles = known_banks()
+    console.print(
+        "profiles loaded: " + (", ".join(profiles) if profiles else "[dim]none[/dim]")
+    )
+
+    grid = _grid(file, kind, password)
+    if grid is None:
+        err.print(f"[red]no grid reader for {kind!r}[/red] — see docs/ADDING-A-BANK.md")
+        raise typer.Exit(2)
+
+    console.print(f"grid: {len(grid)} rows x {max((len(r) for r in grid), default=0)} cols\n")
+
+    aliases = _all_aliases()
+    best: tuple[int, dict[str, int]] | None = None
+    for index, row in enumerate(grid[: min(len(grid), 50)]):
+        found = {}
+        for c, cell in enumerate(row):
+            field = aliases.get(norm(cell))
+            if field and field not in found:
+                found[field] = c
+        if len(found) > len(best[1] if best else {}):
+            best = (index, found)
+
+    table = Table(show_lines=False, header_style="bold", title="raw cells, as repr()")
+    table.add_column("row", justify="right")
+    width = max((len(r) for r in grid), default=0)
+    for c in range(min(width, 9)):
+        table.add_column(str(c), overflow="fold")
+    for index, row in enumerate(grid[:rows]):
+        marker = f"[green]{index}[/green]" if best and index == best[0] else str(index)
+        cells = [repr(cell)[:34] for cell in row[:9]]
+        cells += [""] * (min(width, 9) - len(cells))
+        table.add_row(marker, *cells)
+    console.print(table)
+
+    console.print()
+    if best and best[1]:
+        console.print(f"best header guess: [green]row {best[0]}[/green]")
+        for field, column in sorted(best[1].items(), key=lambda kv: kv[1]):
+            console.print(f"  [green]ok[/green]   col {column:<2} -> {field}")
+        missing = sorted(REQUIRED_COLS - best[1].keys())
+        if missing:
+            console.print(f"\n  [yellow]missing[/yellow]: {', '.join(missing)}")
+            console.print(
+                "\nWrite these into [bold]config/banks/<yourbank>.yaml[/bold], using the "
+                "header text exactly as printed above:\n"
+            )
+            console.print("[dim]bank: yourbank\ncolumns:[/dim]")
+            for field in missing:
+                console.print(f'[dim]  "<the header cell for {field}>": {field}[/dim]')
+            console.print(
+                "\nMatching ignores case, spaces and punctuation, so you do not have to "
+                "reproduce those exactly."
+            )
+        else:
+            console.print("\n[green]every required column already matches[/green] — "
+                          "`passbook parse` should work on this file.")
+    else:
+        console.print(
+            "[yellow]no header row recognised.[/yellow] Find the row above whose cells are "
+            "column names, and map each one in config/banks/<yourbank>.yaml. Required "
+            f"fields: {', '.join(sorted(REQUIRED_COLS))}"
+        )
+
+    console.print(
+        f"\n[dim]built-in aliases: {len(COL_ALIASES)}; "
+        f"after profiles: {len(aliases)}[/dim]"
+    )
+    console.print("[dim]Full walkthrough: docs/ADDING-A-BANK.md[/dim]")
+
+
+def _grid(file: Path, kind: str, password: str | None = None):
+    """`read_grid`, with a terminal prompt for an encrypted PDF.
+
+    The prompt is the only thing this adds. Everything else lives in
+    `read_grid`, which the Add-a-bank page calls too and which must raise rather
+    than prompt — see §34.
+    """
+    if kind == "pdf":
+        from .loaders.pdf import PdfPasswordRequired, PdfPasswordWrong
+
+        while True:
+            try:
+                return read_grid(file, kind, password)
+            except (PdfPasswordRequired, PdfPasswordWrong) as exc:
+                # Prompting belongs HERE and nowhere else. `read_grid` is called
+                # by the web page too, which needs the exception so it can put a
+                # password field on screen — a reader that prompts or exits is a
+                # reader only a terminal can use.
+                if not sys.stdin.isatty():
+                    err.print(f"[red]{exc}[/red] Pass --password.")
+                    raise typer.Exit(2) from exc
+                console.print(f"[yellow]{exc}[/yellow]")
+                password = typer.prompt("PDF password", hide_input=True)
+    return read_grid(file, kind, password)
 
 
 @app.command()
@@ -1071,6 +1204,112 @@ def bootstrap(
 
 
 @app.command()
+def resync(
+    confirm: bool = typer.Option(False, "--confirm", help="actually write; omit for a dry run"),
+    verbose: bool = typer.Option(False, "-v", "--verbose"),
+) -> None:
+    """Write the current config onto rows already in Firefly. SPEC §23.
+
+    Aliases and rules are applied at push time, so editing `config/` leaves rows
+    already pushed showing the names they were pushed with. This rewrites those
+    rows in place — description, category, the payee account on the other side,
+    and the tags your rules derive — with
+    `PUT /api/v1/transactions/<group>`.
+
+    **Not a purge.** Nothing is deleted, no dump is required, and running it
+    twice is the same as running it once. What it cannot do is create a row that
+    is missing from Firefly or correct an amount: those come from the statement,
+    so they need `passbook sync` or a re-push. Anything left over is re-read from
+    Firefly and reported rather than assumed away.
+
+    Dry run unless --confirm.
+    """
+    _setup_logging(verbose)
+    settings = load_settings()
+    if not settings.firefly_token:
+        err.print("[red]FIREFLY_TOKEN is not set.[/red] Run `passbook doctor`.")
+        raise typer.Exit(5)
+
+    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
+        changes, considered = service.reapply_preview(client, settings)
+
+        if considered == 0:
+            # A green "0 of 0 match" is the exact shape of §23.1's bug.
+            console.print(
+                "[yellow]nothing was compared[/yellow] — no row in Firefly carries an "
+                "external_id matching a statement in archive/. That is an unanswered "
+                "question, not a pass. Check `passbook verify-ledger` and that "
+                "PASSBOOK_ASSET_ACCOUNT names the account the rows were pushed into."
+            )
+            raise typer.Exit(7)
+
+        if not changes:
+            console.print(
+                f"[green]nothing to do[/green] — all {considered} row(s) in Firefly "
+                "already match the current config."
+            )
+            return
+
+        console.print(
+            f"[bold]{'RESYNC' if confirm else 'dry run'}[/bold] — "
+            f"{len(changes)} of {considered} row(s) differ\n"
+        )
+        for change in changes[:10]:
+            console.print(f"  [dim]{change.date}  {change.external_id}[/dim]")
+            if change.name_changed:
+                console.print(
+                    f"    name      {change.old_description!r} -> "
+                    f"[bold]{change.new_description!r}[/bold]"
+                )
+            if change.category_changed:
+                console.print(
+                    f"    category  {change.old_category or '(none)'!r} -> "
+                    f"[bold]{change.new_category or '(none)'!r}[/bold]"
+                )
+            if change.counterparty_changed:
+                console.print(
+                    f"    payee a/c {change.old_counterparty!r} -> "
+                    f"[bold]{change.new_counterparty!r}[/bold]"
+                )
+            if change.tags_changed:
+                console.print(
+                    f"    tags      {list(change.old_tags)} -> "
+                    f"[bold]{list(change.new_tags)}[/bold]"
+                )
+        if len(changes) > 10:
+            console.print(f"  [dim]... and {len(changes) - 10} more[/dim]")
+
+        if not confirm:
+            console.print(
+                "\n[yellow]Dry run — nothing written.[/yellow] "
+                "Re-run with --confirm to apply."
+            )
+            return
+
+        result = service.sync_ledger(client, changes)
+        for external_id, message in result.failures[:10]:
+            console.print(f"  [red]fail[/red] {external_id}: {message}")
+
+        # Re-read. "12 requests returned 200" is not the same claim as "12 rows
+        # in the ledger now match", and only the second one is worth printing.
+        remaining, _ = service.reapply_preview(client, settings)
+
+    console.print(
+        f"\n[green]{result.updated} updated[/green], {result.failed} failed, "
+        f"{len(remaining)} still differing."
+    )
+    if remaining:
+        console.print(
+            "[yellow]Rows an update cannot fix[/yellow] — a row missing from Firefly, or "
+            "one whose amount or date is wrong. Those need a re-push: "
+            "`passbook purge --confirm` then `passbook sync`."
+        )
+        raise typer.Exit(7)
+    if not result.ok:
+        raise typer.Exit(7)
+
+
+@app.command()
 def purge(
     account: str = typer.Option(None, help="asset account name; defaults to PASSBOOK_ASSET_ACCOUNT"),
     confirm: bool = typer.Option(False, "--confirm", help="actually delete; omit for a dry run"),
@@ -1314,7 +1553,7 @@ def upgrade(
             if problem:
                 err.print(
                     f"[red]{step.name} did not finish:[/red] {problem}\n"
-                    f"Nothing recorded. Recover from {newest.name} if the ledger is "
+                    f"Nothing recorded. Recover from {name} if the ledger is "
                     "short — `passbook verify-ledger` will say which it is."
                 )
                 raise typer.Exit(7)

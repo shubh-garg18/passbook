@@ -1,0 +1,48 @@
+# A bank profile. Copy to config/banks/<yourbank>.yaml and edit. SPEC §27.
+#
+# This file adds a bank WITHOUT writing any Python and WITHOUT sending your
+# statement to anyone. The workflow is:
+#
+#   1. uv run passbook inspect ~/Downloads/your-statement.xls
+#      It prints the raw grid — every cell as repr(), so a space is visibly a
+#      space — then says which columns it already matched and which it did not.
+#   2. Copy the header text it printed into `columns:` below.
+#   3. uv run passbook parse ~/Downloads/your-statement.xls
+#      If the balance chain does not hold, a column is mapped wrongly. Fix the
+#      profile — never the check.
+#   4. Add the account: Account -> Add an account in the UI, or
+#      `uv run passbook accounts add <statement>`.
+#
+# Header matching ignores case, spaces and punctuation, so "Ref No./Cheque No."
+# also matches "REF NO / CHEQUE NO". You do not have to be exact about those —
+# only about the words.
+
+bank: sbi
+
+# The six required fields. Left side = the header cell in YOUR file.
+columns:
+  "Txn Date": date
+  # A per-row unique id. It becomes part of external_id, so it must be stable
+  # across re-downloads of the same period — a reference number, not a row
+  # counter. If your bank truly has none, say so in an issue: there is a hash
+  # fallback (SPEC §6.1) and it needs wiring per bank.
+  "Ref No./Cheque No.": txn_id
+  "Debit": debit
+  "Credit": credit
+  "Balance": balance
+  "Description": narration
+
+# Optional. Found as label/value pairs in the rows above the header.
+# `account_number` is the important one: it is what routes a statement to the
+# right account and backs the §6.7 assertion.
+metadata:
+  "Account Number": account_number
+  "Account Name": account_name
+  "IFSC Code": ifsc
+
+# Optional. Tried after the built-in DD-MMM-YYYY form, via strptime.
+# Prefer numeric months where your bank gives you the choice: %b is
+# locale-sensitive and this file may be read on a machine set to another locale.
+dates:
+  - "%d/%m/%Y"
+  - "%d %b %Y"

@@ -1,0 +1,34 @@
+# Union Bank of India — net banking PDF statement. SPEC §55.
+#
+# Verified against a real 12-month export: 32 transactions, balance chain clean,
+# opening and closing both matching the statement's own sentinels. The file was
+# never read — the layout came from a geometry probe (§53) and the verification
+# ran structurally, reporting counts and the chain verdict only.
+#
+# Two things about this bank that the reader had to learn (§51, §54):
+#
+#   * the column headings are CENTRED over their columns, not aligned with the
+#     values, so every heading sits 13-45 points away from its own data;
+#   * balances carry a trailing `Cr` as a separate token, and `Dr` when
+#     overdrawn.
+#
+# `Chq` is mapped because the column exists, but it is blank on every UPI and
+# NEFT row — which is most of them — so those rows get a derived id instead
+# (§44.4). That is automatic; nothing here has to ask for it.
+bank: union
+
+columns:
+  "Date": date
+  "Chq": txn_id
+  "Particulars": narration
+  "Withdrawal": debit
+  "Deposit": credit
+  "Balance": balance
+
+metadata:
+  "Account Number": account_number
+  "IFSC": ifsc
+
+# Numeric month on purpose: `%b` reads the C locale's month names, which differ
+# between WSL and CI. SPEC §27.
+dates: ["%d-%m-%Y"]

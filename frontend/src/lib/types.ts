@@ -27,8 +27,10 @@ export type SyncStatus = {
   filename: string | null
   headline: string
   detail: string
+  /** ISO. The masthead stamps it, so it travels with the age rather than being
+   *  recomputed from a second field that could disagree with it. */
+  date: string | null
 }
-
 export type Overview = {
   /** The selected account's balance, or the SUM across accounts for `all` —
    *  which is a true figure but cannot be reconciled against any one
@@ -47,10 +49,15 @@ export type Overview = {
 export type AccountSummary = {
   slug: string
   bank: string
+  /** `Canara`. The slug is a filename; nothing in the UI shows one. */
+  bankName: string
   /** `****1111`. The full number never crosses this boundary (§11). */
   account: string
   assetAccount: string
+  /** The operator's own name if they set one, else `Canara ****1111`. §25. */
   label: string
+  /** Whether `label` is a decision or a default. */
+  renamed: boolean
   selected: boolean
 }
 
@@ -73,13 +80,55 @@ export type Slice = { name: string; amount: string; count: number }
  * can show what was excluded rather than quietly differing from the statement.
  */
 export type Analysis = {
+  /** The window the server resolved, and what it is hiding. SPEC §25. */
+  window: { range: string; from: string | null; to: string | null }
+  outsideWindow: number
   spend: string
   grossSpend: string
   income: string
   grossIncome: string
+  /** Every rupee in minus every rupee out — the change in the balance over
+   *  the window. NOT `income - spend`: both of those already exclude movement,
+   *  so their difference counts nothing that moved. */
+  net: string
   withdrawals: number
   deposits: number
   categories: Slice[]
+  /** Real spend by counterparty — Firefly's "expense accounts" report, but
+   *  through `ledger_analysis` so §8/§8.1's exclusions apply (non-negotiable 9). */
+  payees: Slice[]
+  /** Counted income by counterparty. The not-earnings deposits are excluded. */
+  sources: Slice[]
+  /** One thing and what it is made of. Firefly ships these as three separate
+   *  report screens (Category, Double, Tag); they are one shape. */
+  payeesByCategory: Breakdown[]
+  categoriesByPayee: Breakdown[]
+  categoriesByTag: Breakdown[]
+  sourcesByCategory: Breakdown[]
+  categoriesBySource: Breakdown[]
+  /** Five-number summaries, for the box plot. Only categories with enough
+   *  transactions to summarise honestly appear (see `MIN_FOR_SPREAD`). */
+  spread: {
+    name: string
+    count: number
+    low: string
+    q1: string
+    median: string
+    q3: string
+    high: string
+  }[]
+  /** One row per entry in `categories`, same order. `amounts` is aligned with
+   *  `months` BY POSITION and zero-padded — never re-key it by month name. */
+  categoryMonths: { name: string; amounts: string[]; total: string }[]
+  /** One line per account, never a sum. See the note in `/analysis`. */
+  balances: {
+    slug: string
+    label: string
+    points: { day: string; balance: string }[]
+    /** The last balance before the window, so a windowed line does not open at
+     *  its first transaction and read as the opening balance. */
+    opening: { day: string; balance: string } | null
+  }[]
   excludedSpend: Slice[]
   excludedSpendTotal: string
   excludedIncome: Slice
@@ -88,6 +137,10 @@ export type Analysis = {
   months: { month: string; spend: string; income: string; partial: boolean }[]
   /** 24 buckets, spend rows only. Sums to `clocked`, NOT to `counted`. */
   hours: number[]
+  /** 7 buckets, Monday first. Unlike `hours` this needs only the date, so it
+   *  covers every counted row rather than the ones carrying a clock. */
+  weekdays: number[]
+  weekdaySpend: string[]
   clocked: number
   counted: number
   uncategorised: Slice
@@ -96,7 +149,6 @@ export type Analysis = {
   accounts: string[]
   coverage: { from: string; to: string } | null
 }
-
 export type Txn = {
   id: string
   date: string
@@ -171,22 +223,47 @@ export type DiffResponse = {
   categoryChanges: Record<string, string>
 }
 
+/** What removing an account would leave behind. SPEC §25. */
+export type Removal = {
+  account: AccountSummary
+  /** null when Firefly could not be asked; `countReason` then says why. */
+  ledgerRows: number | null
+  archiveFiles: number
+  countReason: string
+  last: boolean
+}
+
 export type ReapplyChange = {
   externalId: string
+  /** The id `PUT /api/v1/transactions/{group}` needs. A change without one
+   *  never matched a live row and is refused rather than guessed at. §24. */
+  groupId: string
   date: string
   amount: string
+  kind: string
   oldDescription: string
   newDescription: string
   oldCategory: string
   newCategory: string
+  oldCounterparty: string
+  newCounterparty: string
+  oldTags: string[]
+  newTags: string[]
   nameChanged: boolean
   categoryChanged: boolean
+  counterpartyChanged: boolean
+  tagsChanged: boolean
 }
 
 export type ReapplyPreview = {
+  /** Rows actually compared. Zero is "nothing was checked", never "nothing
+   *  differs" — §24.1, and it gates the green tick. */
   considered: number
   renames: number
   recats: number
+  counterparties: number
+  retags: number
+  tagsLost: { tag: string; rows: number }[]
   changes: ReapplyChange[]
   /** The precondition, not a warning: a purge is refused without a recent dump.
    *  This container cannot take one — it can only read `backups/`. §18.7. */
@@ -196,6 +273,20 @@ export type ReapplyPreview = {
     maxAgeMinutes: number
     fresh: boolean
   }
+}
+
+export type SyncResult = {
+  ok: boolean
+  considered: number
+  attempted: number
+  updated: number
+  failed: number
+  failures: { externalId: string; message: string }[]
+  /** Re-read from Firefly afterwards, not inferred from the request count.
+   *  Anything left needs a re-push — an update cannot create a missing row.
+   *  `null` means the re-read itself failed: unverified, which is a third
+   *  state and must never render as a pass (non-negotiable 11). */
+  remaining: number | null
 }
 
 export type ReapplyResult = {
@@ -247,4 +338,59 @@ export type EnrollStart = {
   secretPretty: string
   uri: string
   qr: string
+}
+
+export type Transactions = {
+  rows: LedgerRow[]
+  /** Rows the filters kept. `total` is every row in scope before them. */
+  matched: number
+  total: number
+  outsideWindow: number
+  page: number
+  pages: number
+  window: { range: string; from: string | null; to: string | null }
+  selected: string | null
+  accounts: string[]
+  sort: string
+  /** Every tag in scope, so the tag filter is a dropdown rather than something
+   *  you have to already know the value of. */
+  tags: string[]
+}
+
+/** §103. The credit-card split: which settlements exist, and how much of each
+ *  is the paying month's own spending rather than the previous month's. */
+
+/** A named total with the slices of another dimension inside it. SPEC §64. */
+export type Breakdown = { name: string; amount: string; count: number; parts: Slice[] }
+
+/**
+ * The Ledger page's charts. SPEC §18.
+ *
+ * `spend`/`income` are the figures that respect §8 and §8.1; `grossSpend` and
+ * `grossIncome` are what Firefly reports by transaction type, kept so the page
+ * can show what was excluded rather than quietly differing from the statement.
+ */
+
+/** One row of the ledger browser. SPEC §61.
+ *
+ * There is deliberately **no balance field**. §16.4 refuses a running balance
+ * on any view that can be filtered or reordered, and this view is nothing but
+ * filtering and reordering.
+ */
+export type LedgerRow = {
+  id: string
+  group: string
+  account: string
+  accountLabel: string
+  date: string
+  time: string | null
+  description: string
+  category: string
+  counterparty: string
+  tags: string[]
+  kind: string
+  amount: string
+  /** The bank's raw narration. Searched, not rendered — a UTR is exactly what
+   *  you look for when the display name is no help. */
+  narration: string
 }

@@ -57,17 +57,44 @@ def test_the_password_is_the_last_four_of_the_account_number():
     assert meta.account_number == FIXTURE_ACCOUNT
 
 
-def test_without_the_password_the_loader_refuses_and_names_the_variable():
+def test_without_the_password_the_loader_refuses_and_asks_for_one():
+    """§30. The message asks for a password and names no bank's convention.
+
+    It used to name `CANARA_PDF_PASSWORD`, which was right when there was one
+    bank and one place to put it. It is now prompted at upload and used in
+    memory, and — more to the point — a confident hint about *which* password a
+    bank uses is worse than none: this repo spent a day on "it is the Customer
+    ID", which was false (§6.8.1, established by testing all 94 candidates).
+    """
     with pytest.raises(pdf.PdfPasswordRequired) as caught:
         pdf.load(PDF_FIXTURE, password=None)
-    assert "CANARA_PDF_PASSWORD" in str(caught.value)
+    message = str(caught.value)
+    assert "encrypted" in message and "password" in message
     # The password must not appear in the message, the class name or anywhere
     # else a traceback would print (§11).
-    assert PASSWORD not in str(caught.value)
+    assert PASSWORD not in message
+
+
+def test_a_wrong_password_says_so_rather_than_repeating_the_prompt():
+    """"Needs a password" and "that password is wrong" are different problems.
+
+    They were one exception and one code, and the browser could only respond to
+    a code — so a rejected password re-opened a box that was already open and
+    the page did not change at all (§41.1). Two types, and deliberately NOT a
+    subclass of each other: an `except PdfPasswordRequired` that swallowed both
+    would be the same bug wearing a different hat.
+    """
+    with pytest.raises(pdf.PdfPasswordWrong) as caught:
+        pdf.load(PDF_FIXTURE, password="0000")
+    assert "did not open" in str(caught.value)
+    assert "0000" not in str(caught.value)
+
+    assert not issubclass(pdf.PdfPasswordWrong, pdf.PdfPasswordRequired)
+    assert not issubclass(pdf.PdfPasswordRequired, pdf.PdfPasswordWrong)
 
 
 def test_a_wrong_password_is_refused_rather_than_half_read():
-    with pytest.raises(pdf.PdfPasswordRequired):
+    with pytest.raises(pdf.PdfPasswordWrong):
         pdf.load(PDF_FIXTURE, password="0000")
 
 

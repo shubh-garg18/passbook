@@ -5,9 +5,11 @@ import binascii
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+
+from .yamlfile import read_yaml
 
 import yaml
 from pydantic import Field
@@ -187,12 +189,17 @@ SYNC_STALE_DAYS = 10
 SYNC_URGENT_DAYS = 21
 
 
-def last_sync(archive: Path | None = None) -> tuple[str, int] | None:
-    """Newest archived statement and its age in days, or None if never synced.
+def last_sync(archive: Path | None = None) -> tuple[str, int, date] | None:
+    """Newest archived statement, its age in days and its date, or None.
 
     Uses `archive/`, not `inbox/`: a file only lands there after a *successful*
     push, so it is a record of what actually reached the ledger rather than what
     was merely downloaded.
+
+    The date is returned alongside the age rather than left to be recomputed,
+    because the two must never disagree — a masthead stamped with one date next
+    to a caption counting from another is the kind of small lie this project
+    keeps finding.
     """
     archive = archive or ARCHIVE
     if not archive.is_dir():
@@ -201,8 +208,9 @@ def last_sync(archive: Path | None = None) -> tuple[str, int] | None:
     if not files:
         return None
     newest = max(files, key=lambda p: p.stat().st_mtime)
-    age = (datetime.now() - datetime.fromtimestamp(newest.stat().st_mtime)).days
-    return newest.name, age
+    when = datetime.fromtimestamp(newest.stat().st_mtime)
+    age = (datetime.now() - when).days
+    return newest.name, age, when.date()
 
 
 # Columns `passbook payees` generates. Anything else in payees.md is the
@@ -305,17 +313,65 @@ def alias_drift(
 
 ACCOUNTS_FILE = Path("config/accounts.yaml")
 
+#: Optional. Absent means no reporting shift at all. SPEC §28.
+ATTRIBUTION_FILE = Path("config/attribution.yaml")
+
+# Loaders exist per bank (§6.2 dispatches on magic bytes, not on this), so a
+# statement can only be routed to an account whose bank has one.
+# Canara is built in; anything else comes from a profile — one shipped in
+# `src/passbook/banks/`, or one the user wrote in `config/banks/`.
+# The guard stays — the registry still refuses a bank nothing can read, so a
+# statement can never be parsed by the wrong loader — but adding to it is now
+# a YAML file rather than a code change. SPEC §27.
+BUILTIN_BANKS = ("canara",)
+
+
 def supported_banks() -> tuple[str, ...]:
-    """Every bank with a registered dialect. SPEC §22.5.
+    """Every bank something can read: Canara, plus every profile found.
 
-    Read from `passbook.banks` rather than kept as a literal here, so adding a
-    bank is one new file and never a second list to remember. Imported lazily:
-    `config` is imported by everything, and the bank modules import back into
-    the parser.
+    Was a registry of Python modules (§22.5) until §27 made a bank a YAML file.
+    Imported lazily: `config` is imported by everything, and the profile loader
+    imports back into the parser.
     """
-    from .banks import slugs
+    from .loaders.profiles import ProfileError, known_banks
 
-    return tuple(slugs())
+    try:
+        extra = tuple(known_banks())
+    except ProfileError:
+        # A broken profile must not make every bank unsupported; the parser
+        # raises on it loudly at the point it actually matters.
+        extra = ()
+    return BUILTIN_BANKS + tuple(b for b in extra if b not in BUILTIN_BANKS)
+
+
+class _SupportedBanks(tuple):
+    """`SUPPORTED_BANKS` is read in a few places and used to be a constant.
+
+    It stays subscriptable and iterable, but resolves through `supported_banks()`
+    every time so a profile dropped into `config/banks/` is picked up without a
+    restart — which is the whole point of a profile.
+    """
+
+    def __new__(cls):
+        return super().__new__(cls, ())
+
+    def __iter__(self):
+        return iter(supported_banks())
+
+    def __contains__(self, item):
+        return item in supported_banks()
+
+    def __len__(self):
+        return len(supported_banks())
+
+    def __getitem__(self, index):
+        return supported_banks()[index]
+
+    def __repr__(self):
+        return repr(supported_banks())
+
+
+SUPPORTED_BANKS = _SupportedBanks()
 
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -342,8 +398,23 @@ class Account:
         return mask_account(self.account_number)
 
     @property
+    def bank_name(self) -> str:
+        """`canara` → `Canara`. A slug is a filename; nothing in the UI shows one."""
+        return " ".join(part.capitalize() for part in re.split(r"[-_]", self.bank) if part)
+
+    @property
     def display(self) -> str:
-        return self.label or self.asset_account or self.slug
+        """What a person is shown when this account has to be named. SPEC §25.
+
+        `Canara ****1111` unless the operator has renamed it, and the fallback
+        matters more than it looks. It used to be the **Firefly asset account's
+        name**, which is a string chosen in another app for another purpose: it
+        can be anything, it can be the same for two accounts until Firefly
+        refuses, and on a fresh install it is often just "Checking Account".
+        Bank plus last four is the one label that can never name two of these
+        and never needs explaining.
+        """
+        return self.label or f"{self.bank_name} {self.masked}".strip()
 
     def external_id(self, txn_id: str) -> str:
         """`canara-1111-20260509000001`. SPEC §21.1.
@@ -409,8 +480,8 @@ def parse_accounts(data: dict) -> list[Account]:
         if bank not in supported_banks():
             raise RegistryError(
                 f"accounts[{index}] bank {bank!r} is not supported; "
-                f"there is a dialect for {', '.join(supported_banks())} only. "
-                "See docs/adding-a-bank.md."
+                f"there is a profile for {', '.join(supported_banks())} only. "
+                "Add yours from the browser: Account menu -> Add a bank."
             )
         accounts.append(
             Account(
@@ -546,3 +617,48 @@ def token_expiry(token: str) -> datetime | None:
     if not isinstance(exp, (int, float)):
         return None
     return datetime.fromtimestamp(exp, tz=timezone.utc)
+
+
+def load_attribution(path: Path | None = None):
+    """`config/attribution.yaml` -> `service.Attribution`. SPEC §73.
+
+    Absent or empty means no shift, which is exactly the behaviour before the
+    feature existed — a reporting rule that changed every month bucket the day
+    it shipped, by default, would be indefensible.
+    """
+    from decimal import Decimal
+
+    from .service import Attribution
+
+    target = path or ATTRIBUTION_FILE
+    if not target.is_file():
+        return Attribution()
+    raw = read_yaml(target, default=None)
+    # A top-level list, a string, or `null` are all things a hand-edited file
+    # can be. `load_payee_aliases` already guards this way; without it a
+    # malformed document raised AttributeError inside a request handler and
+    # took the whole analysis page down with a 500 rather than being ignored.
+    if not isinstance(raw, dict):
+        return Attribution()
+    keep = {}
+    for external_id, amount in (raw.get("keep") or {}).items():
+        # Decimal from the STRING form, never from a parsed float: PyYAML reads
+        # `5000.10` as a float and `Decimal(float)` carries the binary error
+        # into a money figure (non-negotiable 1).
+        keep[str(external_id)] = Decimal(str(amount))
+    # Clamped, not trusted. `to_day: 0` made `replace(day=min(0, 31))` raise
+    # ValueError inside a request handler; 29-31 would silently skip February
+    # for the same reason `reminders.Schedule` caps day-of-month at 28.
+    def day(name: str, default: int) -> int:
+        try:
+            value = int(raw.get(name, default))
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(28, value))
+
+    return Attribution(
+        categories=frozenset(str(c) for c in (raw.get("categories") or [])),
+        before_day=day("before_day", 10),
+        to_day=day("to_day", 22),
+        keep=keep,
+    )

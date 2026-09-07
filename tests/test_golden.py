@@ -35,7 +35,7 @@ def test_golden_file_carries_no_customer_id():
 
 def test_golden_amounts_are_strings_not_floats():
     """Decimal must survive serialisation. A float here means a float in the
-    ledger. CLAUDE.md non-negotiable #1."""
+    ledger. non-negotiable #1."""
     data = json.loads(GOLDEN.read_text())
     for txn in data["transactions"]:
         for field in ("debit", "credit", "balance"):

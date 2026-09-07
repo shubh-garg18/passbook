@@ -1,6 +1,7 @@
 /* Small shared pieces. SPEC §16.4. */
 
 import type { ReactNode } from 'react'
+import { useState } from 'react'
 import { formatAmount, formatINR } from '../lib/money'
 
 /* Status marks are SVG, not `✓`/`✗` characters: those glyphs are absent from
@@ -139,5 +140,74 @@ export function Diff({ text }: { text: string }) {
         )
       })}
     </pre>
+  )
+}
+
+/**
+ * A password box you can read back. SPEC §41.
+ *
+ * Three pages had their own `<input type="password">` and none could be
+ * revealed, which is the wrong default for *this* password: it is not a secret
+ * the person chose and remembers, it is a string the bank emailed them and they
+ * are copying by hand. "That password did not open the PDF" with no way to see
+ * what you typed is a guessing game — and the thing most often wrong with it is
+ * a capital letter or a trailing space, both invisible behind dots.
+ *
+ * It defaults to hidden, because this is still a credential and a shoulder is
+ * still a shoulder.
+ */
+export function PasswordField({
+  value,
+  onChange,
+  invalid,
+  onEnter,
+  id,
+  label = 'PDF password',
+  autoFocus,
+}: {
+  value: string
+  onChange: (next: string) => void
+  invalid?: boolean
+  onEnter?: () => void
+  id?: string
+  label?: string
+  autoFocus?: boolean
+}) {
+  const [shown, setShown] = useState(false)
+  return (
+    <span className="secret">
+      <input
+        id={id}
+        type={shown ? 'text' : 'password'}
+        autoFocus={autoFocus}
+        autoComplete="off"
+        // Off for all three: a bank's statement password is not a login and
+        // should not be offered up by a password manager, corrected, or
+        // capitalised by a phone keyboard.
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        placeholder={label}
+        aria-label={label}
+        aria-invalid={invalid ? true : undefined}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && onEnter) {
+            event.preventDefault()
+            onEnter()
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="secret__peek"
+        aria-pressed={shown}
+        aria-label={shown ? 'Hide the password' : 'Show the password'}
+        onClick={() => setShown(!shown)}
+      >
+        {shown ? 'Hide' : 'Show'}
+      </button>
+    </span>
   )
 }

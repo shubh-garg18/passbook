@@ -5,9 +5,9 @@
  *
  * 1. **Charts that respect the exclusion semantics.** Every figure here comes
  *    from `service.ledger_analysis`, which applies §8 and §8.1. Measured on one
- *    real three-month ledger, the naive by-type reading was three times the true
- *    spend and 1.6 times the true earnings — and a chart of the naive numbers
- *    looks perfectly reasonable.
+ *    real three-month ledger, the naive by-type reading was three times the
+ *    true spend and 1.6 times the true earnings. A chart of the naive numbers
+ *    would be three times wrong and look perfectly reasonable.
  * 2. **The Status page, as a strip.** Monitoring belongs where the operator
  *    already looks. The strip carries the states; the page it links to keeps the
  *    artefact tables that will not fit in a strip.
@@ -19,21 +19,27 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { api } from '../lib/api'
-import type { Analysis, Overview, Status } from '../lib/types'
-import { HourHistogram } from '../components/DayRail'
-import { CategoryBars, FlowBar, MonthColumns, StackedBar } from '../components/charts'
-import { Card, Cross, Money, Notice, Tick } from '../components/ui'
+import type { Analysis, Overview, Status, SyncStatus } from '../lib/types'
+import {
+  BalanceLine,
+  CategoryBars,
+  Donut,
+  FlowBar,
+  topWithOther,
+} from '../components/charts'
+import { Card, Cross, Notice } from '../components/ui'
 import { Skeleton, Why, describe } from '../components/feedback'
 import { count, formatINR } from '../lib/money'
+import { Counter } from '../components/Counter'
 import { useAccounts } from '../lib/account'
-
-const STATE_TO_CARD = { never: 'warn', ok: undefined, warn: 'warn', stale: 'bad' } as const
+import { joinQuery, useRange } from '../lib/range'
+import { RangePicker } from '../components/RangePicker'
 
 export function Home() {
   // Every query is keyed on the account as well as the endpoint, so switching
   // accounts refetches instead of showing the previous one's figures under a new
   // name — which would be the §19 failure mode again: plausible and wrong.
-  const { param, isAll, label } = useAccounts()
+  const { param, isAll, scopeLabel } = useAccounts()
   const { data, isPending, error } = useQuery({
     queryKey: ['overview', param],
     queryFn: () => api.get<Overview>(`/overview${param}`),
@@ -56,50 +62,20 @@ export function Home() {
 
   return (
     <div className="page">
-      <h1>Ledger</h1>
-      {label && <p className="lede">{label}</p>}
-
-      <div className="cards">
-        <Card title={isAll ? 'Balance, summed' : 'Balance'} state={data.balance ? undefined : 'bad'}>
-          <p className="figure">
-            {data.balance ? <Money value={data.balance} /> : 'unavailable'}
-          </p>
-          {/* The sum is a true figure — it is what these accounts hold together
-              — but unlike a single account's balance it reconciles against no
-              statement, and that reconciliation is what this card has implied
-              since Phase 7. So it is labelled, and the parts are shown. */}
-          {data.parts.length > 1 && (
-            <ul className="parts">
-              {data.parts.map((part) => (
-                <li key={part.slug}>
-                  <span>{part.label}</span>
-                  <span className="num">{formatINR(part.balance)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {/* Which account this is belongs in the cover, once, on every page.
-              It was here AND in a page subtitle AND in the header — three
-              statements of one fact on a 390px screen. Only the error, which
-              is genuinely new information, stays. */}
-          {data.fireflyError && <p className="muted">{data.fireflyError}</p>}
-        </Card>
-
-        <Card title="Last sync" state={STATE_TO_CARD[data.sync.state]}>
-          <p className="figure">{data.sync.age !== null ? `${data.sync.age}d` : 'never'}</p>
-          {/* The headline repeats the age in words and then the filename. The
-              figure already says the age, so only the filename is new. */}
-          <p className="muted">{data.sync.filename ?? 'nothing archived yet'}</p>
-        </Card>
-      </div>
+      <Masthead data={data} isAll={isAll} scope={scopeLabel} />
 
       <StatusStrip />
 
-      {data.sync.detail && (
-        <Notice kind={data.sync.state === 'stale' ? 'bad' : 'warn'}>
-          <p>{data.sync.detail}</p>
-        </Notice>
-      )}
+      {/* §113.1. The staleness warning is NOT here any more.
+          §109.1 shortened it and moved its reasoning behind a disclosure and
+          the operator's answer was the same both times: it does not look good
+          on the Ledger. Two rounds of restyling a thing that should not be
+          there is the signal that it should not be there.
+
+          It is a *status*, and this page already has a strip for those — one
+          that renders only problems and nothing when all is well (§18). So the
+          sync age is a chip in that strip, beside the token and the backups,
+          and the page opens on the balance. */}
 
       {data.pending && (
         <Notice kind="warn">
@@ -156,13 +132,140 @@ export function Home() {
 }
 
 /**
- * Status, folded in. SPEC §18.
+ * The masthead. SPEC §39.
+ *
+ * This is the passbook's own front matter, and it replaces two equal cards —
+ * `Balance` and `Last sync` — sitting side by side as if they were two readings
+ * of the same kind. They are not. One is the number the app is opened for; the
+ * other is a date, and in a passbook a date is not a figure at all, it is
+ * something a teller *stamps* on the page.
+ *
+ * So the balance is set large on the ruled stock and the sync is a stamp beside
+ * it, angled the way a hand-held stamp lands. The palette has carried
+ * `.impress` since Phase 26 and this is the first place it says something the
+ * page would otherwise have had to spell out.
+ *
+ * **The stamp prints a date, never a verdict.** "Synced" would be a claim about
+ * the ledger, and whether the ledger is right is §20's question, answered by
+ * `verify-ledger` and reported by the strip below with its tri-state intact
+ * (non-negotiable 11). The date is a fact about a file in `archive/`, which is
+ * all this has ever known. Its ink follows the escalation tiers that already
+ * exist: `--ochre` asks, `--alarm` is losing data.
+ */
+function Masthead({
+  data,
+  isAll,
+  scope,
+}: {
+  data: Overview
+  isAll: boolean
+  scope: string | null
+}) {
+  return (
+    <header className="masthead">
+      <div className="masthead__main">
+        {/* The page's `h1`, and it is not the word "Ledger".
+            A masthead reading ₹5,068.09 does not need a caption saying which
+            page it is — the nav already marks that — but the document still
+            needs a top-level heading, and a screen reader announcing "Balance,
+            heading level 1" followed by the figure is the page's actual lede. */}
+        <h1 className="masthead__label">
+          {isAll ? 'Balance, summed' : 'Balance'}
+          {scope && <span className="masthead__scope"> · {scope}</span>}
+        </h1>
+        <p className="masthead__figure">
+          {data.balance ? (
+            // Counting is the passbook equivalent of a teller thumbing to the
+            // last page. `formatINR` takes the decimal STRING; `toFixed(2)`
+            // reproduces it exactly on the final frame, and the frames before
+            // it are display-only.
+            <Counter value={data.balance} format={(n) => formatINR(n.toFixed(2))} />
+          ) : (
+            <span className="masthead__missing">unavailable</span>
+          )}
+        </p>
+        {/* The sum is a true figure — it is what these accounts hold together —
+            but unlike one account's balance it reconciles against no statement,
+            and that reconciliation is what a balance has implied since Phase 7.
+            So it is labelled, and the parts are shown. */}
+        {data.parts.length > 1 && (
+          <ul className="parts">
+            {data.parts.map((part) => (
+              <li key={part.slug}>
+                <span>{part.label}</span>
+                <span className="num">{formatINR(part.balance)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {data.fireflyError && <p className="muted">{data.fireflyError}</p>}
+      </div>
+
+      <SyncStamp sync={data.sync} />
+    </header>
+  )
+}
+
+const STAMP_TONE = { never: 'bad', ok: '', warn: 'warn', stale: 'bad' } as const
+
+/** The teller's date stamp: what was last recorded, and when. */
+function SyncStamp({ sync }: { sync: SyncStatus }) {
+  const tone = STAMP_TONE[sync.state]
+  return (
+    <div className="masthead__stamp">
+      <div className={`stamp${tone ? ` stamp--${tone}` : ''}`}>
+        <p className="stamp__caption">Last recorded</p>
+        <p className="stamp__date">{sync.date ? stampDate(sync.date) : '— — —'}</p>
+        <p className="stamp__age">
+          {sync.age === null
+            ? 'nothing pushed yet'
+            : sync.age === 0
+              ? 'today'
+              : `${sync.age} days ago`}
+        </p>
+      </div>
+      {/* Outside the die, and level: a stamp carries a date, a filing note
+          carries the evidence for it. */}
+      {sync.filename && <p className="masthead__file">{sync.filename}</p>}
+    </div>
+  )
+}
+
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+
+/** `2026-08-25` → `25 AUG 26`, the way a rubber date stamp is set.
+ *
+ * Falls back to the string it was given rather than to a guess: a date the
+ * server sent in a shape this did not expect should look wrong on the page, not
+ * be quietly rendered as some other day. */
+function stampDate(iso: string): string {
+  const [year, month, day] = iso.split('-')
+  if (!year || !month || !day) return iso
+  return `${day} ${MONTHS[Number(month) - 1] ?? month} ${year.slice(2)}`
+}
+
+/**
+ * Status, folded in — and folded away when there is nothing to say. SPEC §18.
+ *
+ * It used to print five chips on every load: ledger verified, Firefly version,
+ * token days left, backup age, backup codes left. All five were true and four
+ * of them were noise, and a row of permanently-green chips is training to
+ * ignore the row — which is exactly the row §19 needed someone to read.
+ *
+ * So it renders **only problems**. All clear shows nothing, and the Status page
+ * keeps the full detail one click away. The tri-state survives intact:
+ * `ledger.ok === null` is *unverified*, which is a problem and appears, because
+ * a green tick for something never checked is the thing this project exists to
+ * not do (non-negotiable 11).
  *
  * Its own query, not part of `/overview`: this one calls Firefly for its version
  * and shells out to rclone for the off-site listing, and the balance must not
- * wait behind either. A failure here dims the strip and nothing else — the page
- * this sits on is the ledger, not the monitor.
+ * wait behind either.
  */
+/** Longer than this and an item takes its own line. Roughly the width at which
+ *  two items no longer fit side by side on a laptop. */
+const WIDE_AT = 44
+
 function StatusStrip() {
   const { param } = useAccounts()
   const { data, isPending, error } = useQuery({
@@ -170,7 +273,9 @@ function StatusStrip() {
     queryFn: () => api.get<Status>(`/status${param}`),
   })
 
-  if (isPending) return <div className="strip strip--loading" aria-hidden="true" />
+  // Silent while loading. A skeleton for a strip that is usually empty is a
+  // flash of furniture that then disappears.
+  if (isPending) return null
   if (error)
     return (
       <p className="muted strip__error">
@@ -178,47 +283,60 @@ function StatusStrip() {
       </p>
     )
 
-  const tokenBad = !data.token.shapeOk
-  const tokenWarn = data.token.daysLeft !== null && data.token.daysLeft <= 30
-  const backupWarn =
-    data.backups.ageDays === null || data.backups.ageDays > data.backups.staleDays
-  const codesWarn = data.auth.backupCodesLow
+  const problems: { key: string; bad?: boolean; text: string; title?: string }[] = []
+
+  if (data.ledger.ok !== true) {
+    problems.push({
+      key: 'ledger',
+      bad: data.ledger.ok === false,
+      text: `Ledger ${data.ledger.ok === false ? data.ledger.headline : 'unverified'}`,
+      title: data.ledger.checks.map((c) => `${c.name}: ${c.detail}`).join('\n'),
+    })
+  }
+  if (!data.firefly.about) {
+    problems.push({ key: 'firefly', bad: true, text: 'Ledger store unreachable' })
+  }
+  if (!data.token.shapeOk) {
+    problems.push({ key: 'token', bad: true, text: 'Token is the wrong shape' })
+  } else if (data.token.daysLeft !== null && data.token.daysLeft <= 30) {
+    // 365-day PAT, no warning from Firefly, and the failure looks like a
+    // generic 401. Worth saying inside a month; not worth saying for 335 days.
+    problems.push({ key: 'token', text: `Token expires in ${data.token.daysLeft}d` })
+  }
+  if (data.backups.ageDays === null) {
+    problems.push({ key: 'backup', bad: true, text: 'No backup' })
+  } else if (data.backups.ageDays > data.backups.staleDays) {
+    problems.push({ key: 'backup', text: `Backup ${data.backups.ageDays}d old` })
+  }
+  if (data.auth.backupCodesLow) {
+    problems.push({
+      key: 'codes',
+      text: `${count(data.auth.backupCodesLeft, 'backup code')} left`,
+    })
+  }
+
+  if (problems.length === 0) return null
 
   return (
     <div className="strip">
-      {/* First, and deliberately: this is the check that would have caught the
-          2026-08-11 incident (§19, §20). Everything else on this strip passed
-          while the ledger held 21 of 93 rows. */}
-      <span
-        className={`strip__item${
-          data.ledger.ok === false ? ' bad strip__item--wide' : data.ledger.ok === null ? ' warn' : ''
-        }`}
-        title={data.ledger.checks.map((c) => `${c.name}: ${c.detail}`).join('\n')}
-      >
-        {data.ledger.ok === true ? <Tick title="" /> : data.ledger.ok === false ? <Cross title="" /> : null}{' '}
-        Ledger {data.ledger.ok === false ? data.ledger.headline : data.ledger.ok === null ? 'unverified' : 'verified'}
-      </span>
-      <span className={`strip__item${data.firefly.about ? '' : ' bad'}`}>
-        {data.firefly.about ? <Tick title="" /> : <Cross title="" />} Firefly{' '}
-        {data.firefly.about ? `v${data.firefly.about.version}` : 'unreachable'}
-      </span>
-      <span className={`strip__item${tokenBad ? ' bad' : tokenWarn ? ' warn' : ''}`}>
-        Token{' '}
-        {tokenBad
-          ? 'bad shape'
-          : data.token.daysLeft === null
-            ? 'expiry unknown'
-            : `${data.token.daysLeft}d left`}
-      </span>
-      <span className={`strip__item${backupWarn ? ' warn' : ''}`}>
-        Backup {data.backups.ageDays === null ? 'none' : `${data.backups.ageDays}d old`}
-      </span>
-      <span className={`strip__item${codesWarn ? ' warn' : ''}`}>
-        {count(data.auth.backupCodesLeft, 'backup code')} left
-      </span>
-      {data.drift.length > 0 && (
-        <span className="strip__item warn">{data.drift.length} alias drift</span>
-      )}
+      {problems.map((problem) => (
+        <span
+          key={problem.key}
+          // `--wide` exists precisely for this and the Ledger's strip was not
+          // using it: `verify-ledger`'s headline names the account, the fault
+          // and the remedy in one sentence, and at `nowrap` it ran off the right
+          // edge of the card — a detail you cannot read pretending to be one you
+          // can. Measured in a two-account screenshot. Length decides, so a
+          // short failure like "No backup" still sits inline where it belongs.
+          className={
+            `strip__item ${problem.bad ? 'bad' : 'warn'}` +
+            (problem.text.length > WIDE_AT ? ' strip__item--wide' : '')
+          }
+          title={problem.title}
+        >
+          {problem.bad ? <Cross title="" /> : null} {problem.text}
+        </span>
+      ))}
       <Link className="strip__more" to="/status">
         Details
       </Link>
@@ -237,15 +355,20 @@ function StatusStrip() {
  * readings. The balance is the one figure that does NOT combine cleanly; it is
  * summed, labelled as a sum, and shown with its parts. */
 function Charts() {
-  const { param, isAll } = useAccounts()
+  const { param } = useAccounts()
+  const range = useRange()
   const { data, isPending, error } = useQuery({
-    queryKey: ['analysis', param],
-    queryFn: () => api.get<Analysis>(`/analysis${param}`),
+    queryKey: ['analysis', param, range.key],
+    queryFn: () => api.get<Analysis>(`/analysis${joinQuery(param, range.query)}`),
   })
 
+  // The picker renders in every state, loading included: changing the window is
+  // the reason you are waiting, and a control that disappears while its own
+  // request is in flight cannot be corrected.
   if (isPending)
     return (
       <>
+        <RangePicker noun="transaction" />
         <h2 className="section">Where it went</h2>
         <Skeleton cards={2} rows={8} />
       </>
@@ -253,18 +376,24 @@ function Charts() {
   if (error)
     return (
       <>
+        <RangePicker noun="transaction" />
         <h2 className="section">Where it went</h2>
         <Notice kind="warn">
           <p>
             No charts: {describe(error).detail} They are drawn from the ledger itself, so
-            Firefly has to answer.
+            the store has to answer.
           </p>
         </Notice>
       </>
     )
 
-  const complete = data.months.filter((m) => !m.partial).length
-  const partial = data.months.filter((m) => m.partial).map((m) => m.month)
+  // §112. Every deposit excluded, and there were deposits to exclude — which
+  // means the earnings allow-list has not been told about this account's
+  // payees, not that nothing was earned. Exact rather than a heuristic: it is
+  // the same count on both sides.
+  const unclassifiedIncome =
+    data.deposits > 0 && data.excludedIncome.count === data.deposits
+
   // One scale for both flow bars, so "earned" and "spent" are comparable
   // without a second axis to read.
   const scale =
@@ -272,155 +401,241 @@ function Charts() {
 
   return (
     <>
+      <RangePicker window={data.window} outside={data.outsideWindow} noun="transaction" />
+
+      {/* §58. What the page is about, before any chart. It used to go straight
+          from the balance into analysis with nothing summarising the window.
+          Every figure comes from the same `ledger_analysis` response the charts
+          below use, so the row cannot disagree with them (non-negotiable 9) —
+          and none of it is coloured by direction, because a KPI row is the most
+          tempting place in the app to paint spending red (§16.4). */}
+      <div className="kpis">
+        <Kpi
+          label="Spent"
+          value={formatINR(data.spend)}
+          note={`${count(data.withdrawals, 'withdrawal')}, ${formatINR(
+            data.excludedSpendTotal,
+          )} excluded as movement`}
+        />
+        {/* §112. A zero here is usually an unanswered question, not a figure.
+            `not_earnings` is an ALLOW-LIST — `earnings_only` names what counts
+            — so on an account whose payees nobody has classified yet, every
+            deposit is tagged `not-earnings` and this reads ₹0.00 under the word
+            "Earned". Measured on a freshly pushed account: six deposits
+            arrived, and all six were excluded.
+
+            That is the tri-state lesson again (non-negotiable 11): a figure
+            nobody has classified is not a figure of zero. When every deposit is
+            excluded, the card says so and points at the page that fixes it. */}
+        <Kpi
+          label="Earned"
+          value={unclassifiedIncome ? '—' : formatINR(data.income)}
+          note={
+            unclassifiedIncome
+              ? `${formatINR(data.grossIncome)} arrived — say what counts on Payees`
+              : `${count(data.deposits, 'deposit')}, ${formatINR(
+                  data.excludedIncome.amount,
+                )} not earnings`
+          }
+        />
+        {/* **Not `earned - spent`.** That was the first version and it was
+            wrong in the way that matters: both of those already have movement
+            taken out, so their difference counts nothing that moved. It read
+            more than three times the balance's actual movement over a window,
+            under a caption saying "earned less spent" — true of the arithmetic
+            and read by a person as "what I kept". The server sends the real
+            change now, as a Decimal. */}
+        <Kpi
+          label="Net change"
+          value={formatINR(data.net)}
+          note="Everything in, less everything out — the change in the balance"
+        />
+        {/* **Adaptive, because the fixed version went dead.** This tile named
+            the movement the other two exclude — which mattered when most of
+            the ledger's outflow was hidden behind a toggle. Since §62 and §67
+            took Credit
+            Card, Investments and Transfers out of `not_spend`, it reads ₹0.00
+            and "nothing excluded" on most windows: a quarter of the summary
+            row spent saying nothing happened. It shows the exclusion when
+            there IS one, and the ledger's size when there is not. */}
+        {Number(data.excludedSpendTotal) > 0 ? (
+          <Kpi
+            label="Movement"
+            value={formatINR(data.excludedSpendTotal)}
+            note={`${data.excludedSpend.map((s) => s.name).join(', ')} — not counted as spending`}
+          />
+        ) : (
+          <Kpi
+            label="Transactions"
+            value={String(data.withdrawals + data.deposits)}
+            note={`${count(data.categories.length, 'category', 'categories')}, nothing excluded as movement`}
+          />
+        )}
+      </div>
+
       <h2 className="section">In and out</h2>
       <Card>
         <div className="flows">
           <FlowBar
+            flow="earn"
             label="Earned"
             counted={data.income}
             gross={data.grossIncome}
             excluded={data.excludedIncome.amount}
             scale={scale}
             excludedLabel={`money coming back, not earned (${data.excludedIncome.count} deposits)`}
-            emptyLabel="nothing here is money coming back"
           />
           <FlowBar
+            flow="spend"
             label="Spent"
             counted={data.spend}
             gross={data.grossSpend}
             excluded={data.excludedSpendTotal}
             scale={scale}
-            /* `not_spend` is empty until the operator names their own
-               categories (D10 ships none), which is every fresh install — so
-               the join produced a dangling em-dash pair with nothing between
-               it. Visible only in a screenshot of a new ledger. */
             excludedLabel={`${data.notSpend.join(', ')} — movement, not spending`}
-            emptyLabel="name your movement categories in not_spend, in config/rules.yaml"
           />
         </div>
         <Why label="Why these are not the totals on the statement">
           <p>
-            Firefly counts every deposit as income and every withdrawal as spend, by type.
+            The ledger store counts every deposit as income and every withdrawal as spend, by type.
             Read that way this ledger says {formatINR(data.grossSpend)} spent and{' '}
             {formatINR(data.grossIncome)} earned. Both are wrong, and not by a little.
           </p>
           <p>
             Money moving is not money leaving: {data.notSpend.join(', ')} are excluded from
-            spend. Money coming back is not money earned: family support, repayments, refunds
-            and penny-drop verifications carry the <code>not-earnings</code> tag, so earnings
-            are Salary and Interest Income and nothing else. The hatched part of each bar is
-            exactly what those two rules removed.
+            spend. Money coming back is not money earned: repayments, refunds and
+            verifications carry the <code>not-earnings</code> tag. The hatched part of each
+            bar is what those two rules removed.
           </p>
           {Number(data.refunds.amount) > 0 && (
             <p>
               {data.refunds.count === 1 ? 'One refund' : `${data.refunds.count} refunds`} of{' '}
-              {formatINR(data.refunds.amount)} sits in the excluded deposits. It is a spend
-              coming back, so strictly it also reduces the spend figure; it is left in place
-              rather than netted, because netting a refund against a month it did not happen in
-              is the more misleading of the two.
+              {formatINR(data.refunds.amount)} sits in the excluded deposits — left in place
+              rather than netted, because netting it against a month it did not happen in is
+              the more misleading of the two.
             </p>
           )}
         </Why>
       </Card>
+
+      {data.balances.length > 0 && (
+        <>
+          <h2 className="section">The balance</h2>
+          <Card>
+            <BalanceLine series={data.balances} />
+            {/* The page refuses a trend line four sections down, so it has to
+                say why this one is different or it reads as contradicting
+                itself. */}
+            <Why label="Why this one is a line when the month chart is not">
+              <p>
+                {data.balances.length === 1
+                  ? `${count(data.balances[0]?.points.length ?? 0, 'recorded balance')}.`
+                  : `${data.balances.length} accounts, one line each — never a sum.`}
+                {data.balances.some((b) => b.opening) &&
+                  ' The line opens from the last balance recorded before the window.'}
+              </p>
+              <p>
+                The month chart would have to interpolate a direction through a
+                handful of aggregates, two of them partial months — that is an
+                inference, and a slope is the most persuasive way to be wrong.
+                This is not that. Every vertex here is a balance the bank itself
+                printed on a statement row, held to the continuity check that
+                gates every import, plotted at the resolution it was recorded
+                at. Nothing between two points is being claimed.
+              </p>
+              <p>
+                One point per day, being that day&rsquo;s closing figure. The
+                axis starts at zero rather than at the lowest balance: on a
+                savings account the distance to zero is the thing being looked
+                at, and a truncated axis would turn a small wobble into a cliff.
+              </p>
+            </Why>
+          </Card>
+        </>
+      )}
 
       <h2 className="section">Where it went</h2>
       <Card>
+        {/* The ring and the bars are the same numbers twice, deliberately. A
+            ring answers "what dominates" in one glance and is poor at
+            comparing its middle; the bars are exact and ordered. Neither
+            replaces the other, and the ring is only drawn when there is a
+            distribution to show — one category is not a distribution. */}
+        {data.categories.length > 1 && (
+          <Donut
+            slices={topWithOther(data.categories, 6)}
+            total={data.spend}
+            label="Real spend by category"
+          />
+        )}
         <CategoryBars slices={data.categories} of={data.spend} />
-        <p className="muted chart__note">
-          {data.categories.length} categories, {formatINR(data.spend)} of real spend. Shading is
-          rank, not identity — the darkest bar is the largest.
-          {Number(data.uncategorised.amount) > 0 && (
-            <>
-              {' '}
-              {data.uncategorised.count} row
-              {data.uncategorised.count === 1 ? '' : 's'} worth{' '}
-              {formatINR(data.uncategorised.amount)} still{' '}
-              {data.uncategorised.count === 1 ? 'has' : 'have'} no category —{' '}
-              <Link to="/payees">decide on Payees</Link>.
-            </>
-          )}
-        </p>
+        {/* Kept, and it is not a caption: it is the one thing on this card
+            that asks for an action, and the link is the action. §69 removed
+            the explanatory notes, not the prompts. */}
+        {Number(data.uncategorised.amount) > 0 && (
+          <p className="muted chart__note">
+            {data.uncategorised.count} row
+            {data.uncategorised.count === 1 ? '' : 's'} worth{' '}
+            {formatINR(data.uncategorised.amount)} still{' '}
+            {data.uncategorised.count === 1 ? 'has' : 'have'} no category —{' '}
+            <Link to="/payees">decide on Payees</Link>.
+          </p>
+        )}
+        {/* **Shown, not disclosed.** This was a collapsed `<Why>`, and a
+            collapsed toggle is indistinguishable from absence: a quarter of
+            the window's real spending sat behind it as credit-card payments
+            and read as missing from the ledger. It is drawn in the categorical hues like everything else,
+            but hatched, so it is legible as *measured and deliberately not
+            counted* rather than as a second set of categories. */}
         {data.excludedSpend.length > 0 && (
-          <Why label={`What ${formatINR(data.excludedSpendTotal)} of excluded movement was`}>
-            <ul className="plain">
-              {data.excludedSpend.map((s) => (
-                <li key={s.name}>
-                  {s.name} — {formatINR(s.amount)} across {s.count} row
-                  {s.count === 1 ? '' : 's'}
-                </li>
-              ))}
-            </ul>
-          </Why>
+          <div className="excluded">
+            <h3 className="excluded__head">
+              Movement — {formatINR(data.excludedSpendTotal)}, not counted as spending
+            </h3>
+            {/* The same component as every other bar list, so movement gets
+                hover, keyboard focus and a tooltip like everything else — it
+                was a hand-rolled copy with none of them, which is also how it
+                came to be the one chart you could not interrogate. */}
+            <CategoryBars slices={data.excludedSpend} of={data.excludedSpendTotal} hatched />
+            <Why label="Why this is not counted as spending">
+              <p>
+                Money that changed accounts rather than leaving. Which categories sit
+                here is <code>not_spend</code> in <code>rules.yaml</code>, and it is
+                your list — Credit Card, Investments and Transfers were all in it and
+                are now counted as spending, because this install never imports a card
+                statement and the payment is the only record the money left.
+              </p>
+            </Why>
+          </div>
         )}
       </Card>
 
-      {data.rollups.map((rollup) => (
-        <div key={rollup.tag}>
-          <h2 className="section">{rollup.tag}</h2>
-          <Card>
-            <p className="figure figure--small">{formatINR(rollup.amount)}</p>
-            <p className="muted chart__note">
-              across {rollup.count} transactions, {rollup.parts.length} categories. The total is
-              the <code>{rollup.tag}</code> tag as Firefly stored it; the segments are the
-              categories that carry that tag in <code>rules.yaml</code>.
-            </p>
-            <StackedBar parts={rollup.parts} total={rollup.amount} label={rollup.tag} />
-          </Card>
-        </div>
-      ))}
+      {/* §109.3. Who, Tagged, By month, Category by month, The week and The
+          day were all here and are all on Reports — as the payee view, the
+          tag view, the trend view and the rhythm view. Ten chart sections on
+          one page is not ten answers, it is one page nobody reads to the
+          bottom of: *"ledger looks much clustered and graphs are redundant"*.
 
-      <h2 className="section">By month</h2>
-      <Card>
-        <div className="flows">
-          <MonthColumns months={data.months} title="spend" />
-          <MonthColumns months={data.months} title="income" />
-        </div>
-        {/* Every count here is pluralised properly, because the degenerate cases
-            are real: a freshly restored ledger has ONE bucket, and "a slope
-            through 1 points, 1 of them stubs" is what template concatenation
-            produces. Seen in a screenshot of a half-restored ledger. */}
-        <p className="muted chart__note">
-          Both charts share one scale. {count(complete, 'complete month')} of{' '}
-          {data.months.length}
-          {partial.length > 0 &&
-            ` — ${partial.join(' and ')} ${partial.length === 1 ? 'is' : 'are'} partial, ` +
-              'marked with a dashed cap'}
-          . <strong>No trend line is drawn</strong>, and will not be until there are enough
-          complete months to support one: a slope through {count(data.months.length, 'point')}, of
-          which {partial.length === 1 ? 'one is a stub' : `${partial.length} are stubs`}, is the
-          most persuasive way to be wrong.
-        </p>
-      </Card>
-
-      <h2 className="section">The day</h2>
-      <Card>
-        <HourHistogram
-          hours={data.hours}
-          label="Spending across the day"
-          count={data.counted}
-          height={110}
-        />
-        <span className="railscale" aria-hidden="true">
-          <span>00</span>
-          <span>06</span>
-          <span>12</span>
-          <span>18</span>
-          <span>24</span>
-        </span>
-        <p className="muted chart__note">
-          Every row that counts as spend, by hour. {data.clocked} of {data.counted} carry a
-          clock; the shaded band is midnight to 6am.
-          {isAll && ' Combined across accounts — time of day is a property of you, not of an account.'}
-        </p>
-        <Why label="Where the time comes from">
-          <p>
-            The bank gives no time column. It is parsed out of the UPI narration (§6.5), which
-            means it exists in the statement and nowhere else — Firefly is never told what time
-            of day anything happened. NEFT, bank charges, scheme debits and interest carry no
-            clock at all, which is why the two numbers above differ.
-          </p>
-        </Why>
-      </Card>
+          What stays is what the Ledger is FOR — what the balance did, what
+          went in and out, and where it went. Everything else is a question
+          you go and ask. */}
+      <p className="muted">
+        <Link to="/reports">Reports</Link> has the rest — by payee, by tag, by
+        month, by weekday and by hour.
+      </p>
     </>
   )
 }
+
+/** One figure in the KPI row. */
+function Kpi({ label, value, note }: { label: string; value: string; note: string }) {
+  return (
+    <div className="kpi">
+      <span className="kpi__label">{label}</span>
+      <span className="kpi__value num">{value}</span>
+      <span className="kpi__note">{note}</span>
+    </div>
+  )
+}
+
+

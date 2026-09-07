@@ -65,8 +65,37 @@ _PERIOD_PDF = re.compile(
 _MONTH_NAMES = {v: k for k, v in MONTHS.items()}
 
 
+class PdfPasswordWrong(ParseError):
+    """A password was supplied and it did not open the file. SPEC §41.
+
+    A separate type from `PdfPasswordRequired`, and the separation is the whole
+    fix. Both used to raise the same class and reach the browser under the same
+    `pdf_password` code, so the client did the only thing that code means — show
+    the password box — and the box was **already showing**. Typing a wrong
+    password produced no toast, no message and no change: "nothing happens
+    after that".
+
+    A failure that renders as nothing is worse than a loud one. They are two
+    different facts and they now travel as two.
+    """
+
+
 class PdfPasswordRequired(ParseError):
-    """The statement is encrypted and no usable password was supplied."""
+    """The statement is encrypted and no usable password was supplied.
+
+    **Decryption happens here, in this process, with pikepdf.** SPEC §6.8, §30.
+    Most Indian banks hand out password-protected PDFs and the obvious move is
+    an online "PDF unlocker" — which is privacy-fatal (non-negotiable
+    7): the file carries the account number, the customer ID, the address and
+    every counterparty. Nothing here uploads anything anywhere. The password is
+    used as an argument and never written, logged, or put in a message.
+
+    The message deliberately does NOT name a bank's password convention. That
+    varies per bank and a confident wrong hint is worse than none — this repo
+    already spent a day on "the password is the Customer ID", which was false
+    (§6.8.1: it is the last four digits, established by testing all 94 numeric
+    candidates).
+    """
 
 
 def _decrypt(path: Path, password: str | None) -> io.BytesIO:
@@ -102,18 +131,13 @@ def _decrypt(path: Path, password: str | None) -> io.BytesIO:
         except pikepdf.PasswordError:
             continue
 
-    # The hint comes from whichever bank registered one, so a second bank's
-    # PDF gets its own instruction rather than Canara's (§22.5). Listing every
-    # registered hint is deliberate: at this point the file has not been parsed,
-    # so which bank wrote it is not yet known.
-    from ..banks import registered
-
-    hints = [b.pdf_password_hint for b in registered() if b.pdf_password_hint]
-    raise PdfPasswordRequired(
-        "the statement is encrypted and the password did not work. "
-        + " ".join(hints)
-        + " The password is never logged or displayed."
-    )
+    if candidates:
+        raise PdfPasswordWrong(
+            "That password did not open the PDF. It is the password your bank "
+            "sends with the statement — check for a capital letter, a space at "
+            "either end, or a date in a different order."
+        )
+    raise PdfPasswordRequired("This PDF is encrypted and needs its password.")
 
 
 def _lines(page) -> list[list[dict]]:
@@ -128,7 +152,7 @@ def _char_lines(page) -> dict[float, list[dict]]:
     """Raw characters grouped the same way, spaces included.
 
     `extract_words` splits on whitespace, so rebuilding a line by joining words
-    with `" "` collapses runs of spaces. The bank writes `XENGRU  EP` with two —
+    with `" "` collapses runs of spaces. The bank writes `PANWAR  E` with two —
     and that string IS the payee token the rules match on (D10), so collapsing
     it silently renames the counterparty. The literal space glyphs are in the
     char stream; this keeps them.
@@ -208,7 +232,7 @@ def _join(previous: str, addition: str, ended_at: float, wrap_at: float) -> str:
     # A break after a slash or a digit is inside the reference, VPA or UTR
     # fields, which hold no spaces — measured 32/32. Restricted to exactly
     # those two: the first version said "any non-letter", which swallowed the
-    # real spaces in `JY. MURQO` and `XENN - UB` after `.` and `-`. Everything
+    # real spaces in `MR. VIVEK` and `SKPL - II` after `.` and `-`. Everything
     # else falls through to geometry.
     if previous[-1:] == "/" or previous[-1:].isdigit():
         return previous + addition
@@ -256,9 +280,15 @@ def _to_rows(pages) -> Rows:
     """
     cols = _columns(pages)
     if cols is None:
+        # Says which bank it IS built for, and what to do instead — the old
+        # wording ("this does not look like a Canara statement PDF") told a
+        # Union Bank operator something they already knew and nothing they
+        # could act on. §42.
         raise ParseError(
-            "no 'Date Particulars ... Balance' header found. This does not look "
-            "like a Canara account statement PDF."
+            "no bank profile matched this PDF's header, and it is not a Canara "
+            "statement. Add the bank first — Accounts, then Add a bank — and "
+            "point the six fields at your file's own column headings. Once a "
+            "profile matches, the PDF is read the same way a spreadsheet is."
         )
     date_edge, narration_edge, debit_edge, credit_edge = _bounds(cols)
 

@@ -1,0 +1,63 @@
+# State Bank of India — net banking PDF statement. SPEC §55, §99.
+#
+# Verified against a real 7-page export: 72 transactions, balance chain clean.
+# The file was never read — the layout came from a geometry probe (§53) and the
+# verification ran structurally, reporting counts and the chain verdict only.
+#
+# **This bank does not print its column headings.** Five of the six are part of
+# a background graphic; only `Balance` is text, and `find_header` needs four
+# matched names before it will call a line a header. No amount of naming the
+# columns can find a header whose words are not in the file — so the columns are
+# declared by position instead (`columns_at`, §99), measured off the page in
+# points with `scripts/probe.py`.
+#
+# `columns:` still names them, because that is what the grid's synthesised
+# header row carries and what `from_rows` matches on the way back. The words are
+# the ones printed on the graphic; they are documentation and an alias, not a
+# thing anything searches the page for.
+#
+# Two more things this bank does that the reader had to learn:
+#
+#   * money columns are **centred**, not right-aligned — the same column ends at
+#     379.7 for `250.00` and 383.1 for `1,000.00`. A declared range is matched
+#     on a word's centre, so alignment stops mattering;
+#   * an empty money cell is printed as `-` rather than left blank, including
+#     the reference column, which is `-` on all 72 rows. Hence `derive_txn_id`.
+bank: sbi
+
+columns:
+  "Txn Date": date
+  "Description": narration
+  "Debit": debit
+  "Credit": credit
+  "Balance": balance
+
+# Where each column sits, in PDF points from the left edge of the page. A word
+# belongs to the column whose range holds its centre; a word in no range belongs
+# to a column nobody declared and is dropped — which is what happens to the
+# Value Date printed at 82.5-122.5, beside the transaction date.
+#
+# Measured, with the observed extent in the comment. The ranges are wider than
+# what was seen so a longer figure or a wider payee still lands, and they may
+# touch but never overlap.
+columns_at:
+  date: [20, 76]        # dates at 27.5-67.5
+  narration: [128, 292] # descriptions from 138.0
+  txn_id: [294, 320]    # `-` centred on 305.0, on every row
+  debit: [330, 400]     # centred on 367.5
+  credit: [410, 478]    # centred on 447.5
+  balance: [495, 565]   # centred on 530.0
+
+metadata:
+  "Account Number": account_number
+  "IFS Code": ifsc
+
+# Numeric month on purpose: `%b` reads the C locale's month names, which differ
+# between WSL and CI. SPEC §27.
+dates: ["%d/%m/%Y"]
+
+# The reference column is `-` on every row, so there is nothing to key on and an
+# id is derived from the whole row instead (§44.4). It is declared in
+# `columns_at` all the same, so its placeholder is claimed by a column rather
+# than drifting into the description.
+derive_txn_id: true

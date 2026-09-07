@@ -56,7 +56,9 @@ export function Reapply() {
         </p>
       </Why>
 
-      {data.changes.length === 0 ? (
+      {/* Zero compared is not zero differing (§24.1) — `ReconcileCall` owns
+          that distinction, so both branches go through it. */}
+      {data.changes.length === 0 || data.considered === 0 ? (
         <ReconcileCall data={data} />
       ) : (
         <>
@@ -69,7 +71,15 @@ export function Reapply() {
             </Card>
             <Card title="Renames">
               <p className="figure">{data.renames}</p>
-              <p className="muted">{count(data.recats, 'category change')}</p>
+              {/* §24. A rename moves four things, not two: the description, the
+                  category, the payee account on the other side, and the rule
+                  tags. Showing only the first two made the other two look like
+                  they had not happened. */}
+              <p className="muted">
+                {count(data.recats, 'category change')},{' '}
+                {count(data.counterparties, 'payee account rename')},{' '}
+                {count(data.retags, 'tag change')}
+              </p>
             </Card>
           </div>
 

@@ -461,7 +461,7 @@ def test_every_row_carries_its_clock_or_an_explicit_null(signed_in):
 
 
 def test_money_is_a_string_never_a_json_number(signed_in):
-    """A JSON number is an IEEE double the moment it is parsed. CLAUDE.md's
+    """A JSON number is an IEEE double the moment it is parsed. the project's
     first non-negotiable does not stop at the process boundary."""
     raw = signed_in.upload(XLS_FIXTURE.read_bytes()).data.decode()
     body = json.loads(raw)

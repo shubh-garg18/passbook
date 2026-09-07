@@ -1,6 +1,6 @@
 """The balance-continuity invariant and its supporting assertions. SPEC §6.6, §6.7.
 
-CLAUDE.md non-negotiable #3: never soften or skip the continuity check to make
+Non-negotiable #3: never soften or skip the continuity check to make
 a test pass. These tests exist to prove it bites.
 """
 
