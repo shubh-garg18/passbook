@@ -394,6 +394,11 @@ def set_currency(port: int, tok: str, code: str = "INR") -> bool:
     return True
 
 
+#: What a bank hands out. Anything else in a downloads folder is not a
+#: statement, and offering somebody their tax PDF would be worse than asking.
+STATEMENT_SUFFIXES = {".xls", ".xlsx", ".csv", ".pdf", ".html", ".htm"}
+
+
 def find_statement() -> Path | None:
     """A statement already sitting in inbox/, if there is one."""
     inbox = ROOT / "inbox"
@@ -402,6 +407,61 @@ def find_statement() -> Path | None:
     files = [p for p in sorted(inbox.iterdir())
              if p.is_file() and not p.name.startswith(".")]
     return files[0] if files else None
+
+
+def recent_downloads(limit: int = 5) -> list[Path]:
+    """Plausible statements in the usual downloads folder, newest first.
+
+    A statement arrives in Downloads and then has to be moved, which is a step
+    that exists for no reason other than that nothing looked there. Nothing is
+    copied without being chosen, and the list is filtered by suffix so this
+    never offers somebody an unrelated document.
+    """
+    downloads = Path.home() / "Downloads"
+    if not downloads.is_dir():
+        return []
+    try:
+        files = [
+            p for p in downloads.iterdir()
+            if p.is_file()
+            and not p.name.startswith(".")
+            and p.suffix.lower() in STATEMENT_SUFFIXES
+        ]
+    except OSError:
+        return []
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[:limit]
+
+
+def offer_a_statement() -> Path | None:
+    """Let the operator pick one rather than move a file by hand.
+
+    Returns the statement now in `inbox/`, or None if they would rather place
+    it themselves. **Copied, never moved** — the download stays where it was,
+    because a setup step that relocates somebody's file is a setup step that
+    loses it when they re-run.
+    """
+    candidates = recent_downloads()
+    if not candidates:
+        return None
+    say(f"   {DIM}Found these in your Downloads folder:{OFF}")
+    for index, path in enumerate(candidates, start=1):
+        say(f"     {BOLD}{index}{OFF}  {path.name}")
+    say(f"     {BOLD}0{OFF}  none of these — I will put one in inbox/ myself")
+    while True:
+        answer = ask("Which one is your bank statement?", "0")
+        if answer in ("0", ""):
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(candidates):
+            source = candidates[int(answer) - 1]
+            inbox = ROOT / "inbox"
+            inbox.mkdir(exist_ok=True)
+            target = inbox / source.name
+            shutil.copy2(source, target)
+            say(f"   {GREEN}copied {source.name} into inbox/{OFF} "
+                f"{DIM}(the original is untouched){OFF}")
+            return target
+        say(f"   {RED}Type a number from the list.{OFF}")
 
 
 def install_dependencies() -> bool:
@@ -694,6 +754,9 @@ def main() -> int:
         statement = find_statement()
         if statement:
             say(f"   Found {BOLD}{statement.name}{OFF} in inbox/.")
+        else:
+            statement = offer_a_statement()
+        if statement is not None:
             say(f"   {DIM}installing the parser so it can be read…{OFF}")
             install_dependencies()
         else:

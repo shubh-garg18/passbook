@@ -1,9 +1,15 @@
 # Setting up passbook
 
-Everything runs on your own machine. Budget twenty minutes, mostly Docker
-downloading, and about 3 GB of disk.
+**One command, then three questions.** Everything else is automatic.
 
-**You need a PC** — Windows, macOS or Linux. Not a phone.
+Budget twenty minutes — mostly Docker downloading — and about 3 GB of disk. You
+need a PC: Windows, macOS or Linux. Not a phone.
+
+| | |
+|---|---|
+| **What you do** | install Docker, download one statement from your bank, run one command |
+| **What it does** | every secret, the database, the ledger store, the API token, the currency, and your account created with the statement's own opening balance |
+| **What it asks** | a login to create, which statement to read, and a password for passbook |
 
 ---
 
@@ -98,7 +104,6 @@ customer ID, address and your counterparties' details.
 ```bash
 git clone https://github.com/shubh-garg18/passbook.git
 cd passbook
-mkdir -p inbox && cp ~/Downloads/your-statement.xls inbox/
 ```
 
 Then start it, whichever suits you:
@@ -116,6 +121,10 @@ Then start it, whichever suits you:
 > `make upgrade` reads the repository to know which migrations this install has
 > already applied. A ZIP silently opts you out of the one mechanism that stops a
 > pulled change breaking your ledger.
+
+It will offer you any statement it finds in your **Downloads** folder, so you
+usually do not have to move a file at all. It copies the one you pick — your
+download stays where it is.
 
 The wizard asks **three things** and does the rest:
 

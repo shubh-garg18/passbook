@@ -6,7 +6,12 @@
 [![any bank](https://img.shields.io/badge/any%20bank-no%20code-brightgreen)](#is-it-for-you)
 
 **Your bank statement, turned into a ledger that tells you the truth about your
-spending.** Self-hosted, offline, and it takes one command to install.
+spending.** Self-hosted, offline, one command to install.
+
+You download a statement once a week and drop it on a page. passbook reads it,
+checks the arithmetic, sorts it, and shows you where the money actually went.
+Nothing is uploaded anywhere — there is no account to make and no server to
+trust.
 
 > **New here, or not a developer?** → **[What is this?](docs/what-is-this.md)**
 > — the whole idea in plain language, no jargon, two minutes.

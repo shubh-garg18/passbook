@@ -36,6 +36,24 @@ went, and how the months compare:
 
 ![The main page, showing spending by category and by month](screenshots/ledger.png)
 
+## The five pages
+
+That is the whole app.
+
+| | |
+|---|---|
+| **Ledger** | your balance, what you spent, what you earned, and where it went |
+| **Rows** | every transaction, searchable — the page that means you never open anything else |
+| **Reports** | the same months cut different ways: by category, by who you paid, by day of the week |
+| **Payees** | you name people and shops once, and the names stick |
+| **Accounts** | more than one bank account, together or one at a time |
+
+There is also a **reminder** — passbook can put "download the statement" in your
+own calendar, so it reaches you even when the laptop is shut. And if your bank
+is not one of the three that work out of the box, **Add a bank** walks you
+through telling passbook where its columns are. It takes about ten minutes, you
+do it once, and the file never leaves your machine.
+
 ## The one idea worth understanding
 
 **Money moving is not money spent.**

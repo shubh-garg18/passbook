@@ -200,3 +200,48 @@ def test_nothing_destructive_is_marked_runnable_without_sudo_being_named():
     for fix in docker._install_fixes("Linux"):
         if fix.command and any(part == "sudo" for part in fix.command):
             assert fix.needs_sudo, f"{fix.label} runs sudo without declaring it"
+
+
+# --- finding a statement without moving files by hand ------------------------
+
+
+def test_only_statement_shaped_files_are_offered(tmp_path, monkeypatch):
+    """Offering somebody their tax PDF would be worse than asking."""
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    for name in ("statement.xls", "photo.jpg", "notes.txt", "acct.pdf"):
+        (downloads / name).write_text("x")
+    monkeypatch.setattr(wizard.Path, "home", staticmethod(lambda: tmp_path))
+
+    offered = {p.name for p in wizard.recent_downloads()}
+    assert offered == {"statement.xls", "acct.pdf"}
+
+
+def test_the_download_is_copied_never_moved(tmp_path, monkeypatch):
+    """A setup step that relocates somebody's file is one that loses it when
+    they re-run."""
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    source = downloads / "statement.xls"
+    source.write_text("x")
+    monkeypatch.setattr(wizard.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(wizard, "ROOT", tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setattr(wizard, "ask", lambda *a, **k: "1")
+
+    chosen = wizard.offer_a_statement()
+    assert chosen is not None and chosen.name == "statement.xls"
+    assert source.is_file(), "the original download must survive"
+
+
+def test_declining_leaves_inbox_alone(tmp_path, monkeypatch):
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    (downloads / "statement.xls").write_text("x")
+    monkeypatch.setattr(wizard.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(wizard, "ROOT", tmp_path / "repo")
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setattr(wizard, "ask", lambda *a, **k: "0")
+
+    assert wizard.offer_a_statement() is None
+    assert not (tmp_path / "repo" / "inbox").exists()
