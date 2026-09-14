@@ -7,6 +7,7 @@ from ... import ops, service
 from ...config import alias_drift, load_accounts, load_settings, token_expiry
 from ...firefly.client import FireflyError
 from .. import auth as A
+from ._reconcile import _dump_state
 from ._base import _client, _artefact, _sync, api
 from ._scope import _account_scope
 
@@ -54,6 +55,102 @@ def _ledger_verdict(st, scope=None) -> dict:
         "failed": len(combined.failed),
         "unchecked": len(combined.unchecked),
         "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in combined.checks],
+    }
+
+
+@api.get("/backup")
+@A.login_required
+def backup_state():
+    """Whether a backup can be taken here, and how old the newest one is. §37."""
+    can, why = backup.available()
+    return jsonify({"available": can, "reason": why, "dump": _dump_state()})
+
+
+@api.post("/backup")
+@A.login_required
+def backup_run():
+    """Take a database dump, from the UI. SPEC §37.
+
+    This is the action `/reapply/run` is gated on, and until now it needed a
+    terminal — so the most destructive thing in the app was guarded by a step
+    the operator least likely to have a terminal could not perform.
+
+    Reports what it did **and what it did not**: there is no git repository in
+    this image, so no source bundle. The source is on GitHub; the ledger is not
+    anywhere else, and letting one word cover both would be the more dangerous
+    simplification.
+    """
+    try:
+        result = backup.run()
+    except backup.BackupFailed as exc:
+        log.warning("backup failed: %s", exc)
+        return _fail(str(exc), "backup", 500)
+
+    log.warning("backup taken from the UI: %s", result.dump)
+    return jsonify(
+        {
+            "ok": True,
+            "dump": result.dump,
+            "dumpBytes": result.dump_bytes,
+            "config": result.config,
+            "configBytes": result.config_bytes,
+            "sourceBundle": result.source_bundle,
+            # Re-read, so the freshness the purge gate uses is the one reported
+            # here rather than one inferred from the write having returned.
+            "state": _dump_state(),
+        }
+    )
+
+
+# --- the reminder ---------------------------------------------------------
+# SPEC §24. `service.sync_status` already tells the operator there is no cron to
+# catch a late sync, because WSL2 stops when Windows sleeps. This is the answer
+# to that, and the answer is deliberately not "run a scheduler here".
+
+
+def _schedule_json(schedule, now: datetime | None = None) -> dict:
+    now = now or datetime.now()
+    upcoming = reminders.next_occurrences(schedule, now, 5)
+    return {
+        **schedule.to_dict(),
+        # Never returned. The UID is stable so a re-import updates the event
+        # rather than duplicating it, and it has no business in a page.
+        "uid": None,
+        "label": schedule.label,
+        "weekdays": list(reminders.WEEKDAYS),
+        "frequencies": list(reminders.FREQUENCIES),
+        "maxDayOfMonth": reminders.MAX_DAY_OF_MONTH,
+        "timezone": reminders.TZID,
+        # Computed here, from the same function that writes the RRULE, so the
+        # list on screen cannot disagree with what the calendar will do.
+        "upcoming": [m.isoformat(timespec="minutes") for m in upcoming],
+        "filename": reminders.filename(schedule),
+        # Zero configuration: Google takes the whole event, recurrence included,
+        # as query parameters. This is why the mail server is optional.
+        "googleUrl": reminders.google_calendar_url(schedule, now=now),
+        # Whether the button can be offered at all, and where it would send.
+        # The address is masked: §11 does not stop at account numbers, and this
+        # is rendered on a page.
+        "email": _email_state(),
+    }
+
+
+def _email_state() -> dict:
+    """What the page needs to render the mail section.
+
+    **The password is never here.** `hasPassword` says whether one is stored so
+    the field can show a placeholder instead of an empty box that looks like the
+    setting was lost; the value itself never crosses this boundary (§11).
+    """
+    mail = reminders.mail_settings(load_settings())
+    return {
+        "configured": mail.ready,
+        "to": reminders._mask_email(mail.recipient) if mail.recipient else None,
+        "host": mail.host,
+        "port": mail.port,
+        "user": mail.user,
+        "recipient": mail.to,
+        "hasPassword": bool(mail.password),
     }
 
 

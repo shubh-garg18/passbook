@@ -1,13 +1,19 @@
-/* Re-apply, as a component rather than a destination. SPEC §18, §15.2.
+/* Reconciling the ledger with the config. SPEC §23, §15.2, §18.
  *
- * Aliases and rules apply at PUSH time, so editing config cannot reach rows
- * already in Firefly. Reconciling means purge + re-push — a delete, so it always
- * says what it will do first.
+ * Aliases and rules are applied at PUSH time, so editing config cannot reach
+ * rows already in Firefly. There are two ways to reach them, and for a long
+ * time only the second one existed:
  *
- * This lives here because it now appears in two places and must behave
- * identically in both: inline on Payees' diff page the moment config is written
- * (which is where the step was being missed), and on `/reapply`, which keeps the
- * full row-by-row table for anyone who wants to read it before running.
+ *   1. **Update them.** Three fields change on rows that already exist, so
+ *      `PUT /api/v1/transactions/{group}` is enough. Nothing is deleted, the
+ *      write is idempotent, and no database dump is involved.
+ *   2. **Purge and re-push.** Still necessary, and still gated on a dump: it
+ *      is the only thing that can fix a row that is *missing*, or one whose
+ *      amount or date is wrong. An update cannot create a row.
+ *
+ * The page used to offer only (2) for a rename. Deleting a ledger to correct a
+ * payee name is not a trade anyone makes, so the ledger simply stayed stale —
+ * which is the flaw this component exists to close.
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -18,6 +24,7 @@ import type { ReapplyPreview, ReapplyResult, SyncResult } from '../lib/types'
 import { Notice, Tick } from './ui'
 import { Progress, Why, describe, useToast } from './feedback'
 import { count } from '../lib/money'
+import { invalidateLedger } from '../lib/ledger'
 
 /** Everything a preview says would move, as one sentence's worth of parts. */
 function parts(data: ReapplyPreview): string {
@@ -38,10 +45,7 @@ export function useLedgerSync() {
   return useMutation({
     mutationFn: () => api.post<SyncResult>('/reapply/sync'),
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['overview'] })
-      queryClient.invalidateQueries({ queryKey: ['analysis'] })
-      queryClient.invalidateQueries({ queryKey: ['reapply'] })
-      queryClient.invalidateQueries({ queryKey: ['payees'] })
+      invalidateLedger(queryClient)
       const clean = result.failed === 0 && result.remaining === 0
       toast(
         clean
@@ -67,6 +71,42 @@ export function useLedgerSync() {
   })
 }
 
+/**
+ * Take a database dump. SPEC §37.
+ *
+ * This used to read "run `make backup` on the host — it cannot be taken from
+ * here, that needs the Docker socket". True of the socket and false of the
+ * conclusion: a dump needs a TCP connection to Postgres, which this container
+ * has always had. The most destructive action in the app was gated behind a
+ * terminal, which the operator who most needs a backup is least likely to open.
+ */
+export function useBackup() {
+  const queryClient = useQueryClient()
+  const toast = useToast()
+
+  return useMutation({
+    mutationFn: () => api.post<BackupRun>('/backup'),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['reapply'] })
+      queryClient.invalidateQueries({ queryKey: ['status'] })
+      queryClient.invalidateQueries({ queryKey: ['backup'] })
+      toast({
+        kind: 'ok',
+        title: 'Backed up',
+        detail: `${result.dump} — ${Math.round(result.dumpBytes / 1024)} KB. The ledger and your config.`,
+      })
+    },
+    onError: (error) => toast({ kind: 'bad', ...describe(error) }),
+  })
+}
+
+type BackupRun = {
+  dump: string
+  dumpBytes: number
+  config: string | null
+  sourceBundle: boolean
+}
+
 /** The purge-and-re-push mutation, with its toast and its navigation. */
 export function useReapplyRun() {
   const navigate = useNavigate()
@@ -77,9 +117,7 @@ export function useReapplyRun() {
     mutationFn: () => api.post<ReapplyResult>('/reapply/run'),
     onSuccess: (result) => {
       queryClient.setQueryData(['reapplyResult'], result)
-      queryClient.invalidateQueries({ queryKey: ['overview'] })
-      queryClient.invalidateQueries({ queryKey: ['analysis'] })
-      queryClient.invalidateQueries({ queryKey: ['reapply'] })
+      invalidateLedger(queryClient)
       toast({
         kind: result.reconciles ? 'ok' : 'bad',
         title: 'Re-applied',
@@ -110,7 +148,7 @@ export function ReconcileCall({
 
   // Zero compared is not zero differing. This page reported a green "All 0
   // transactions already match" for a join that matched nothing at all, which
-  // is the failure §24.1 exists to record — so the count of rows actually
+  // is the failure §23.1 exists to record — so the count of rows actually
   // looked at gates the tick (non-negotiable 11).
   if (data.considered === 0) return <NothingCompared />
 
@@ -118,8 +156,8 @@ export function ReconcileCall({
     return (
       <Notice kind="ok">
         <p>
-          All {data.considered} transaction{data.considered === 1 ? '' : 's'} in Firefly already
-          match what the current config produces. Nothing to do.
+          All {data.considered} transaction{data.considered === 1 ? '' : 's'} in the ledger
+          already match what the current config produces. Nothing to do.
         </p>
       </Notice>
     )
@@ -249,8 +287,12 @@ function Rebuild({ data }: { data: ReapplyPreview }) {
  *
  * The container can *read* `backups/` even though it cannot write one, so the
  * dump stopped being a suggestion and became a requirement: no dump from the
- * last hour, no purge. `/api/reapply/run` refuses independently — a disabled
- * button is a courtesy, not a guard.
+ * last hour, no purge. That sentence was written before the mount existed —
+ * `backups/` was not in docker-compose.yml at all, so the container saw
+ * nothing, reported "No backup" on a machine that had one, and refused the
+ * rebuild unconditionally. Mounted read-only now (§31). `/api/reapply/run` refuses independently — a disabled
+ * button is a courtesy, not a guard. None of this gates the in-place update,
+ * which deletes nothing.
  */
 function DumpState({
   dump,
@@ -259,6 +301,8 @@ function DumpState({
   dump: ReapplyPreview['dump']
   rows: number
 }) {
+  const takeBackup = useBackup()
+
   if (dump.fresh)
     return (
       <p className="muted dump">
@@ -271,16 +315,25 @@ function DumpState({
   return (
     <Notice kind="warn">
       <p>
-        <strong>Run <code>make backup</code> on the host first.</strong>{' '}
+        <strong>Take a backup first.</strong>{' '}
         {dump.ageMinutes === null
           ? 'There is no database dump in backups/ at all.'
           : `The newest dump (${dump.name}) is ${count(dump.ageMinutes, 'minute')} old; ` +
             `this needs one from the last ${count(dump.maxAgeMinutes, 'minute')}.`}{' '}
         This deletes {count(rows, 'row')} and pushes them again, and the dump is the only way
-        back. The dump cannot be taken from here — that needs the Docker socket, which this
-        container deliberately does not have — but it can be read, so it is required rather than
-        suggested.
+        back.
       </p>
+      <div className="actions">
+        <button
+          type="button"
+          className="primary"
+          disabled={takeBackup.isPending}
+          data-working={takeBackup.isPending}
+          onClick={() => takeBackup.mutate()}
+        >
+          {takeBackup.isPending ? 'Backing up…' : 'Back up now'}
+        </button>
+      </div>
     </Notice>
   )
 }

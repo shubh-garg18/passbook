@@ -4429,3 +4429,42 @@ decides it.
 - [x] The route guard updated deliberately: 36 → 44, with the reason written
       next to the number.
 
+---
+
+## 31. A backup you can actually take
+
+The purge refuses without a database dump from the last hour — correctly, since
+it deletes every row on the account. But the dump could only be taken with
+`make backup` on the host, so the most destructive action in the app was gated
+behind a terminal, which the operator who most needs a backup is least likely to
+open.
+
+The note explaining this said the container *could not* take one: it would need
+the Docker socket, which is deliberately withheld. True of the socket and false
+of the conclusion — **a dump needs a TCP connection to Postgres, which this
+container has always had.** It reaches the database the ordinary way, over the
+compose network, exactly as the ledger store does. No socket, no privilege.
+
+### 31.1 The client major is pinned to the server's, and that is not fussiness
+
+Debian trixie ships `postgresql-client` 17. Its `pg_dump` happily dumps a 16
+server — and emits output that 16 cannot read back:
+
+    ERROR:  unrecognized configuration parameter "transaction_timeout"
+
+plus psql 17's `\restrict` meta-commands. The restore runs with
+`ON_ERROR_STOP=1`, so it aborts on the first line.
+
+**A backup that cannot be restored is not a backup**, and this one would have
+looked perfect until the day it was needed. Measured against a scratch database,
+not reasoned about. The client therefore comes from PGDG at the server's own
+major version, and `PG_MAJOR` is bumped with the `db` image.
+
+### 31.2 Definition of done
+
+- [x] `GET /backup` reports what exists; `POST /backup` takes one.
+- [x] The button sits with the destructive action it unblocks, not in a menu.
+- [x] `postgresql-client-16` in the image, pinned, with the reason in the
+      Dockerfile beside it.
+- [x] No Docker socket. The container still cannot see another container.
+

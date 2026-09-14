@@ -69,8 +69,8 @@ def test_the_route_count_is_the_one_the_split_produced():
     `@api` decorators at the split, and the URL map agreed rule for rule before
     and after it — a dropped import in `__init__.py` once left 3. Creating and
     removing a category, the attribution split and the earnings definition took
-    it to 44."""
-    assert len(declared()) == 44
+    it to 44, and taking a database backup from the UI to 46."""
+    assert len(declared()) == 46
 
 
 @pytest.mark.parametrize(

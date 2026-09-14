@@ -30,6 +30,37 @@ FROM python:3.12-slim
 # conventions that would drift from the lockfile.
 COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
 
+# `pg_dump`, so a backup can be taken from the UI. SPEC §31.
+#
+# This does NOT give the container the Docker socket — §15.1/§15.3 still hold
+# and it still cannot see or control another container. It reaches Postgres the
+# ordinary way, over the compose network, exactly as Firefly does.
+#
+# ── The version is pinned to the SERVER's, and that is not fussiness ────────
+# Debian trixie ships postgresql-client 17. Its pg_dump happily dumps a 16
+# server — and emits output that 16 cannot read back:
+#
+#     ERROR:  unrecognized configuration parameter "transaction_timeout"
+#
+# plus psql 17's \restrict / \unrestrict meta-commands. `make restore` runs
+# psql with ON_ERROR_STOP=1, so the restore aborts on the first line. Measured
+# against a scratch database, not reasoned about.
+#
+# A backup that cannot be restored is not a backup, and this one would have
+# looked perfect until the day it was needed. So the client comes from PGDG at
+# the server's own major version. **Bump PG_MAJOR with the `db` image.**
+ARG PG_MAJOR=16
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y curl ca-certificates gnupg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+       | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo $VERSION_CODENAME)-pgdg main" \
+       > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y "postgresql-client-${PG_MAJOR}" \
+    && apt-get purge -y curl gnupg && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Dependency layer first, so editing source does not reinstall the world.
