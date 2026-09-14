@@ -12,6 +12,7 @@ import logging
 import re
 import shutil
 from collections.abc import Iterable
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -30,6 +31,13 @@ from .config import (
     save_accounts,
 )
 from .firefly.bootstrap import load_rules
+from .identity import (  # noqa: F401  (re-exported, §119)
+    _NAMESPACED,
+    _TXN_ID_FORM,
+    is_namespaced,
+    slug_of,
+    txn_id_of,
+)
 from . import index as index_mod
 from . import parsecache
 from .firefly.client import FireflyClient, FireflyError
@@ -1444,43 +1452,6 @@ def ledger_analysis(
 
 _BARE_TXN_ID = re.compile(r"^\d{14}$")
 
-#: What a transaction id looks like, in the two forms a bank can give it.
-#:
-#: `20260509000001` — Canara's `YYYYMMDD` plus a per-date ordinal — and
-#: `d-<16 hex>`, which is §44.4's hash of the whole row, used for a bank that
-#: prints no per-row reference at all. Union is that bank.
-#:
-#: **The second form was missing.** SPEC §105: `_NAMESPACED` accepted only 14
-#: digits, so `union-2222-d-0f4b…` matched nothing and every read of it was
-#: wrong in a different way — `slug_of` said None, `txn_id_of` handed back the
-#: whole namespaced string, and `verify-ledger` reported all 32 rows as
-#: carrying "the bank's bare id" and told the operator to run a migration that
-#: had already been run. A red cross for something that is fine is the same
-#: failure as a green tick for something that is not (non-negotiable 11).
-_TXN_ID_FORM = r"\d{14}|d-[0-9a-f]{16}"
-_NAMESPACED = re.compile(rf"^(?P<slug>[a-z0-9][a-z0-9-]*)-(?P<txn_id>{_TXN_ID_FORM})$")
-def txn_id_of(external_id: str) -> str:
-    """The bank's own id, from either form.
-
-    `canara-1111-20260509000001` -> `20260509000001`, and a bare id passes
-    through. Tolerant reads are what let the migration (§21.2) be run when it
-    suits instead of being forced by a version bump.
-    """
-    text = (external_id or "").strip()
-    match = _NAMESPACED.match(text)
-    return match.group("txn_id") if match else text
-
-
-def slug_of(external_id: str) -> str | None:
-    """Which account pushed this row, or None for a pre-migration id."""
-    match = _NAMESPACED.match((external_id or "").strip())
-    return match.group("slug") if match else None
-
-
-def is_namespaced(external_id: str) -> bool:
-    return bool(_NAMESPACED.match((external_id or "").strip()))
-
-
 def route_statement(meta: StatementMeta, accounts: list[Account]) -> Account:
     """Which of my accounts is this statement for? SPEC §21.2.
 
@@ -1617,6 +1588,11 @@ def verify_ledger(
     lists soft-deleted journals. Counting them needs the database, which the web
     container deliberately has no credentials for (§15.1). The CLI supplies it;
     everywhere else the check reports itself unchecked rather than passing.
+
+    **Reads past the shared cache** (§101). This function's entire job is to say
+    what the ledger holds right now, and a check that compares `archive/`
+    against a cached view of it has not checked the ledger. Non-negotiable 11:
+    a green tick for something you did not check is a lie.
     """
     # Accepts an `Account` or, for the pre-registry path, a `Settings`. §21.6:
     # every check below is scoped to ONE account, because a ledger holding two
@@ -1632,30 +1608,33 @@ def verify_ledger(
     statements = statements_for(account, archived_statements(archive))
     checks: list[Check] = []
 
-    account_id = None
-    balance: Decimal | None = None
-    for live_account in client.asset_accounts():
-        if live_account["attributes"]["name"] == account.asset_account:
-            account_id = live_account["id"]
-            balance = Decimal(
-                str(live_account["attributes"]["current_balance"])
-            ).quantize(_CENT)
+    # Every read of the ledger below is a FRESH one. §101, and
+    # non-negotiable 11: a check that reads a cache has not checked.
+    with client.fresh() as fresh:
+        account_id = None
+        balance: Decimal | None = None
+        for live_account in fresh.asset_accounts():
+            if live_account["attributes"]["name"] == account.asset_account:
+                account_id = live_account["id"]
+                balance = Decimal(
+                    str(live_account["attributes"]["current_balance"])
+                ).quantize(_CENT)
 
-    if account_id is None:
-        return LedgerVerdict([
-            Check(
-                "account",
-                False,
-                f"no asset account named {account.asset_account!r} — "
-                "nothing can be verified against it",
-            )
-        ])
+        if account_id is None:
+            return LedgerVerdict([
+                Check(
+                    "account",
+                    False,
+                    f"no asset account named {account.asset_account!r} — "
+                    "nothing can be verified against it",
+                )
+            ])
 
-    splits = [
-        split
-        for group in client.account_transactions(account_id)
-        for split in group["attributes"]["transactions"]
-    ]
+        splits = [
+            split
+            for group in fresh.account_transactions(account_id)
+            for split in group["attributes"]["transactions"]
+        ]
     raw_ids = [str(s["external_id"]) for s in splits if s.get("external_id")]
     # Tolerant read (§21.1): a row pushed before the migration carries the bank's
     # bare id, one pushed after carries `<slug>-<txn_id>`. Both map to the same
@@ -1684,7 +1663,7 @@ def verify_ledger(
                 (
                     f"{balance} matches {newest.path.name}'s closing balance"
                     if drift == 0
-                    else f"Firefly says {balance}, {newest.path.name} closes at "
+                    else f"the ledger says {balance}, {newest.path.name} closes at "
                     f"{expected} — out by {drift:+}"
                 ),
             )
@@ -1697,20 +1676,43 @@ def verify_ledger(
         expected_ids = {t.txn_id for s in statements for t in s.transactions}
         missing = sorted(expected_ids - live_ids)
         unexpected = sorted(live_ids - expected_ids)
-        if not missing and not unexpected:
+        # **Count, do not compare sets.** §119: this check compared
+        # `set(live) == set(archived)` and therefore could not see a row posted
+        # twice — it reported "133 rows, one per archived transaction", in
+        # green, while the ledger held 141 splits behind those 133 identities
+        # and the balance was out by the extra copies. A set says which
+        # identities are present; only a count says how many times. That is
+        # non-negotiable 11 in its most literal form.
+        seen = Counter(txn_id_of(external) for external in raw_ids)
+        duplicated = sorted(i for i, times in seen.items() if times > 1)
+        extra = sum(times - 1 for times in seen.values() if times > 1)
+        if not missing and not unexpected and not duplicated:
             checks.append(
-                Check("rows", True, f"{len(live_ids)} rows, one per archived transaction")
+                Check(
+                    "rows",
+                    True,
+                    f"{len(raw_ids)} rows, one per archived transaction",
+                )
             )
         else:
             parts = []
             if missing:
                 sample = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
-                parts.append(f"{len(missing)} archived row(s) MISSING from Firefly ({sample})")
+                parts.append(f"{len(missing)} archived row(s) MISSING from the ledger ({sample})")
             if unexpected:
                 sample = ", ".join(unexpected[:5]) + (" …" if len(unexpected) > 5 else "")
-                parts.append(f"{len(unexpected)} row(s) in Firefly with no statement ({sample})")
+                parts.append(f"{len(unexpected)} row(s) in the ledger with no statement ({sample})")
+            if duplicated:
+                sample = ", ".join(duplicated[:5]) + (" …" if len(duplicated) > 5 else "")
+                parts.append(
+                    f"{len(duplicated)} transaction(s) posted MORE THAN ONCE ({sample}) — "
+                    f"{extra} extra row(s), and every figure drawn from this account "
+                    "counts them. `make backup`, then `passbook dedupe` (dry run by "
+                    "default) removes the surplus copies and keeps one of each. This "
+                    "check will not do it for you (non-negotiable 12)"
+                )
             checks.append(
-                Check("rows", False, f"{len(live_ids)} live vs {len(expected_ids)} archived — "
+                Check("rows", False, f"{len(raw_ids)} live vs {len(expected_ids)} archived — "
                                      + "; ".join(parts))
             )
 
@@ -1732,9 +1734,21 @@ def verify_ledger(
                 trashed == 0,
                 "no soft-deleted journals"
                 if trashed == 0
+                # §66. The remedy used to read `passbook purge --confirm
+                # --yes`, which deletes EVERY row carrying an external_id —
+                # the whole managed ledger — to clear a stray trashed journal.
+                # That is a catastrophic answer to a trivial question, and it
+                # was hit for real: deleting an unused Firefly asset account
+                # soft-deletes its opening balance, and this check then told
+                # the operator to purge their ledger. `DELETE /api/v1/data/purge`
+                # only removes what is ALREADY soft-deleted and cannot touch a
+                # live row, which is why it is the right tool.
                 else f"{trashed} soft-deleted journal(s) remain — a re-push of "
-                "identical rows will be refused as duplicates (§7.3). "
-                "`passbook purge --confirm --yes` force-deletes them.",
+                "identical rows will be refused as duplicates (§7.3). Firefly's "
+                "own `DELETE /api/v1/data/purge` clears already-deleted records "
+                "and cannot touch a live row; `client.purge_trashed()` calls it. "
+                "Do NOT reach for `passbook purge`, which deletes every managed "
+                "row to solve this.",
             )
         )
 
@@ -1811,6 +1825,25 @@ def verify_ledger(
 # --- statements on disk ------------------------------------------------------
 
 
+#: Parsed archives, keyed on what the directory looked like. SPEC §101.
+#:
+#: **The key is every file's path, size and mtime**, so this is not a guess with
+#: a timeout on it: a file that changes changes the key, and a file that appears
+#: or disappears changes it too. Nothing has to remember to invalidate this, and
+#: nothing can serve a statement that is no longer on disk.
+#:
+#: It exists because it was measured. `archived_statements` re-parses every
+#: `.xls` and `.pdf` under `archive/` on **every call**, and it is called by
+#: `/overview`, `/analysis`, `/transactions`, `/status`, `verify-ledger` and the
+#: reminder — 171ms for three statements, several times per page load, growing
+#: linearly with every week the operator downloads. §6k forbids a cache without
+#: a measurement demanding one; this is the measurement.
+_ARCHIVE_CACHE: dict[tuple, list["ParsedStatement"]] = {}
+
+#: How many directory states to remember. Small on purpose: the useful entry is
+#: almost always the current one, and the only other states worth holding are
+#: the ones either side of a sync.
+_ARCHIVE_CACHE_MAX = 4
 def archived_statements(archive: Path = Path("archive")) -> list[ParsedStatement]:
     """Every archived statement, parsed. A bad file is skipped, never fatal.
 

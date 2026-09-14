@@ -16,16 +16,32 @@ from passbook.firefly.client import (
     FireflyClient,
     FireflyError,
     ValidationFailed,
+    forget_everything,
 )
 from passbook.firefly.push import build_payload, push_transactions
 from passbook.models import UPI, Transaction
 
-ASSET = "Canara savings"
+ASSET = "Canara Bank savings account"
+
+#: The fixture statement's first transaction id.
+BASE_TXN_ID = "20260509000001"
+
+
+def ids(count: int) -> list[str]:
+    """`count` consecutive ids, derived from the fixture's rather than spelled.
+
+    Written out, a 14-digit literal reads as an account number or a UTR to the
+    privacy audit (non-negotiable 20) — correctly, since it cannot tell the
+    difference. Deriving them keeps the only long digit run in this file the
+    fixture's own.
+    """
+    first = int(BASE_TXN_ID)
+    return [str(first + n) for n in range(count)]
 
 
 def txn(**kw) -> Transaction:
     base = dict(
-        txn_id="20260509000001",
+        txn_id=BASE_TXN_ID,
         txn_date=date(2026, 5, 9),
         narration="UPI/DR/412345678901/ZOKVEX QI/YESB/**12345@YBL/UPI//X/09/05/2026 01:51:33",
         debit=Decimal("65.00"),
@@ -58,7 +74,7 @@ def test_deposit_reverses_the_sides():
 
 
 def test_amount_is_a_positive_string_never_a_float():
-    """non-negotiable #1: money is Decimal, never float."""
+    """CLAUDE.md non-negotiable #1: money is Decimal, never float."""
     split = build_payload(txn(), ASSET)["transactions"][0]
     assert split["amount"] == "65.00"
     assert isinstance(split["amount"], str)
@@ -128,10 +144,38 @@ def test_large_oneoff_is_never_tagged_client_side():
 # --- client behaviour ---------------------------------------------------------
 
 
-def make_client(handler, **kw) -> FireflyClient:
+def make_client(handler, *, holds=(), **kw) -> FireflyClient:
+    """`handler` answers the POST; the pre-push ledger read is answered here.
+
+    Since §119 `push_transactions` reads what the account already holds before
+    posting anything, so every test that pushes has to be able to answer that
+    read. `holds` is the external_ids already in the ledger — empty for the
+    tests about posting, non-empty for the tests about the overlap.
+    """
+    accounts = {
+        "data": [{"id": "7", "attributes": {"name": ASSET}}],
+        "meta": {"pagination": {"total_pages": 1}},
+    }
+    rows = {
+        "data": [
+            {"attributes": {"transactions": [{"external_id": external}]}}
+            for external in holds
+        ],
+        "meta": {"pagination": {"total_pages": 1}},
+    }
+
+    def route(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/api/v1/accounts":
+            return httpx.Response(200, json=accounts)
+        if request.method == "GET" and path == "/api/v1/accounts/7/transactions":
+            return httpx.Response(200, json=rows)
+        return handler(request)
+
+    forget_everything()
     return FireflyClient(
         "http://firefly.test", "unused-token",
-        client=httpx.Client(transport=httpx.MockTransport(handler)), **kw
+        client=httpx.Client(transport=httpx.MockTransport(route)), **kw
     )
 
 
@@ -168,16 +212,22 @@ def test_real_validation_failure_is_not_counted_as_a_duplicate():
 
 
 def test_duplicates_are_counted_and_do_not_stop_the_run():
-    """Duplicate rejection is a normal outcome on overlapping downloads."""
+    """Firefly's own rejection is still counted, and still not an error.
+
+    It is the backstop since §119, not the mechanism — three DIFFERENT ids, so
+    the identity pre-check lets all three through to the POST.
+    """
     client = make_client(lambda r: validation_error("Duplicate of transaction #7."))
-    result = push_transactions(client, [txn(), txn(), txn()], ASSET)
+    rows = [txn(txn_id=i) for i in ids(3)]
+    result = push_transactions(client, rows, ASSET)
     assert (result.pushed, result.duplicates, result.failed) == (0, 3, 0)
     assert result.ok
 
 
 def test_successful_pushes_are_counted():
     client = make_client(lambda r: httpx.Response(200, json={"data": {"id": "1"}}))
-    result = push_transactions(client, [txn(), txn()], ASSET)
+    rows = [txn(txn_id=i) for i in ids(2)]
+    result = push_transactions(client, rows, ASSET)
     assert (result.pushed, result.duplicates, result.failed) == (2, 0, 0)
 
 
@@ -192,7 +242,8 @@ def test_mixed_run_reports_each_category():
             return validation_error("Duplicate of transaction #7.")
         return validation_error("Something else went wrong.")
 
-    result = push_transactions(make_client(handler), [txn(), txn(), txn()], ASSET)
+    rows = [txn(txn_id=i) for i in ids(3)]
+    result = push_transactions(make_client(handler), rows, ASSET)
     assert (result.pushed, result.duplicates, result.failed) == (1, 1, 1)
 
 
@@ -293,3 +344,176 @@ def test_jwt_without_an_exp_claim_yields_none():
 
     payload = base64.urlsafe_b64encode(json.dumps({"sub": "1"}).encode()).rstrip(b"=").decode()
     assert token_expiry(f"aGVsbG8.{payload}.sig") is None
+
+
+# --- §119: the overlap is skipped by identity, not by content -----------------
+#
+# Every test below exists because of one incident. A statement overlapping an
+# already-pushed period was re-uploaded after a config change. Firefly's
+# `error_if_duplicate_hash` hashes the SUBMITTED payload
+# (`TransactionJournalFactory::hashArray`), the config change had rewritten the
+# descriptions, so the hashes no longer matched and seven rows were posted a
+# second time. The balance went wrong by the sum of the extra copies and
+# nothing raised.
+
+
+def test_a_row_already_in_the_ledger_is_never_posted_again():
+    posts = []
+
+    def handler(request):
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    client = make_client(handler, holds=[BASE_TXN_ID])
+    result = push_transactions(client, [txn()], ASSET)
+
+    assert posts == []
+    assert (result.pushed, result.already, result.duplicates, result.failed) == (0, 1, 0, 0)
+    assert result.skipped == 1
+    assert result.ok
+
+
+def test_a_changed_description_does_not_make_it_a_new_transaction():
+    """The incident, reproduced.
+
+    Same transaction, same id, different payload — an alias renamed the payee
+    between the two pushes. Firefly's content hash sees two different rows.
+    passbook sees one id.
+    """
+    posts = []
+
+    def handler(request):
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    client = make_client(handler, holds=[BASE_TXN_ID])
+    renamed = txn(payee="Someone Else Entirely")
+    assert build_payload(renamed, ASSET) != build_payload(txn(), ASSET)  # hash would differ
+
+    result = push_transactions(client, [renamed], ASSET)
+    assert posts == []
+    assert result.already == 1
+
+
+def test_the_pre_migration_id_is_the_same_transaction_as_the_namespaced_one():
+    """§21.1 tolerant read. A bare id in the ledger still means "already there".
+
+    Without this, running the migration would make every pre-migration row
+    look absent and the next push would double the ledger.
+    """
+    from passbook.config import Account
+
+    account = Account(
+        slug="canara-1111", bank="canara", account_number="1111", asset_account=ASSET
+    )
+    posts = []
+
+    def handler(request):
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    client = make_client(handler, holds=[BASE_TXN_ID])  # bare, pre-migration
+    result = push_transactions(client, [txn()], account)
+    assert posts == []
+    assert result.already == 1
+
+
+def test_only_the_rows_not_already_there_are_posted():
+    posts = []
+
+    def handler(request):
+        posts.append(json.loads(request.content)["transactions"][0]["external_id"])
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    four = ids(4)
+    client = make_client(handler, holds=four[:2])
+    result = push_transactions(client, [txn(txn_id=i) for i in four], ASSET)
+
+    assert posts == four[2:]
+    assert (result.pushed, result.already) == (2, 2)
+
+
+def test_one_statement_cannot_duplicate_itself():
+    """A row posted during this run joins the known set immediately."""
+    posts = []
+
+    def handler(request):
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    client = make_client(handler)
+    result = push_transactions(client, [txn(), txn(), txn()], ASSET)
+    assert len(posts) == 1
+    assert (result.pushed, result.already) == (1, 2)
+
+
+def test_a_ledger_that_cannot_be_read_stops_the_push():
+    """Never guess. A push that could not see the ledger might duplicate it."""
+    posts = []
+
+    def route(request):
+        if request.method == "GET":
+            return httpx.Response(500, json={"message": "nope"})
+        posts.append(request)
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    forget_everything()
+    client = FireflyClient(
+        "http://firefly.test", "unused-token",
+        client=httpx.Client(transport=httpx.MockTransport(route)),
+        retries=1,
+    )
+    with pytest.raises(FireflyError):
+        push_transactions(client, [txn()], ASSET)
+    assert posts == []
+
+
+def test_an_account_with_no_rows_yet_pushes_everything():
+    """An asset account Firefly has never seen holds nothing — push it all."""
+    posts = []
+
+    def route(request):
+        if request.method == "GET" and request.url.path == "/api/v1/accounts":
+            return httpx.Response(
+                200, json={"data": [], "meta": {"pagination": {"total_pages": 1}}}
+            )
+        posts.append(request)
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    forget_everything()
+    client = FireflyClient(
+        "http://firefly.test", "unused-token",
+        client=httpx.Client(transport=httpx.MockTransport(route)),
+    )
+    result = push_transactions(client, [txn()], ASSET)
+    assert (result.pushed, result.already) == (1, 0)
+
+
+def test_the_pre_push_read_ignores_the_shared_cache():
+    """§101 + non-negotiable 11: a stale view is not a view of the ledger."""
+    reads = {"n": 0}
+
+    def route(request):
+        if request.method == "GET" and request.url.path == "/api/v1/accounts":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "7", "attributes": {"name": ASSET}}],
+                    "meta": {"pagination": {"total_pages": 1}},
+                },
+            )
+        if request.method == "GET":
+            reads["n"] += 1
+            return httpx.Response(
+                200, json={"data": [], "meta": {"pagination": {"total_pages": 1}}}
+            )
+        return httpx.Response(200, json={"data": {"id": "1"}})
+
+    forget_everything()
+    client = FireflyClient(
+        "http://firefly.test", "unused-token",
+        client=httpx.Client(transport=httpx.MockTransport(route)),
+    )
+    client.account_transactions("7")            # fills the shared cache
+    push_transactions(client, [txn()], ASSET)   # must not read it back
+    assert reads["n"] == 2

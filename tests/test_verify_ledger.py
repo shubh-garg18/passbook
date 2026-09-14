@@ -20,17 +20,17 @@ from pathlib import Path
 
 import pytest
 
-from conftest import FIXTURE_ACCOUNT, XLS_FIXTURE
+from conftest import FIXTURE_ACCOUNT, XLS_FIXTURE, StoreDouble
 from passbook import ops, service
 from passbook.config import Account
 
 ACCOUNT = "Test Account"
 
 
-class FakeFirefly:
+class FakeFirefly(StoreDouble):
     """Just enough Firefly. `splits` are what the account holds."""
 
-    def __init__(self, splits, *, balance="5068.09", account=ACCOUNT):
+    def __init__(self, splits, *, balance="6073.38", account=ACCOUNT):
         self.splits = splits
         self.balance = balance
         self.account = account
@@ -45,7 +45,7 @@ class FakeFirefly:
         return [{"attributes": {"transactions": self.splits}}]
 
 
-def opening(amount="10000.00"):
+def opening(amount="12612.64"):
     return {"type": "opening balance", "amount": amount, "external_id": None}
 
 
@@ -91,8 +91,8 @@ def closing_balance(archive) -> Decimal:
     """The fixture's own closing figure, read through the parser.
 
     Not hardcoded: §16.6 — every number asserted anywhere comes from
-    `tests/fixtures/statement.xls`. An early version of this file hardcoded a
-    live ledger's closing figure, which the fixture does not close at.
+    `tests/fixtures/statement.xls`, and the first version of this file hardcoded
+    the *real* ledger's closing figure, which the fixture does not close at.
     """
     statements = service.archived_statements(archive)
     newest = max(statements, key=lambda s: (s.meta.period_to, s.path.stat().st_mtime))
@@ -195,7 +195,7 @@ def test_extra_rows_are_reported_as_well_as_missing_ones(archive, settings):
     )
     rows = check_named(verdict, "rows")
     assert rows.ok is False
-    assert "1 row(s) in Firefly with no statement" in rows.detail
+    assert "1 row(s) in the ledger with no statement" in rows.detail
     assert "99999999999999" in rows.detail
 
 
@@ -207,7 +207,13 @@ def test_tombstones_fail_the_check_and_name_the_remedy(archive, settings):
     trashed = check_named(verdict, "trashed")
     assert trashed.ok is False
     assert "72 soft-deleted" in trashed.detail
-    assert "purge --confirm --yes" in trashed.detail
+    # §66. The remedy named here used to be `passbook purge --confirm --yes`,
+    # which deletes every row carrying an external_id — the whole managed
+    # ledger — to clear a stray tombstone. It was followed for real once. The
+    # check must name the targeted call and must warn OFF the destructive one.
+    assert "data/purge" in trashed.detail
+    assert "purge_trashed" in trashed.detail
+    assert "Do NOT reach for `passbook purge`" in trashed.detail
 
 
 def test_an_unavailable_tombstone_count_is_UNCHECKED_never_a_pass(archive, settings):
@@ -401,3 +407,78 @@ def test_ops_still_cannot_execute_anything_but_rclone():
                     if isinstance(head, ast.Constant):
                         executables.add(head.value)
     assert executables <= {"rclone"}, f"ops.py can execute {executables}"
+
+
+# --- §119: the check that could not count -----------------------------------
+
+
+def test_a_transaction_posted_twice_fails_the_rows_check(archive, settings):
+    """The incident this check missed.
+
+    `rows` compared `set(live) == set(archived)`, so a row posted twice was
+    invisible to it: the ledger held more splits than the archive had
+    transactions and the check said "one per archived transaction", in green.
+    The balance check caught it; this one told the operator everything was
+    fine, which is the half that decides where they look.
+
+    Non-negotiable 11, literally: a set says which ids are present, only a
+    count says how many times.
+    """
+    ids = all_ids(archive)
+    doubled = ids[:7]
+    verdict = verdict_for(
+        archive,
+        settings,
+        [opening()] + [row(i) for i in ids] + [row(i) for i in doubled],
+        trashed=0,
+        intents=[],
+    )
+
+    rows = check_named(verdict, "rows")
+    assert rows.ok is False
+    assert "7 transaction(s) posted MORE THAN ONCE" in rows.detail
+    assert "7 extra row(s)" in rows.detail
+    assert doubled[0] in rows.detail
+    # It names the remedy and does not perform it (non-negotiable 12).
+    assert "make backup" in rows.detail
+    assert "passbook dedupe" in rows.detail
+    assert verdict.ok is False
+
+
+def test_the_rows_check_counts_splits_not_identities(archive, settings):
+    """The pass message must state what was counted, not what was distinct."""
+    ids = all_ids(archive)
+    verdict = verdict_for(
+        archive, settings, [opening()] + [row(i) for i in ids], trashed=0, intents=[]
+    )
+    rows = check_named(verdict, "rows")
+    assert rows.ok is True
+    assert rows.detail.startswith(f"{len(ids)} rows")
+
+
+def test_a_row_duplicated_across_the_namespace_migration_is_still_one_row(
+    archive, settings
+):
+    """Bare id plus namespaced id for the same transaction is a duplicate.
+
+    This is the shape a migration run twice would leave, and the tolerant read
+    (§21.1) is exactly what lets the check see through it.
+    """
+    ids = all_ids(archive)
+    account = settings if isinstance(settings, Account) else Account(
+        slug="canara-1111",
+        bank="canara",
+        account_number=getattr(settings, "passbook_account_number", "1111"),
+        asset_account=getattr(settings, "passbook_asset_account", ""),
+    )
+    splits = [opening()] + [row(account.external_id(i)) for i in ids] + [row(ids[0])]
+    verdict = service.verify_ledger(
+        FakeFirefly(splits, balance=str(closing_balance(archive))),
+        account,
+        archive,
+        trashed=0,
+        intents=[],
+    )
+    rows = check_named(verdict, "rows")
+    assert rows.ok is False
+    assert "1 transaction(s) posted MORE THAN ONCE" in rows.detail

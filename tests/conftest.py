@@ -8,6 +8,8 @@ recomputed so the §6.6 invariant stays meaningful.
 import csv
 from pathlib import Path
 
+from contextlib import contextmanager
+
 import pytest
 
 # Anchored on this file, never on an absolute path. Four tests used to name one
@@ -36,10 +38,14 @@ def _empty_caches():
     # on disk — so without this each test would quietly demolish the previous
     # one's index.
     index_was, _ix.INDEX_PATH = _ix.INDEX_PATH, scratch / "index.sqlite3"
+    from passbook.firefly import client as _fc
+
+    _fc.forget_everything()
     _yf.forget_everything()
     yield
     _pc.CACHE_DIR = memo_was
     _ix.INDEX_PATH = index_was
+    _fc.forget_everything()
     _yf.forget_everything()
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -79,3 +85,17 @@ def enriched(parsed):
     meta, transactions = parsed
     narration.enrich(transactions)
     return meta, transactions
+
+
+class StoreDouble:
+    """Base for the stand-ins that replace `FireflyClient` in tests.
+
+    It exists for `fresh()`. `verify_ledger` reads past the shared cache
+    (non-negotiable 11, §101) and a double that silently lacked the method would
+    have made that read impossible to write — the pressure would have been to
+    soften the real code instead of teaching the double one line.
+    """
+
+    @contextmanager
+    def fresh(self):
+        yield self

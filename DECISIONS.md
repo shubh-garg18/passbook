@@ -4564,3 +4564,81 @@ the operator's own either.
 - [x] Emailed sign-in recovery and `/bootstrap` — **full route parity** with the
       private repository this one is released from.
 
+---
+
+## 34. The ledger was wrong, and both guards were looking elsewhere
+
+A statement parsed cleanly — opening balance, rows, closing balance, the
+continuity chain agreeing exactly, zero warnings. The ledger disagreed with it
+anyway, and said so in the one check that could still see the problem:
+
+    FAIL  balance — the ledger says <X>, <statement> closes at <Y>
+    ok    rows   — 133 rows, one per archived transaction
+
+Both computed from the same ledger at the same moment. The account held **141
+splits carrying 133 distinct `external_id`s**: seven transactions, all in the
+overlap between two statements, posted twice. The drift was exactly the sum of
+the extra copies.
+
+### 34.1 The duplicate hash is over the payload
+
+Every push sent `error_if_duplicate_hash: true`, and the plan — written into the
+pusher, the failure table and the purge help — was that overlapping weekly
+downloads would simply be rejected. Weekly downloads overlap by design, so this
+was load-bearing.
+
+The authority is `TransactionJournalFactory::hashArray()` on the pinned tag: it
+`json_encode`s **the row that was submitted** and hashes that. Not the identity.
+Not the amount and date. The payload.
+
+And passbook rewrites those bytes for a living. `description` is
+`<alias or token> (<channel>)`; `tags` carry `reversal` and the managed set;
+both are computed from config at push time. A new alias, a narration grammar
+that resolves a payee it used to give up on, an earnings tag, a rename — each
+rewrites the payload of rows already in the ledger. Different bytes, different
+hash, seven accepted inserts, no error anywhere.
+
+### 34.2 Prevention: passbook decides what is a duplicate
+
+`push_transactions` now reads the account's existing identities before posting
+anything and skips a transaction whose id is already there. Four properties, and
+each is a test:
+
+* **Fresh.** A push that consults a cached view of the ledger has not consulted
+  the ledger.
+* **Tolerant.** Keyed through `txn_id_of`, so a pre-migration bare id and a
+  namespaced one are one identity — otherwise running the migration would make
+  every old row look absent and the next push would double the account.
+* **A row posted during the run joins the set**, so one statement cannot
+  duplicate itself.
+* **If the ledger cannot be read, it raises.** There is no fallback to "post it
+  and hope", because that is the bug.
+
+`error_if_duplicate_hash` stays on as a backstop for the one thing this cannot
+see: a row carrying no `external_id` at all. `PushResult` separates `already`
+(passbook recognised its own id) from `duplicates` (the store recognised
+identical bytes), and **`duplicates` staying at zero is the healthy shape**.
+
+Identity moved to `identity.py` to make this possible: `service` imports the
+pusher, so the pusher could not import `service`. Every name is re-exported, so
+`service.txn_id_of` still resolves.
+
+### 34.3 Detection: count, do not compare sets
+
+The `rows` check compared `set(live)` against `set(archived)`. A set says which
+identities are present; **only a count says how many times**. That is why it
+reported "133 rows, one per archived transaction", in green, over a ledger
+holding 141. It counts now, names the repeated ids, and says how many extra rows
+there are.
+
+It still does not fix anything. Removing surplus copies is a deliberate act
+after a backup, never something a check does.
+
+### 34.4 Definition of done
+
+- [x] `ledger_identities` read fresh, tolerant of both id forms, raising if the
+      ledger cannot be read.
+- [x] `already` and `duplicates` reported separately.
+- [x] The `rows` check counts and names repeats.
+- [x] Identity extracted so the pusher can ask the question at all.
+
