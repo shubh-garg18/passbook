@@ -134,9 +134,12 @@ def main() -> int:
         os.environ["FIREFLY_TOKEN"] = "shots"
         os.environ["PASSBOOK_ACCOUNT_NUMBER"] = "999900001111"
 
-        import passbook.web.api as api_mod
+        # The seam is `_base`, not the package: a route resolves the name in its
+        # own module's globals, so assigning the package attribute would be
+        # silently ignored and every page would reach for a real store.
+        from passbook.web.api import _base as api_base
 
-        api_mod.FireflyClient = fake_client_class("Test Account", archive)
+        api_base.FireflyClient = fake_client_class("Test Account", archive)
 
         app = create_app(
             {
