@@ -218,6 +218,65 @@ Writing a migration is in [CONTRIBUTING.md](../CONTRIBUTING.md#writing-a-migrati
 
 ---
 
+## Looking at it
+
+Four pages, and they answer different questions.
+
+**Ledger** is the overview: the balance, what you actually spent, what you
+actually earned, and where it went. Every figure on it respects the exclusions
+described above — nothing here is a raw by-type total.
+
+**Rows** is every transaction, searchable. Payee, category, amount, or the
+bank's own narration; filter by direction, category, tag, a size band, or the
+window. It deliberately has **no running balance column**: a balance over a
+filtered, reordered view asserts a continuity that is not there, and the balance
+chain is the one thing this project will not fudge. The statement sheet keeps
+its balance; a search result does not get one.
+
+**Reports** is the same analysis cut five ways — by category, by payee, by tag,
+over time, and the rhythm of the week and the hour. Firefly ships these as
+separate screens; they are one shape, so they are one page with a control.
+
+**Payees** is where decisions get made, and where the three config edits live
+that used to need a text editor: creating a category, removing an empty one, and
+saying what counts as earned.
+
+### The window
+
+Every page takes a date range — this month, last month, 3 or 6 months, this year,
+everything, or a custom pair. It is resolved on the server and echoed back, so
+what you see is the scope the server used rather than the one the page asked for.
+It lives in the URL, so a reload or a shared link keeps it.
+
+## A reminder that arrives when the laptop is shut
+
+Nothing here is scheduled, because the machine this runs on sleeps. A cron entry
+that fires with the lid closed is a reminder that never arrives.
+
+So passbook does not send the reminder — **your calendar does**. The page builds
+the event and hands it over three ways:
+
+- **Open in Google Calendar** — needs nothing set up, which is why it is first.
+- **Download .ics** — for Apple Calendar, Outlook, anything.
+- **Email me the invite** — needs a mail server, and the button says so rather
+  than failing when you press it.
+
+Mail settings, if you want them, live in `config/reminder.yaml`, owner-only, and
+are never shown back to you.
+
+## Taking a backup
+
+```bash
+make backup          # from a terminal
+```
+
+or press **Take a backup** on the Status strip. Either way it is a real
+`pg_dump`, and the purge refuses to run without one from the last hour.
+
+> The client in the image is pinned to the database's own major version. A
+> newer `pg_dump` will happily dump an older server and emit output that server
+> cannot read back — so the backup looks perfect until the day you need it.
+
 ## More than one account
 
 The first statement registers its own account, so a single-account setup needs no

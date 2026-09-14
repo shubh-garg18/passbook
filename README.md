@@ -18,6 +18,11 @@ shows you what it excluded instead of hiding it.
 
 ![The Ledger page](docs/screenshots/ledger.png)
 
+<sub>Reports cuts the same analysis five ways — by category, by payee, by tag,
+over time, and the rhythm of the week:</sub>
+
+![Reports](docs/screenshots/reports.png)
+
 <sub>It reads the statement, categorises it, and pushes it into Firefly III,
 which keeps the ledger:</sub>
 
@@ -62,6 +67,23 @@ No terminal.
 | ⚠️ | Needs a PC (Windows, macOS or Linux). Not a phone |
 | ❌ | You want automatic bank sync — India's Account Aggregator framework is closed to individuals, so nobody self-hosted can offer it |
 
+## What it does
+
+Everything below happens in the browser. There is a CLI and you never have to
+open it.
+
+| | |
+|---|---|
+| **Upload** | drop the statement in; it parses, walks the balance chain, and shows you what it found before anything is written |
+| **Ledger** | balance, what you spent, what you earned, where it went, and the rhythm of your week |
+| **Rows** | every transaction, searchable — by payee, category, amount band, tag or date |
+| **Reports** | by category, by payee, by tag, over time — one page with a control, not five screens |
+| **Payees** | name them once; the naming sticks, and edits reach rows already in the ledger |
+| **Accounts** | add, rename and remove accounts; combine any subset in one view |
+| **Add a bank** | not one of the three that ship? Map your own columns in about ten minutes |
+| **Reminder** | a real calendar invitation, so it reaches you when the laptop is shut |
+| **Backups** | take a database dump from a button; verified, off-site archives from the host |
+
 ## What makes it different
 
 Most expense trackers show you a number. This one tries hard not to show you a
@@ -80,6 +102,10 @@ wrong number.
   floats touch your balance.
 - **Backups are drilled, not assumed.** `make dr-drill` rebuilds the whole ledger
   from the encrypted archives on every run.
+- **A rename reaches the rows you already pushed.** Editing a payee used to
+  change only what *future* imports produced; now it updates the ledger in
+  place, sending only the four fields config owns — never an amount, a date or
+  a type, which is the only reason a rename cannot corrupt anything.
 
 ## Help wanted
 
@@ -106,7 +132,7 @@ will. There is no install counter and there is not going to be one.
 |---|---|
 | [What is this?](docs/what-is-this.md) | the idea in plain language — start here if you are not a developer |
 | [SETUP.md](SETUP.md) | install, first run, signing in, when it breaks |
-| [Usage](docs/usage.md) | the weekly cycle, rules, checking the ledger, more than one account |
+| [Usage](docs/usage.md) | the weekly cycle, rules, reports, reminders, more than one account |
 | [Backups](docs/backups.md) | `make backup`, off-site, the recovery runbook |
 | [Operations](docs/operations.md) | what runs, the threat model, tests |
 | [Contributing](CONTRIBUTING.md) · [SPEC](DECISIONS.md) | house rules, and every decision with the measurement behind it |

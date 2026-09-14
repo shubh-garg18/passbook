@@ -13,7 +13,7 @@ What runs, what it assumes about your threat model, and how to run the tests.
 | `app` | `fireflyiii/core:version-6.6.6` | `127.0.0.1:8080`, settable via `FIREFLY_HOST_PORT` |
 | `db` | `postgres:16-alpine` | none — not published to the host |
 | `web` | built from this repository | `127.0.0.1:8081` |
-| `caddy` | `caddy:2.8-alpine` | `127.0.0.1:80` — `passbook.localhost`, `khata.localhost` |
+| `caddy` | `caddy:2.8-alpine` | `127.0.0.1:80` — `passbook.localhost`, and nothing else |
 
 ```bash
 make up | down | logs | ps | check
@@ -30,8 +30,25 @@ and a scheduler that silently stops is worse than none. **No data-importer
 container** — this pushes over the REST API instead, which gives explicit dedup
 control and lets it set category, tags and notes at creation.
 
+**One door.** Caddy serves `passbook.localhost` and nothing else — the ledger
+store is a service, not a page. A test asserts the *route* is gone rather than
+the word, because the block is commented out and grepping would pass a weaker
+check.
+
 The web UI is a front end over the same `service.py` the CLI uses. It is never a
-second implementation: one parser, one push path, one balance invariant.
+second implementation: one parser, one push path, one balance invariant. The
+JSON API is a package of twelve modules sharing one blueprint, split by subject;
+`tests/test_routes.py` reads the route decorators out of the source and asserts
+the URL map agrees, because **a module nobody imports is a route that quietly
+does not exist**.
+
+Two caches live on disk, both behind signatures that predate them: the parse of
+each archived statement is memoised on its content, and an index over the
+archive answers "which rows, in this window" without reading every file. The
+memo covers the *file parse only* — enrichment and validation still run every
+time, so a new alias or a changed rule takes effect on the next page load rather
+than when somebody remembers to clear a cache. If the index cannot be opened,
+both fall back to reading the files.
 
 ---
 
