@@ -30,6 +30,8 @@ from .config import (
     save_accounts,
 )
 from .firefly.bootstrap import load_rules
+from . import index as index_mod
+from . import parsecache
 from .firefly.client import FireflyClient, FireflyError
 from .firefly.push import PushResult, push_transactions
 from .loaders import load as load_statement
@@ -59,19 +61,29 @@ class ParsedStatement:
         return sum((t.credit for t in self.transactions if t.credit), Decimal(0))
 
 
-def parse_statement(path: Path, aliases: dict[str, str] | None = None) -> ParsedStatement:
+def parse_statement(
+    path: Path, aliases: dict[str, str] | None = None, password: str | None = None
+) -> ParsedStatement:
     """Load, enrich and validate. Raises rather than exiting.
 
     Propagates ParseError, BalanceBreak and IntegrityError untouched — the
     balance invariant is never softened for a caller's convenience, web
-    included. non-negotiable #3.
+    included. CLAUDE.md non-negotiable #3.
     """
-    meta, transactions = load_statement(path)
+    # §110. The memo covers the FILE PARSE and nothing after it. Enrichment and
+    # validation still run every time, so a new alias, a new narration grammar
+    # or a changed rule takes effect on the next page load rather than on the
+    # next time somebody remembers to clear a cache — which is the seam that
+    # makes this safe to keep forever.
+    remembered = parsecache.load(path)
+    if remembered is None:
+        meta, transactions = load_statement(path, password)
+        parsecache.store(path, meta, transactions)
+    else:
+        meta, transactions = remembered
     narration_mod.enrich(transactions, aliases if aliases is not None else load_payee_aliases())
     warnings = check(meta, transactions)
     return ParsedStatement(path=path, meta=meta, transactions=transactions, warnings=warnings)
-
-
 def account_matches(meta: StatementMeta, settings: Settings) -> None:
     """SPEC §6.7, single-account form. Raises AccountMismatch.
 
@@ -1888,51 +1900,61 @@ def archived_transactions(
     start: date | None = None,
     end: date | None = None,
 ) -> list[Transaction]:
-    """The deduped rows for these accounts, optionally inside a window. SPEC §26.
+    """The deduped rows for these accounts, from the index. SPEC §114.
+
+    The same answer `dedupe_transactions` gives over `statements_for`, and a
+    test asserts that row for row on the real archive — but read out of SQLite,
+    so the cost is the rows in the window rather than every row ever archived.
 
     **Deduped per account and then concatenated** (§21.1). The bank sequences
-    `txn_id` per account, so a dedupe *across* accounts is the silent data loss
-    that rule exists to prevent: two accounts, 186 rows, 93 survive, no error.
-    `account_transactions` narrows to one account first, which is what makes the
-    bank's own id a safe key.
+    `txn_id` per account, so a dedupe across accounts is the silent data loss
+    this rule exists to prevent: two accounts, 186 rows, 93 survive, no error.
+    The index partitions on `(account, txn_id)` for exactly that reason.
 
-    Reads the archive. This is the seam an index goes behind later — the
-    signature is the whole contract, so a cache can replace the body without any
-    caller learning about it.
+    Falls back to reading the files if the index cannot be opened. A cache that
+    can take the app down is worse than no cache, and this one is a view over
+    something that is still there.
     """
-    out: list[Transaction] = []
-    for account in accounts:
-        rows = account_transactions(account, archive, extra=())
-        out.extend(
-            t
-            for t in rows
-            if (start is None or t.txn_date >= start) and (end is None or t.txn_date <= end)
-        )
-    return out
-
-
+    numbers = [a.account_number.strip() for a in accounts]
+    if not numbers:
+        return []
+    try:
+        with index_mod.connect() as conn:
+            index_mod.sync(archive, conn, parse_statement)
+            return index_mod.transactions(conn, numbers, start, end)
+    except Exception as exc:
+        log.warning("index unavailable, reading the archive directly: %s", exc)
+        statements = archived_statements(archive)
+        out: list[Transaction] = []
+        for account in accounts:
+            out.extend(dedupe_transactions(statements_for(account, statements)))
+        return out
 def archived_coverage(
     accounts: "list[Account]", archive: Path = Path("archive")
 ) -> tuple[date, date] | None:
-    """The window these accounts' statements cover. SPEC §26.2.
+    """The window these accounts' statements cover, from the index. §114.2.
 
-    The **declared** period, not the span of transaction dates: a quiet
-    fortnight at the start of a range is covered, not missing, and using the
-    rows would silently shorten the month and mark it partial.
-
-    Like `archived_transactions`, this is the seam an index goes behind later.
+    `statement_coverage` over `statements_for` gives the same answer and has to
+    load every statement to do it. This reads two columns.
     """
-    statements = archived_statements(archive)
-    spans = [
-        span
-        for account in accounts
-        if (span := statement_coverage(statements_for(account, statements)))
-    ]
-    if not spans:
+    numbers = [a.account_number.strip() for a in accounts]
+    if not numbers:
         return None
-    return min(s[0] for s in spans), max(s[1] for s in spans)
-
-
+    try:
+        with index_mod.connect() as conn:
+            index_mod.sync(archive, conn, parse_statement)
+            return index_mod.coverage(conn, numbers)
+    except Exception as exc:
+        log.warning("index unavailable, reading the archive directly: %s", exc)
+        statements = archived_statements(archive)
+        spans = [
+            span
+            for account in accounts
+            if (span := statement_coverage(statements_for(account, statements)))
+        ]
+        if not spans:
+            return None
+        return min(s[0] for s in spans), max(s[1] for s in spans)
 def sync_history(archive: Path = Path("archive"), limit: int = 10) -> list[dict]:
     """Recently archived statements, newest first. Filenames only, no contents."""
     if not archive.is_dir():

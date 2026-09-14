@@ -4512,3 +4512,55 @@ is slow" look identical from the browser and only one of them is a bug.
 - [x] Credentials live in `config/reminder.yaml`, owner-only, never echoed back.
 - [x] Both themes, both widths, and the skeleton actually resolves.
 
+---
+
+## 33. Parse each statement once, and index the archive
+
+Two caches, both on disk, both behind signatures that already existed.
+
+### 33.1 The memo covers the file parse and nothing after it
+
+Re-reading an eight-page PDF on every page load is the slow part, and the answer
+never changes: the file is immutable once archived. So the parse is memoised on
+the file's hash.
+
+**The seam is what makes this safe to keep forever.** The memo covers the parse
+only — enrichment and validation still run every time, so a new alias, a new
+narration grammar or a changed rule takes effect on the next page load rather
+than on the next time somebody remembers to clear a cache.
+
+### 33.2 The index is a view, never a source of truth
+
+`archived_transactions` and `archived_coverage` read a SQLite index instead of
+every file in the archive. Both keep the signatures they were given when they
+read files directly — that was deliberate, and it is why swapping the body
+taught no caller anything.
+
+Deduped **per account and then concatenated**: the bank sequences `txn_id` per
+account, so a dedupe across them is the silent data loss non-negotiable 10
+exists to prevent. The index partitions on `(account, txn_id)` for exactly that.
+
+If the index cannot be opened it falls back to reading the files. A cache that
+can take the app down is worse than no cache, and this one is a view over
+something that is still there.
+
+### 33.3 A cache is shared state, and tests inherit it
+
+Both live on disk, so they outlive a **process** as well as a test. The index is
+worse than most: a sync *deletes* rows whose statement is no longer on disk, so
+two tests sharing one index means each quietly demolishes the other's.
+
+That is not hypothetical — it was the first thing that broke here, and it broke
+as a wrong *count*, not as a cache-shaped error. An autouse fixture points both
+at a temporary directory rather than emptying them, so a test run never touches
+the operator's own either.
+
+### 33.4 Definition of done
+
+- [x] `parsecache` memoises the file parse, keyed on content.
+- [x] `index` backs both archive seams; signatures unchanged.
+- [x] Falls back to the files when the index cannot be opened.
+- [x] An autouse fixture isolates both, so no test inherits a cache.
+- [x] Emailed sign-in recovery and `/bootstrap` — **full route parity** with the
+      private repository this one is released from.
+

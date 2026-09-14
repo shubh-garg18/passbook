@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from flask import current_app, jsonify, request
 from ... import backup, ops, reminders, service
 from ...config import alias_drift, load_accounts, load_settings, token_expiry
+from ...firefly.bootstrap import bootstrap as bootstrap_rules
+from ...firefly.bootstrap import load_rules
 from ...firefly.client import FireflyError
 from .. import auth as A
 from ._reconcile import _dump_state
@@ -56,6 +58,45 @@ def _ledger_verdict(st, scope=None) -> dict:
         "unchecked": len(combined.unchecked),
         "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in combined.checks],
     }
+
+
+@api.post("/bootstrap")
+@A.login_required
+def bootstrap():
+    """Push `config/rules.yaml` into Firefly's rules engine. SPEC §86.
+
+    **The last operation that needed a terminal.** Categories are assigned by
+    Firefly at store time from rules this pushes (D5), so a category created on
+    the Payees page does nothing to future imports until the rules are synced —
+    and the only way to sync them from the UI was `/reapply/run`, which purges
+    and re-pushes the entire ledger. Reaching for a destructive rebuild to
+    register a rule is the kind of thing an operator does once and regrets.
+
+    Idempotent by construction: `bootstrap_rules` creates what is missing and
+    updates what drifted, and reports both. It writes rules, never transactions
+    — nothing here can touch a row.
+    """
+    st = load_settings()
+    if not st.firefly_token:
+        return _fail("FIREFLY_TOKEN is not set.", "unconfigured", 503)
+    try:
+        with _client(st.firefly_url, st.firefly_token) as client:
+            result = bootstrap_rules(client, load_rules(), st.large_txn_threshold)
+    except FireflyError as exc:
+        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+
+    return jsonify(
+        {
+            "ok": result.ok,
+            "created": list(result.created),
+            "updated": list(result.updated),
+            "unchanged": len(result.existing),
+            "message": (
+                f"{len(result.created)} rule(s) created, {len(result.updated)} updated, "
+                f"{len(result.existing)} already current"
+            ),
+        }
+    )
 
 
 @api.get("/backup")

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from flask import current_app, jsonify, request, session
-from ... import webauth
+from ... import reminders, webauth
 from .. import auth as A
 from ._base import MIN_PASSWORD_LENGTH, _fail, api, log
 
@@ -149,6 +149,102 @@ def logout():
 
 
 # --- TOTP enrolment -------------------------------------------------------
+
+
+@api.post("/session/recover")
+def session_recover():
+    """Email a one-time recovery code. SPEC §29.
+
+    Reachable **only after the password step has passed** — it is a second
+    factor, not a way around the first. The response is deliberately the same
+    shape whether or not a code was sent for a *configured* account, but this is
+    a single-user app on 127.0.0.1 and pretending an unconfigured mail server is
+    a configured one would just leave the operator stuck with no explanation. So
+    a missing address or mail server is reported plainly; a working one says
+    only the masked address.
+    """
+    username = A.pending_username()
+    if not username:
+        return _fail("Start again — the sign-in attempt expired.", "expired", 401)
+
+    locked, seconds = A.throttle_state(username)
+    if locked:
+        return _fail(
+            f"Too many attempts. Try again in {seconds // 60 + 1} minute(s).",
+            "rate_limited",
+            429,
+        )
+
+    auth = A.current_auth()
+    if not auth.recovery_email:
+        return _fail(
+            "No recovery address is set for this sign-in. Use a backup code, or "
+            "`make web-totp RESET=yes` on the host.",
+            "no_recovery_email",
+            409,
+        )
+
+    try:
+        code = webauth.issue_recovery_code(auth)
+    except webauth.RecoveryError as exc:
+        return _fail(str(exc), "no_recovery_email", 409)
+    # Stored BEFORE the send. A code that reaches the inbox but was never
+    # recorded is a code that cannot work, and the operator would have no way to
+    # tell that from a wrong one.
+    A.store_auth(auth)
+
+    minutes = webauth.RECOVERY_TTL_SECONDS // 60
+    try:
+        reminders.send_text(
+            "passbook sign-in code",
+            f"Your passbook sign-in code is:\n\n    {code}\n\n"
+            f"It works once and expires in {minutes} minutes.\n\n"
+            "If you did not just try to sign in, someone has your password — "
+            "change it, and the code above will not help them on its own.\n",
+            to=auth.recovery_email,
+        )
+    except reminders.SendFailed as exc:
+        # Burn it. A code that was minted but never delivered must not sit live
+        # for ten minutes.
+        auth.recovery = None
+        A.store_auth(auth)
+        log.warning("recovery code could not be sent: %s", exc)
+        return _fail(str(exc), "email", 502)
+
+    log.warning("recovery code emailed to %s", webauth.mask_email(auth.recovery_email))
+    return jsonify(
+        {
+            "sent": True,
+            "to": webauth.mask_email(auth.recovery_email),
+            "expiresInMinutes": minutes,
+        }
+    )
+
+
+@api.put("/recovery-email")
+@A.login_required
+def recovery_email():
+    """Set or clear the recovery address. SPEC §29.
+
+    Signed in only — changing where a sign-in code is delivered is itself a
+    sensitive act, and doing it from a half-authenticated session would turn
+    recovery into a way in.
+    """
+    raw = str((request.get_json(silent=True) or {}).get("email") or "").strip()
+    auth = A.current_auth()
+    if not raw:
+        auth.recovery_email = None
+        # An address that no longer receives must not leave a live challenge
+        # addressed to it.
+        auth.recovery = None
+    else:
+        try:
+            auth.recovery_email = webauth.normalise_email(raw)
+        except webauth.RecoveryError as exc:
+            return _fail(str(exc), "invalid", 422)
+    A.store_auth(auth)
+    log.warning("recovery address %s", "cleared" if not raw else "changed")
+    return jsonify({"ok": True, "recoveryEmail": webauth.mask_email(auth.recovery_email)})
 
 
 @api.post("/totp/enroll/start")

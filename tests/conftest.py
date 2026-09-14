@@ -14,6 +14,34 @@ import pytest
 # particular checkout, which made them pass on exactly one machine.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+@pytest.fixture(autouse=True)
+def _empty_caches():
+    """A cache is shared state, and shared state between tests is a test that
+    passes because of the one before it.
+
+    Both of these live on DISK, so they outlive a process as well as a test —
+    which is the point of them, and exactly why a test must not inherit one.
+    Pointed at a tmpdir rather than emptied, so a run never touches the
+    operator's own. Autouse, so nothing has to remember.
+    """
+    import tempfile
+
+    from passbook import index as _ix
+    from passbook import parsecache as _pc
+    from passbook import yamlfile as _yf
+
+    scratch = Path(tempfile.mkdtemp())
+    memo_was, _pc.CACHE_DIR = _pc.CACHE_DIR, scratch / "statements"
+    # The index is CWD-relative, and a sync DELETES rows whose statement is not
+    # on disk — so without this each test would quietly demolish the previous
+    # one's index.
+    index_was, _ix.INDEX_PATH = _ix.INDEX_PATH, scratch / "index.sqlite3"
+    _yf.forget_everything()
+    yield
+    _pc.CACHE_DIR = memo_was
+    _ix.INDEX_PATH = index_was
+    _yf.forget_everything()
+
 FIXTURES = Path(__file__).parent / "fixtures"
 XLS_FIXTURE = FIXTURES / "statement.xls"
 # A second account whose transaction ids collide with the first's completely, and
