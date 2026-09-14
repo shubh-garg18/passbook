@@ -2,13 +2,13 @@
 
 import os
 from datetime import datetime, timezone
-from flask import current_app, jsonify
-from ... import ops, service
+from flask import current_app, jsonify, request
+from ... import backup, ops, reminders, service
 from ...config import alias_drift, load_accounts, load_settings, token_expiry
 from ...firefly.client import FireflyError
 from .. import auth as A
 from ._reconcile import _dump_state
-from ._base import _client, _artefact, _sync, api
+from ._base import _artefact, _client, _fail, _sync, api, log
 from ._scope import _account_scope
 
 
@@ -152,6 +152,130 @@ def _email_state() -> dict:
         "recipient": mail.to,
         "hasPassword": bool(mail.password),
     }
+
+
+@api.get("/reminder")
+@A.login_required
+def reminder_get():
+    try:
+        schedule = reminders.load()
+    except ValueError as exc:
+        return _fail(str(exc), "bad_reminder", 500)
+    return jsonify(_schedule_json(schedule))
+
+
+@api.put("/reminder")
+@A.login_required
+def reminder_put():
+    body = request.get_json(silent=True) or {}
+    try:
+        current = reminders.load()
+    except ValueError as exc:
+        return _fail(str(exc), "bad_reminder", 500)
+
+    fields = ("enabled", "frequency", "weekday", "day_of_month", "hour", "minute", "lead_minutes")
+    merged = {**current.to_dict(), **{k: body[k] for k in fields if k in body}}
+    try:
+        schedule = reminders.Schedule(**merged)
+    except ValueError as exc:
+        # The bounds are the message. A silently clamped hour is a reminder that
+        # fires at a time nobody chose.
+        return _fail(str(exc), "invalid", 422)
+
+    reminders.save(schedule)
+    log.info("reminder saved: %s (enabled=%s)", schedule.label, schedule.enabled)
+    return jsonify(_schedule_json(schedule))
+
+
+@api.put("/reminder/mail")
+@A.login_required
+def reminder_mail():
+    """Save the mail server, from the UI rather than from `.env`. SPEC §24.4.
+
+    An omitted `password` means *keep the stored one* — the field arrives empty
+    because the page never received it, and treating that as "clear it" would
+    delete the credential every time the operator corrected a typo in the host.
+    Clearing is explicit: send `password: ""` with `clearPassword: true`.
+    """
+    body = request.get_json(silent=True) or {}
+    current = reminders.load_mail()
+
+    password = current.password
+    if body.get("clearPassword"):
+        password = ""
+    elif body.get("password"):
+        password = str(body["password"])
+
+    try:
+        mail = reminders.Mail(
+            host=body.get("host", current.host),
+            port=body.get("port", current.port),
+            user=body.get("user", current.user),
+            password=password,
+            to=body.get("to", current.to),
+        )
+    except ValueError as exc:
+        return _fail(str(exc), "invalid", 422)
+
+    reminders.save_mail(mail)
+    log.info("reminder mail settings saved (host=%s, configured=%s)", mail.host, mail.ready)
+    return jsonify(_schedule_json(reminders.load()))
+
+
+@api.post("/reminder/email")
+@A.login_required
+def reminder_email():
+    """Mail the recurring invite to the calendar. SPEC §24.4.
+
+    One message, sent once, carrying the recurrence — the calendar owns every
+    firing after it. This adds no scheduler and nothing has to be running when
+    the reminder is due.
+    """
+    st = load_settings()
+    try:
+        schedule = reminders.load()
+        to = reminders.send_invite(schedule, st)  # file settings first, then .env
+    except reminders.SendFailed as exc:
+        # 422, not 500: the message names what to fix, and it is the operator's
+        # configuration rather than a fault in the app.
+        return _fail(str(exc), "email", 422)
+    except ValueError as exc:
+        return _fail(str(exc), "bad_reminder", 500)
+
+    return jsonify({"ok": True, "to": reminders._mask_email(to), "label": schedule.label})
+
+
+@api.get("/reminder.ics")
+@A.login_required
+def reminder_ics():
+    """The calendar file itself. Downloaded, never fetched by anyone else.
+
+    Not a subscription URL: this is bound to 127.0.0.1, so Google's servers
+    cannot reach it and a subscribed calendar would silently stop updating.
+    A downloaded file is honest about being a snapshot — and the UID makes
+    re-importing an edit rather than a duplicate.
+    """
+    try:
+        schedule = reminders.load()
+    except ValueError as exc:
+        return _fail(str(exc), "bad_reminder", 500)
+
+    name = reminders.filename(schedule)
+    reminders.assert_safe_filename(name)
+    body = reminders.to_ics(schedule, url=request.host_url.rstrip("/"))
+    return current_app.response_class(
+        body,
+        mimetype="text/calendar",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            # It is generated per request from config; a cached copy would hand
+            # back yesterday's schedule after an edit.
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# --- status ---------------------------------------------------------------
 
 
 @api.get("/status")

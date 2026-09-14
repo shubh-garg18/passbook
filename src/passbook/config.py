@@ -29,6 +29,27 @@ class Settings(BaseSettings):
     passbook_account_number: str | None = Field(default=None, repr=False)
     firefly_token: str | None = Field(default=None, repr=False)
 
+    # Where the invite goes. Defaults to the SMTP user, which for Gmail is the
+    # address whose calendar it lands in.
+    passbook_reminder_email: str | None = None
+
+    # --- the reminder, delivered by email. SPEC §24.4 ------------------------
+    # Optional in every sense: absent, the Reminder page still writes a
+    # calendar file to download. Present, it can mail the invite straight to
+    # the address Google Calendar watches, which is one click instead of a
+    # download and an import.
+    #
+    # For Gmail this is an APP PASSWORD (Google account -> Security -> 2-Step
+    # Verification -> App passwords), never the account password. It is a
+    # credential: repr=False, never logged, never returned by the API.
+    passbook_smtp_host: str | None = None
+
+    passbook_smtp_password: str | None = Field(default=None, repr=False)
+
+    passbook_smtp_port: int = 587
+
+    passbook_smtp_user: str | None = None
+
     # Web UI (Phase 7). The password is stored only as a Werkzeug hash; the
     # plaintext never touches .env, the repo, or a log. SPEC §14.
     passbook_web_user: str | None = None

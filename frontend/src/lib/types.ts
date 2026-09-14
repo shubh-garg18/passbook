@@ -442,3 +442,42 @@ export type EarningsRow = {
   count: number
   counts: boolean
 }
+
+/** The statement reminder. SPEC §24.
+ *
+ * `uid` is never sent to the client — it is stable so a re-import updates the
+ * calendar event instead of duplicating it, and has no business in a page. */
+export type Reminder = {
+  enabled: boolean
+  frequency: 'weekly' | 'fortnightly' | 'monthly'
+  weekday: number
+  day_of_month: number
+  hour: number
+  minute: number
+  lead_minutes: number
+  label: string
+  weekdays: string[]
+  frequencies: string[]
+  maxDayOfMonth: number
+  timezone: string
+  /** Computed server-side by the same function that writes the RRULE, so the
+   *  list on screen cannot disagree with what the calendar will do. */
+  upcoming: string[]
+  filename: string
+  /** One click into Google Calendar, event and recurrence pre-filled. Needs no
+   *  credentials at all, which is why the mail server is optional. */
+  googleUrl: string
+  /** The mail server, as the page may edit it. **Never the password** —
+   *  `hasPassword` only says whether one is stored. */
+  email: {
+    configured: boolean
+    to: string | null
+    host: string
+    port: number
+    user: string
+    recipient: string
+    hasPassword: boolean
+  }
+}
+
+/** Taking a backup from the UI. SPEC §37. */

@@ -4468,3 +4468,47 @@ major version, and `PG_MAJOR` is bumped with the `db` image.
       Dockerfile beside it.
 - [x] No Docker socket. The container still cannot see another container.
 
+---
+
+## 32. The reminder
+
+Nothing in this project is scheduled, because the machine it runs on is a laptop
+that sleeps. A cron entry that fires when the lid is shut is a reminder that does
+not arrive.
+
+So passbook does not fire the reminder. **Your calendar does.** The page produces
+the event — a repeat rule, a time, an alert — and hands it over three ways:
+
+* **Open in Google Calendar**, which needs nothing set up and is therefore the
+  primary. It opens Google with the event and the repeat already filled in.
+* **Download .ics** — RFC 5545, written by hand, no dependency and no network.
+  Apple Calendar, Outlook, anything.
+* **Email me the invite**, which needs a mail server and says so on the button
+  rather than failing when it is pressed.
+
+That last one is the tri-state rule applied to a feature rather than a figure: a
+control that cannot work is disabled *with its reason*, not hidden and not left
+to fail.
+
+### 32.1 What the page found
+
+The route answered 500 and the page rendered a **skeleton that never resolved** —
+which the client cannot tell from a slow network, and which a screenshot of the
+settled state cannot catch either, because there is no settled state.
+
+The harness now waits for the skeleton to detach and **prints a warning if it
+never does**; that warning is what surfaced this. The cause was five SMTP
+settings the route reads and the config object did not have.
+
+A route test now asserts the reminder answers at all, because "it hangs" and "it
+is slow" look identical from the browser and only one of them is a bug.
+
+### 32.2 Definition of done
+
+- [x] `GET`/`PUT /reminder`, `/reminder.ics`, `/reminder/email`,
+      `PUT /reminder/mail`.
+- [x] The `.ics` is served as `text/calendar`, asserted.
+- [x] Google Calendar needs no configuration; email says what it needs.
+- [x] Credentials live in `config/reminder.yaml`, owner-only, never echoed back.
+- [x] Both themes, both widths, and the skeleton actually resolves.
+

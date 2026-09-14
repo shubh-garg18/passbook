@@ -1,0 +1,35 @@
+# When to be reminded to download a statement. SPEC §24.
+#
+# Copy to config/reminder.yaml, or just use the Reminder page — it writes this
+# file for you and shows the next five firings before you save.
+#
+# passbook does NOT fire this, and deliberately does not try: WSL2 stops when
+# Windows sleeps and there is no systemd here, so a reminder owned by this
+# machine is one that will not arrive. `passbook reminder --ics <file>` writes
+# an RFC 5545 calendar file; import it and the calendar does the reminding, on
+# a device that is awake. Want it mailed? Switch that event's notification to
+# "Email" in your calendar — no SMTP credential ever lives here.
+
+enabled: true
+
+# weekly | fortnightly | monthly
+frequency: weekly
+
+# 0 = Monday ... 6 = Sunday. Used by weekly and fortnightly.
+weekday: 6
+
+# 1-28 only, used by monthly. RFC 5545 DROPS an occurrence that does not exist
+# rather than clamping it, so day 31 silently skips February.
+day_of_month: 1
+
+hour: 19
+minute: 0
+
+# Minutes before the event that the alert fires.
+lead_minutes: 30
+
+# Written by passbook. `uid` keeps a re-import updating the same calendar event
+# instead of adding a second one; `sequence` must increase or the calendar
+# ignores the change entirely.
+# uid: ...
+# sequence: 0

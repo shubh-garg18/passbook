@@ -88,6 +88,7 @@ PAGES = [
     ("/accounts/add", "add-account", False),
     ("/transactions", "transactions", False),
     ("/reports", "reports", False),
+    ("/reminder", "reminder", False),
 ]
 
 

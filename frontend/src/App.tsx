@@ -15,6 +15,7 @@ import { NotConfigured } from './pages/NotConfigured'
 import { Home } from './pages/Home'
 import { Upload } from './pages/Upload'
 import { TransactionsPage } from './pages/Transactions'
+import { Reminder } from './pages/Reminder'
 import { Reports } from './pages/Reports'
 import { Preview } from './pages/Preview'
 import { Result } from './pages/Result'
@@ -437,6 +438,7 @@ export default function App() {
             <Route path="/result" element={<Result />} />
             <Route path="/payees" element={<Payees />} />
             <Route path="/reports" element={<Reports />} />
+            <Route path="/reminder" element={<Reminder />} />
             <Route path="/payees/diff" element={<PayeesDiff />} />
             <Route path="/reapply" element={<Reapply />} />
             <Route path="/reapply/done" element={<ReapplyDone />} />
