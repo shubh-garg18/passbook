@@ -67,8 +67,10 @@ def test_the_route_count_is_the_one_the_split_produced():
     """A number, so a route lost to a bad merge is caught even when both sides
     of the comparison above lose it together. Counted, not remembered: 36
     `@api` decorators at the split, and the URL map agreed rule for rule before
-    and after it — a dropped import in `__init__.py` once left 3."""
-    assert len(declared()) == 36
+    and after it — a dropped import in `__init__.py` once left 3. Creating and
+    removing a category, the attribution split and the earnings definition took
+    it to 44."""
+    assert len(declared()) == 44
 
 
 @pytest.mark.parametrize(

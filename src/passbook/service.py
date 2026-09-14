@@ -1865,6 +1865,23 @@ def account_transactions(
     return list(seen.values())
 
 
+def dedupe_transactions(statements: Iterable[ParsedStatement]) -> list[Transaction]:
+    """Every transaction in these statements, deduped on the bank's id.
+
+    **Pass one account's statements**, the same requirement `transaction_times`
+    carries and for the same reason: the key is the bank's id, which is unique
+    only within an account (§21.1). Split out of `account_transactions` so a
+    caller that has already parsed the archive — `/analysis` parses it for the
+    Day Rail — does not parse it a second time to get the same rows, and so
+    there is still only one implementation of the dedupe.
+    """
+    seen: dict[str, Transaction] = {}
+    for statement in statements:
+        for txn in statement.transactions:
+            seen.setdefault(txn.txn_id, txn)
+    return list(seen.values())
+
+
 def archived_transactions(
     accounts: "list[Account]",
     archive: Path = Path("archive"),

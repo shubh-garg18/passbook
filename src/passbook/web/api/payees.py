@@ -1,16 +1,29 @@
 """Naming payees and choosing their categories."""
 
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from flask import current_app, jsonify, request, session
 from ... import service
+from ...service import is_namespaced
 from ...config import load_accounts, load_payee_aliases, load_settings
-from ...configwrite import known_categories, plan_aliases, plan_categories
+from ...config import load_attribution
+from ...configwrite import (
+    earnings_categories,
+    plan_earnings,
+    plan_keep,
+    plan_settlement,
+    known_categories,
+    plan_aliases,
+    plan_categories,
+    plan_new_category,
+    plan_remove_category,
+)
 from ...firefly.bootstrap import bootstrap as bootstrap_rules
 from ...firefly.bootstrap import load_rules
 from ...firefly.client import FireflyError
 from .. import auth as A
-from ._base import _client, _fail, _payee_row, api, log
-from ._scope import _account_scope
+from ._base import _client, _fail, _money, _payee_row, api, log
+from ._scope import _account_scope, _date_scope, _within
 from ._reconcile import _sync_now, _synced_summary
 
 
@@ -52,6 +65,254 @@ def _all_transactions(scope=None):
                 seen.setdefault(txn.txn_id, txn)
         out.extend(seen.values())
     return out
+
+
+@api.get("/attribution")
+@A.login_required
+def attribution():
+    """The settlements in scope, and how much of each is this month's own.
+
+    > "Credit Card I say put in last month but give option to split some amount
+    >  if any in this month"
+    > "I want split option to be in dropdown category in Payees in another
+    >  dropdown in just Credit Card"
+
+    `Attribution.keep` has existed since §73 with no way to fill it in. This is
+    the read half: which rows the shift actually applies to — the ones in a
+    configured category, paid on or before `before_day` — with their current
+    kept amount, so the operator picks from a list of their own bills instead of
+    pasting an `external_id` into a YAML file.
+
+    Rows come from the **archive**, not the ledger: the split is a reporting
+    decision about a statement row, the archive is where those live, and asking
+    the store for them would make a settings panel wait on a network call.
+    """
+    scope, selected = _account_scope()
+    start, end, window = _date_scope()
+    config = load_attribution()
+    rules = load_rules()
+    # Before anything is configured, offer the category the feature exists for
+    # and say so — otherwise the picker is empty until a file exists that only
+    # the picker can write. §103.
+    configured = bool(config.categories)
+    categories = set(config.categories) or set(service.DEFAULT_SETTLEMENT_CATEGORIES)
+
+    rows = []
+    for account in scope:
+        mine = service.statements_for(account, service.archived_statements(
+            current_app.config["ARCHIVE"]
+        ))
+        for txn in _within(service.dedupe_transactions(mine), start, end):
+            # The same description the push builds and the rules match on:
+            # `<alias or token> (<channel>)`, non-negotiable 13.
+            name = txn.payee_alias or txn.payee or "(unparsed)"
+            category = service.predict_category(f"{name} ({txn.channel})", txn.narration, rules)
+            if category not in categories:
+                continue
+            if txn.txn_date.day > config.before_day:
+                # Not a settlement. A payment made late in the month is this
+                # month's own, and offering to split it would invite a shift
+                # that never happens.
+                continue
+            if not txn.debit:
+                # A refund or a reversal on the card. There is nothing to split
+                # and offering a box for it would be a control that cannot act.
+                continue
+            external = account.external_id(txn.txn_id)
+            rows.append(
+                {
+                    "externalId": external,
+                    "account": account.display,
+                    "date": txn.txn_date.isoformat(),
+                    "amount": _money(txn.debit or Decimal(0)),
+                    "payee": name,
+                    "category": category,
+                    "keep": _money(config.keep.get(external)) if external in config.keep else None,
+                }
+            )
+
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return jsonify(
+        {
+            "categories": sorted(categories),
+            # False means these rows are NOT being shifted yet; the first split
+            # turns it on. The panel says which, because "no effect" and "no
+            # rows" look identical otherwise.
+            "configured": configured,
+            "beforeDay": config.before_day,
+            "toDay": config.to_day,
+            "rows": rows,
+            "window": window,
+            "selected": selected,
+        }
+    )
+
+
+@api.put("/attribution")
+@A.login_required
+def set_attribution():
+    """Set or clear how much of one settlement stays in the month it was paid.
+
+    Keyed on the namespaced `external_id` and **refused for anything else**
+    (non-negotiable 10): the bank sequences `txn_id` per account, so a bare id
+    would silently split the wrong account's bill the day a second account is
+    registered.
+    """
+    body = request.get_json(silent=True) or {}
+    external = str(body.get("externalId") or "").strip()
+    if not external:
+        return _fail("Which row?", "invalid", 422)
+    if not is_namespaced(external):
+        return _fail(
+            f"{external!r} is not a namespaced id. A split is keyed on "
+            "`<account>-<transaction>`, because the bank numbers transactions "
+            "per account and two accounts collide completely.",
+            "invalid",
+            422,
+        )
+
+    raw = body.get("keep")
+    if raw in (None, "", "0"):
+        amount = None
+    else:
+        try:
+            amount = Decimal(str(raw))
+        except InvalidOperation:
+            return _fail(f"{raw!r} is not an amount.", "invalid", 422)
+        if amount < 0:
+            return _fail("A kept amount cannot be negative.", "invalid", 422)
+
+    change = plan_keep(external, amount)
+    if change.changed:
+        change.apply()
+    # Read back through the same loader the analysis uses, so the answer is
+    # what the next chart will actually see rather than what was just written.
+    kept = load_attribution().keep.get(external)
+    return jsonify(
+        {
+            "ok": True,
+            "externalId": external,
+            "keep": _money(kept) if kept is not None else None,
+            "diff": change.diff(),
+        }
+    )
+
+
+@api.put("/attribution/settlement")
+@A.login_required
+def set_settlement():
+    """Turn the previous-month shift on or off for one category. SPEC §103.3.
+
+    Its own route because it is its own decision. It applies to **every**
+    qualifying payment in the category, so switching it moves whole months at
+    once — and it used to happen as a side effect of saving the first split,
+    which meant typing 500 into one box moved three month buckets by tens of
+    thousands.
+
+    Refused for a category no rule knows, the same way `/categories` is: a
+    settlement policy naming a category that cannot be assigned is a rule that
+    can never fire.
+    """
+    body = request.get_json(silent=True) or {}
+    category = str(body.get("category") or "").strip()
+    if not category:
+        return _fail("Which category?", "invalid", 422)
+    known = known_categories()
+    if category not in known:
+        return _fail(
+            f"{category!r} has no rule. Known: {', '.join(known)}.",
+            "unknown_category",
+            422,
+        )
+
+    change = plan_settlement(category, bool(body.get("settles")))
+    if change.changed:
+        change.apply()
+    config = load_attribution()
+    return jsonify(
+        {
+            "ok": True,
+            "categories": sorted(config.categories),
+            "configured": bool(config.categories),
+            "diff": change.diff(),
+        }
+    )
+
+
+# --- what counts as earnings. SPEC §112 --------------------------------------
+
+
+@api.get("/earnings")
+@A.login_required
+def earnings():
+    """Which categories money arrives under, and which of them count as earned.
+
+    > "Earning definition or any other definition is different for anyone so we
+    >  cant generalize instead give an option i guess"
+
+    `not_earnings` is an allow-list — `earnings_only` names what counts and
+    everything else arriving is tagged `not-earnings`. That is safe against
+    over-counting and it means a freshly registered account reports **£0
+    earned** against real deposits, because nobody has told the list about its
+    payees yet. Measured on one: six deposits arrived and all six were excluded.
+
+    So the list is offered rather than assumed. Only categories that have
+    actually received money in this window are listed, because a category that
+    has never taken a deposit is not a decision anybody needs to make.
+    """
+    scope, selected = _account_scope()
+    start, end, window = _date_scope()
+    counted = set(earnings_categories())
+
+    arriving: dict[str, dict] = {}
+    rules = load_rules()
+    for txn in _within(_all_transactions(scope), start, end):
+        if not txn.credit:
+            continue
+        name = txn.payee_alias or txn.payee or "(unparsed)"
+        category = service.predict_category(f"{name} ({txn.channel})", txn.narration, rules)
+        row = arriving.setdefault(
+            category or "(no category)",
+            {"category": category or "(no category)", "amount": Decimal(0), "count": 0},
+        )
+        row["amount"] += txn.credit
+        row["count"] += 1
+
+    rows = sorted(arriving.values(), key=lambda r: -r["amount"])
+    return jsonify(
+        {
+            "rows": [
+                {
+                    "category": r["category"],
+                    "amount": _money(r["amount"]),
+                    "count": r["count"],
+                    "counts": r["category"] in counted,
+                }
+                for r in rows
+            ],
+            "window": window,
+            "selected": selected,
+        }
+    )
+
+
+@api.put("/earnings")
+@A.login_required
+def set_earnings():
+    """Add or remove one category from the earnings allow-list. §112."""
+    body = request.get_json(silent=True) or {}
+    category = str(body.get("category") or "").strip()
+    if not category or category == "(no category)":
+        return _fail(
+            "Give the money a category first — an uncategorised deposit has "
+            "nothing to count as.",
+            "invalid",
+            422,
+        )
+    change = plan_earnings(category, bool(body.get("counts")))
+    if change.changed:
+        change.apply()
+    return jsonify({"ok": True, "counted": earnings_categories(), "diff": change.diff()})
 
 
 @api.get("/payees")
@@ -107,6 +368,75 @@ def payees():
 def categories():
     """Only categories that already have a rule. D10: the UI never invents one."""
     return jsonify({"categories": known_categories()})
+
+
+@api.post("/categories")
+@A.login_required
+def categories_add():
+    """Create a category. SPEC §26.
+
+    D10 forbids *inferring* a category from a truncated token. Typing one is not
+    inferring — it records a decision the operator has already made, and without
+    this the dropdown could only ever offer what a hand-edited YAML file already
+    contained.
+
+    Created empty: no payee is assigned here. That still goes through
+    diff-then-write like every other categorisation.
+    """
+    name = str((request.get_json(silent=True) or {}).get("name") or "")
+    try:
+        change = plan_new_category(name)
+    except ValueError as exc:
+        return _fail(str(exc), "invalid", 422)
+
+    change.apply()
+    log.info("category created: %r", name.strip())
+    return jsonify({"ok": True, "categories": known_categories()})
+
+
+@api.get("/categories/removable")
+@A.login_required
+def categories_removable():
+    """Only the categories that can actually be removed — the empty ones.
+
+    Offering all of them and answering 409 for most is an error to read; a list
+    of what is possible is a non-choice. `not_spend` and the large-oneoff
+    exclusions are honoured here too, so the button matches the server.
+    """
+    rules = load_rules()
+    protected = {str(c) for c in (rules.get("not_spend") or [])}
+    protected |= {
+        str(c) for c in ((rules.get("large_oneoff") or {}).get("exclude_categories") or [])
+    }
+    removable = sorted(
+        str(spec["category"])
+        for spec in (rules.get("rules") or [])
+        if spec.get("category")
+        and not (spec.get("payees") or [])
+        and str(spec["category"]) not in protected
+    )
+    return jsonify({"removable": removable})
+
+
+@api.delete("/categories/<path:name>")
+@A.login_required
+def categories_remove(name: str):
+    """Remove an empty category. SPEC §32.
+
+    Symmetry with creating one — a typo was otherwise permanent. Refuses a
+    category that still has payees, because deleting the rule does not delete
+    them, it strands them.
+    """
+    try:
+        change = plan_remove_category(name)
+    except KeyError as exc:
+        return _fail(str(exc), "unknown_category", 404)
+    except ValueError as exc:
+        return _fail(str(exc), "in_use", 409)
+
+    change.apply()
+    log.info("category removed: %r", name)
+    return jsonify({"ok": True, "categories": known_categories()})
 
 
 def _split_submission(body: dict) -> tuple[dict, dict]:

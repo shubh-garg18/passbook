@@ -211,12 +211,19 @@ export type PayeeRow = {
 }
 
 export type Payees = {
+  /** The window the server resolved, echoed so the label cannot drift. */
+  window: { range: string; from: string | null; to: string | null }
+  /** Rows the window is hiding. A filtered list that does not say it is
+   *  filtered is how a token gets decided twice — or never. */
+  outsideWindow: number
   rows: PayeeRow[]
   categories: string[]
   total: number
   totalClocked: number
 }
 
+/** SPEC §20. `ok: null` means the check could not be run — rendered as
+ *  unverified, never as a tick (non-negotiable 11). */
 export type DiffResponse = {
   changes: { path: string; diff: string }[]
   aliasChanges: Record<string, string>
@@ -393,4 +400,45 @@ export type LedgerRow = {
   /** The bank's raw narration. Searched, not rendered — a UTR is exactly what
    *  you look for when the display name is no help. */
   narration: string
+}
+
+export type AttributionData = {
+  categories: string[]
+  /** False means these rows are not being shifted yet; the first split turns it
+   *  on. Said out loud, because "no effect" and "no rows" look identical. */
+  configured: boolean
+  beforeDay: number
+  toDay: number
+  rows: Settlement[]
+  window: { range: string; from: string | null; to: string | null }
+  selected: string | null
+}
+
+/** §112. Which categories money arrives under, and which count as earned. */
+
+export type EarningsData = {
+  rows: EarningsRow[]
+  window: { range: string; from: string | null; to: string | null }
+  selected: string | null
+}
+
+/** §103. The credit-card split: which settlements exist, and how much of each
+ *  is the paying month's own spending rather than the previous month's. */
+export type Settlement = {
+  externalId: string
+  account: string
+  date: string
+  amount: string
+  payee: string
+  category: string
+  /** null when nothing is kept — the absence of a rule, not a rule saying 0. */
+  keep: string | null
+}
+
+/** §112. Which categories money arrives under, and which count as earned. */
+export type EarningsRow = {
+  category: string
+  amount: string
+  count: number
+  counts: boolean
 }

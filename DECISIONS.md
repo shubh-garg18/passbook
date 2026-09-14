@@ -4369,3 +4369,63 @@ one request now shares one client instead of opening three.
 - [x] One client per request, constructed in one place.
 - [x] 967 tests green, unchanged in behaviour.
 
+---
+
+## 30. Categories, the split, and what counts as earned
+
+Three things the Payees page could not do, all of them config edits that had no
+control.
+
+### 30.1 Creating and removing a category
+
+D10 forbids *inferring* a category from a truncated token. **Typing one is not
+inferring** — it records a decision the operator has already made — and without
+it the dropdown could only ever offer what a hand-edited YAML file already
+contained.
+
+Removing one is the symmetry that makes the first safe: a typo was otherwise
+permanent. It refuses a category that still has payees, because deleting the
+rule does not delete them, it **strands** them — `predict_category` stops
+matching, the rows fall to uncategorised on the next push, and nothing says so.
+
+`GET /categories/removable` returns only the ones that can actually go, so the
+button matches the server. Offering all of them and answering 409 for most is an
+error to read; a list of what is possible is a non-choice.
+
+### 30.2 A bill that settles another month
+
+A credit-card bill paid on the 5th settles the previous month's purchases.
+Bucketed on its own date it puts that spending in the wrong month, and every
+month chart is then wrong by a bill.
+
+`Attribution` moves which month a payment is **reported** in and nothing else —
+not its date in the ledger, not the balance line, not the window, not one total.
+Configuring nothing changes nothing, which is the only defensible default for a
+rule that would otherwise move every bucket the day it shipped.
+
+Part of a bill really can be this month's own spending, so a `keep` amount is
+per-bill, and it is clamped to the bill rather than trusted.
+
+### 30.3 Earnings is a definition, and definitions are personal
+
+`not_earnings` is an **allow-list**: `earnings_only` names what counts and
+everything arriving that is not on it is tagged as money coming back. Safe
+against over-counting, and it means a freshly registered account reports **₹0
+earned** against real deposits until somebody says what counts.
+
+That is not a bug to paper over with a guess. A refund is not income for anyone;
+money from a parent is income for some people and a transfer for others. So the
+list is editable from the page where payees are named, and nothing in the code
+decides it.
+
+### 30.4 Definition of done
+
+- [x] `POST /categories`, `GET /categories/removable`,
+      `DELETE /categories/<name>` — creating is free, removing is refused while
+      the category still holds payees.
+- [x] `GET`/`PUT /attribution`, `PUT /attribution/settlement`.
+- [x] `GET`/`PUT /earnings`.
+- [x] All five reachable from Payees, which is where the decision is made.
+- [x] The route guard updated deliberately: 36 → 44, with the reason written
+      next to the number.
+
