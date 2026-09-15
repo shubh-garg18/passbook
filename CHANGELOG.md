@@ -27,6 +27,10 @@ ever say no, and now they answer.
   straight away, for when you have just updated and want to see it land.
 - **Commands read as commands.** Messages like *run `make up`* were showing you
   the backtick characters.
+- **Transactions is readable on a phone.** Each row is a card now — payee,
+  date, category, and the amount where you can see it — instead of a table you
+  had to drag sideways to find out what anything cost. The category is still a
+  button that filters. Unchanged on a wider screen.
 - **A missing space on "Add a bank."** The sentence ran two words together
   right where it tells you what to do if your bank is not one of the built-in
   ones.

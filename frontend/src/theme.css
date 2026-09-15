@@ -3503,6 +3503,147 @@ svg .mark:focus-visible {
   border-color: var(--ink-soft);
 }
 
+/* §49. On a phone the transactions table stops being a table.
+ *
+ * It is 745px of columns in a 356px viewport, so half of it — including the
+ * amount — sat outside the scroll container until you swiped. Reachable, and
+ * the documented pattern for a table, and still the wrong default on the one
+ * page whose job is listing what things cost: the review recorded it rather than
+ * fixing it on the way past, because a redesign is not a thing to slip in.
+ *
+ * Each row becomes a card. Payee first, because that is what the eye is
+ * looking for; the date under it; the category chip under that, still a button
+ * that filters; the amount top-right, where a number belongs.
+ *
+ * **Direction is a printed word here.** The wide table says it with two
+ * columns, Out and In, and a card has no columns — so the cell prints its own
+ * header. What it must never be is a colour: §16.4 and non-negotiable 16 are
+ * about exactly this, and red-for-out would be a verdict on a row that is
+ * often nothing of the kind.
+ *
+ * `td:empty` is load-bearing: every row has both an Out cell and an In cell
+ * and exactly one carries a figure, so the other must not print its label over
+ * a blank. The wide table does not need this because an empty cell in a column
+ * is simply a gap.
+ */
+@media (max-width: 34rem) {
+  .txns,
+  .txns thead,
+  .txns tbody,
+  .txns tr,
+  .txns td {
+    display: block;
+    width: auto;
+  }
+
+  /* Clipped, not `display: none`: the headers stay in the accessibility tree,
+     which is the half of a table that survives losing its shape. */
+  .txns thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .txns tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    align-items: start;
+    column-gap: 0.9rem;
+    padding: 0.7rem 0.85rem;
+    border-bottom: 1px solid var(--grid);
+  }
+  .txns tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  /* The ruled-paper borders are a table's, not a card's: `tbody td` carries a
+     bottom rule and every cell but the last a right rule, which drew a box
+     around each line of every card. The card's own bottom border below is the
+     only rule that still means something.
+
+     `:not(:last-child)` is repeated here to match the specificity of the rule
+     it is undoing: `tbody td:not(:last-child)` is (0,1,2) and a plain
+     `.txns td` is (0,1,1), so the right-hand rule survived and drew a line
+     down the middle of every card. Visible only on the banded rows, because on
+     the others it fell on a background of the same colour. */
+  .txns tbody td,
+  .txns tbody td:not(:last-child) {
+    padding: 0;
+    border: 0;
+  }
+  /* One of Out and In is always blank. A blank card row with a heading on it
+     is worse than no row. */
+  .txns tbody td:empty {
+    display: none;
+  }
+
+  .txns td[data-label='Payee'] {
+    grid-column: 1;
+    order: 1;
+    font-weight: 600;
+    /* `minmax(0, 1fr)` lets the COLUMN shrink; it does not let a word break.
+       A narration like an NEFT clearing-house name is one long token, and on a
+       320px screen it pushed the card to 322px in a 286px box — putting the
+       horizontal scroll back on the page this layout exists to take it off.
+       `anywhere` rather than `break-word`, because only `anywhere` also lets
+       the intrinsic size shrink. */
+    overflow-wrap: anywhere;
+  }
+  /* And the span inside it is `white-space: nowrap` with an ellipsis, which is
+     right for a cell in a column and wrong for a card: a card has the width to
+     wrap onto a second line, and a truncated payee is the thing you were
+     reading. Setting `overflow-wrap` on the cell alone did nothing while this
+     was still saying the text may not wrap. */
+  .txns td[data-label='Payee'] .party__name {
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
+  .txns td.date {
+    grid-column: 1;
+    order: 2;
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+  }
+  .txns td[data-label='Category'],
+  .txns td[data-label='Account'] {
+    grid-column: 1;
+    order: 3;
+    margin-top: 0.35rem;
+  }
+  .txns td[data-label='Account'] {
+    order: 4;
+    font-size: 0.78rem;
+  }
+  /* The clock sits beside the date rather than under it: two lines for a
+     timestamp is most of a card. */
+  .txns__time {
+    display: inline;
+    margin-left: 0.4rem;
+  }
+
+  .txns td.num {
+    grid-column: 2;
+    grid-row: 1;
+    order: 0;
+    text-align: right;
+    font-size: 1.02rem;
+  }
+  .txns td.num::before {
+    content: attr(data-label);
+    display: block;
+    font-family: var(--display);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+}
+
 .pager {
   display: flex;
   align-items: center;

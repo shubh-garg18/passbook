@@ -5545,3 +5545,60 @@ It is a shape, so it is checked as one.
 `test_no_jsx_element_is_glued_to_the_words_after_it` flags a self-closing
 component alone on a line followed by a line beginning with a letter; `{' '}`
 is the fix. Zero other occurrences in either repository.
+
+
+---
+
+## 49. The transactions table becomes cards on a phone
+
+The table is wider than a phone — columns for date, payee, category, out and
+in — so it sat in a horizontally scrolling container and the **amount** was off
+screen until you swiped. Reachable, and the documented pattern for a table on a
+small screen, and still the wrong default on the one page whose job is listing
+what things cost.
+
+Below 34rem each row is a card: payee first, because that is what the eye is
+looking for; the date and clock under it; the category chip under that, still
+the button that filters; the amount top-right, where a number belongs. Above
+that width nothing changed — verified rather than assumed: `display: table`,
+`table-row`, a visible `thead` and a 1px cell rule at 1440px.
+
+### 49.1 Direction is a word here, and never a colour
+
+The wide table carries direction in the **columns**, `Out` and `In`, which is
+why money is never coloured by sign. A card has no columns, so the amount cell
+prints its own header out of `data-label`.
+
+`td:empty` is load-bearing: every row has both cells and exactly one carries a
+figure, so without it the blank one prints a heading over nothing. The wide
+table never needed that, because an empty cell in a column is just a gap.
+
+### 49.2 A table that stops being a table stops being a table
+
+Blink and WebKit drop a table's implicit ARIA roles the moment `display` is
+something else, so the rows would read to a screen reader as a stack of
+unrelated blocks. Every role is written out — `table`, `rowgroup`, `row`,
+`columnheader`, `cell` — and the header row is clipped rather than
+`display: none`, so it stays in the accessibility tree after it leaves the
+screen.
+
+### 49.3 Two rules that say "do not wrap"
+
+At 320px a card was still wider than its box, putting the horizontal scroll
+back on the page this layout exists to remove it from. A clearing-house
+narration is one long token, and **two separate rules had to be undone to let
+it break**: `overflow-wrap: anywhere` on the cell did nothing on its own,
+because `.party__name` inside it is `white-space: nowrap` with an ellipsis —
+right for a cell in a column, wrong for a card, which has a second line to give
+it. `anywhere` and not `break-word`, because only `anywhere` lets the intrinsic
+size shrink as well as the text break.
+
+### 49.4 The rule that fought back
+
+`tbody td` carries the ruled-paper borders, and they drew a box around each
+line of every card. `.txns td { border: 0 }` did not clear them:
+that is specificity (0,1,1) and `tbody td:not(:last-child)` is (0,1,2), so the
+right-hand rule survived and drew a line down the middle of every card —
+**visible only on the banded rows**, because on the others it fell on a
+background of its own colour. The selector repeats `:not(:last-child)` now, to
+match the specificity of what it is undoing.

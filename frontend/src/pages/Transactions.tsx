@@ -268,30 +268,35 @@ export function TransactionsPage() {
           ) : (
             <section className="sheet">
               <div className="sheet__scroll">
-                <table className="txns">
+                {/* §49. Explicit roles because the phone layout changes
+                    `display` on every one of these elements, and Blink and
+                    WebKit drop a table's implicit roles when it stops being
+                    `display: table`. The rows become cards to the eye and stay
+                    a table to a screen reader. */}
+                <table className="txns" role="table">
                   <caption className="visually-hidden">
                     Transactions matching the current filters, newest first. No running
                     balance: this list can be filtered and reordered, and a balance over a
                     subset would assert a continuity that is not there.
                   </caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">Date</th>
-                      <th scope="col">Payee</th>
-                      <th scope="col">Category</th>
-                      {isAll && <th scope="col">Account</th>}
-                      <th scope="col" className="num">
+                  <thead role="rowgroup">
+                    <tr role="row">
+                      <th scope="col" role="columnheader">Date</th>
+                      <th scope="col" role="columnheader">Payee</th>
+                      <th scope="col" role="columnheader">Category</th>
+                      {isAll && <th scope="col" role="columnheader">Account</th>}
+                      <th scope="col" role="columnheader" className="num">
                         Out
                       </th>
-                      <th scope="col" className="num">
+                      <th scope="col" role="columnheader" className="num">
                         In
                       </th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody role="rowgroup">
                     {data.rows.map((row) => (
-                      <tr key={row.id}>
-                        <td className="date">
+                      <tr key={row.id} role="row">
+                        <td className="date" role="cell">
                           {formatShortDate(row.date)}
                           {row.time && <span className="txns__time">{formatClock(row.time)}</span>}
                         </td>
@@ -302,10 +307,10 @@ export function TransactionsPage() {
                             these there". They are still a filter in the strip
                             above, which is where a tag answers a question
                             instead of decorating an answer. */}
-                        <td>
+                        <td role="cell" data-label="Payee">
                           <span className="party__name">{row.description}</span>
                         </td>
-                        <td>
+                        <td role="cell" data-label="Category">
                           {row.category ? (
                             <button
                               type="button"
@@ -319,12 +324,19 @@ export function TransactionsPage() {
                             <span className="muted">—</span>
                           )}
                         </td>
-                        {isAll && <td className="muted">{row.accountLabel}</td>}
+                        {isAll && (
+                          <td className="muted" role="cell" data-label="Account">
+                            {row.accountLabel}
+                          </td>
+                        )}
                         {/* Direction by COLUMN, never by colour (§16.4). */}
-                        <td className="num">
+                        {/* Direction stays a COLUMN here and becomes a
+                            printed word on a phone, where there are no
+                            columns. Never a colour. */}
+                        <td className="num" role="cell" data-label="Out">
                           {row.kind === 'withdrawal' ? formatAmount(row.amount) : ''}
                         </td>
-                        <td className="num">
+                        <td className="num" role="cell" data-label="In">
                           {row.kind === 'deposit' ? formatAmount(row.amount) : ''}
                         </td>
                       </tr>

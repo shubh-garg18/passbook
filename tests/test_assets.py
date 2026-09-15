@@ -732,3 +732,36 @@ def test_no_jsx_element_is_glued_to_the_words_after_it():
         "JSX joins these with no space between them:\n  " + "\n  ".join(glued)
         + "\nPut them on one line, or end the element line with {' '}."
     )
+
+
+def test_the_transactions_table_survives_becoming_cards():
+    """At phone width the rows stop being a table. Two things must not break.
+
+    **Semantics.** Blink and WebKit drop a table's implicit ARIA roles when its
+    `display` stops being `table`, so a layout that reads fine looks like a
+    stack of unrelated divs to a screen reader. The roles are written out.
+
+    **Direction.** The wide table says out-or-in with two columns, `Out` and
+    `In`, and a card has no columns — so the amount cell prints its own header
+    from `data-label`. What it must never become is a colour: §16.4 and
+    non-negotiable 16 exist because red-for-out is a verdict, and most rows
+    here are not a verdict about anything.
+    """
+    src = (ROOT / "frontend" / "src" / "pages" / "Transactions.tsx").read_text()
+    for role in ('role="table"', 'role="rowgroup"', 'role="row"',
+                 'role="columnheader"', 'role="cell"'):
+        assert role in src, f"the transactions table is missing {role}"
+    for label in ('data-label="Out"', 'data-label="In"'):
+        assert src.count(label) == 1, f"{label} must be on exactly one cell"
+
+    css = (ROOT / "frontend" / "src" / "theme.css").read_text()
+    start = css.index(".txns tbody tr {\n    display: grid;")
+    block = css[css.rindex("@media", 0, start) : css.index("\n}\n", start)]
+    assert "content: attr(data-label)" in block, (
+        "the card layout must print the direction, since it has no columns to "
+        "say it with"
+    )
+    assert "td:empty" in block, (
+        "every row has both an Out and an In cell and one is always blank — "
+        "without this it prints a heading over nothing"
+    )
