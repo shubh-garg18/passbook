@@ -4690,3 +4690,94 @@ Everything else should match, and now does.
 module it came from and the module it landed in differ only where the difference
 was chosen. That is a diff, not a judgement — so it can be run again, and was.
 
+
+---
+
+## 36. passbook's own ledger
+
+Until now the ledger was a second application, reached over HTTP. It gave us a
+double-entry store, a rules engine and a restore story without writing any of
+them, and for a long while that was the right trade.
+
+It stopped being right for four separate reasons, and none of them is
+"we could write it better".
+
+**It was a second install to get through.** A user cloning this repository had
+to bring up two applications, create an account in the second one, generate a
+personal access token, set the default currency, and paste the token into
+`.env` — before passbook could read a single row. Four of the six manual steps
+in `SETUP.md` existed only to satisfy the other application. That is most of the
+distance between "cloned it" and "gave up".
+
+**Its field names are somebody else's release cycle.** Every change that touched
+the ledger began by reading the validating source on a pinned tag, because the
+request shapes have moved across versions and documentation was not a reliable
+account of them. That discipline was correct and it is a permanent tax on a
+project whose ledger is nine columns wide.
+
+**Its duplicate check was looking at the wrong thing.** This is the one that
+actually cost money-shaped correctness. It decided duplicates on a hash of the
+submitted payload, and passbook rewrites that payload for a living — an alias,
+a category, a tag. §34 found splits standing behind fewer identities with
+nothing raised anywhere, and the guard that should have caught it compared
+*sets*, so it read green. The fix worked, and it was a check bolted to the
+outside of a store that could not make the guarantee itself.
+
+**passbook used fifteen of its methods.** Accounts, transactions, and rules —
+and the rules half was already mirrored here, because §24 had to know what a row
+*should* be in order to report that it was not.
+
+### 36.1 The shape
+
+One table, keyed on the identity.
+
+```sql
+CREATE TABLE IF NOT EXISTS transactions (
+    external_id TEXT PRIMARY KEY,
+    ...
+    amount      NUMERIC(18,2) NOT NULL CHECK (amount >= 0),
+    kind        TEXT NOT NULL CHECK (kind IN ('withdrawal','deposit'))
+);
+```
+
+Three deliberate choices in that, each of which is a bug that has already
+happened:
+
+* **`external_id` is the primary key, not a unique index added later.** It is
+  not a check that can be bypassed; it is the shape of the table. A second
+  insert of the same identity cannot be written, by anything, ever — including
+  by a future feature nobody has written yet. That is the §34 bug made
+  impossible rather than detected.
+* **`amount` is `NUMERIC`, and non-negative.** `NUMERIC` reads back as
+  `Decimal` in psycopg, so non-negotiable 1 does not quietly stop at the
+  storage boundary. And direction lives in `kind` rather than in a sign,
+  because a sign is a thing two pieces of code can disagree about silently.
+* **Double entry does not survive, and does not need to.** The other
+  application modelled every row as a transfer between two accounts, and
+  passbook only ever read one side of it. A statement is a list of movements
+  against one account with a running balance, the balance chain is what proves
+  the import, and the chain does not care about the far side. What was lost is
+  the far side's *name*, which passbook keeps as `counterparty` — a column,
+  not an account.
+
+### 36.2 Two implementations, one interface
+
+`LedgerStore` is what every caller sees. There are two of it: `PostgresLedger`,
+and `MemoryLedger` for the tests — so "tests never touch the network" survives
+a ledger that lives in a database.
+
+`MemoryLedger` is not a stub. It enforces every invariant the schema does,
+because **a double that accepts what the database would refuse is a double that
+makes the tests pass and production fail.** A test asserts both implementations
+answer the same eight questions, since a double missing a method passes
+everything and fails the first real request.
+
+### 36.3 What a user with an existing ledger does
+
+Nothing but run one command. `passbook upgrade` rebuilds the new tables from
+`archive/`, which is already the disaster-recovery path, already drilled, and
+provably correct — the balance chain validates every file before a row is
+written. The old container can then be deleted. **No row is read out of the old
+ledger to do this**, which is the point: the archive is the authority, and a
+rebuild that trusts it cannot inherit whatever was wrong in the store it is
+replacing.

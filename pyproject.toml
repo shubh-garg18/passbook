@@ -15,6 +15,11 @@ dependencies = [
     "flask>=3.0",
     "waitress>=3.0",
     "ruamel-yaml>=0.18",
+    # The ledger lives in Postgres now (DECISIONS.md §36). `psycopg[binary]`
+    # ships a wheel with libpq inside it, so the web image stays a plain
+    # python:slim with no compiler and no system libpq to keep in step — the
+    # same reason segno was chosen over a QR library that needs Pillow.
+    "psycopg[binary]>=3.1",
     # Phase 10 second factor. pyotp is the RFC 6238 implementation; segno draws
     # the enrolment QR as SVG and is pure Python — no Pillow, no native build,
     # which keeps the web image a plain python:slim with no compiler in it.
