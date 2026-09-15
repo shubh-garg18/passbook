@@ -1,7 +1,7 @@
 [project]
 name = "passbook"
 version = "0.2.0"
-description = "Canara Bank statement -> Firefly III ingest pipeline"
+description = "Bank statements into a ledger that tells you the truth about your spending"
 requires-python = ">=3.11"
 dependencies = [
     # SPEC D4: the Canara export is a genuine OLE2 .xls. xlrd 2.x reads only

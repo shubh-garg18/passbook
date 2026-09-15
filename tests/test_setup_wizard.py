@@ -45,10 +45,10 @@ def test_env_values_are_quoted_when_they_contain_spaces(tmp_path, monkeypatch):
 
 def test_set_env_replaces_in_place_and_never_appends_a_duplicate(tmp_path, monkeypatch):
     env = tmp_path / ".env"
-    env.write_text("FIREFLY_TOKEN=old\n")
+    env.write_text("PASSBOOK_ACCOUNT_NUMBER=old\n")
     monkeypatch.setattr(wizard, "ENV", env)
-    wizard.set_env("FIREFLY_TOKEN", "new")
-    assert env.read_text().count("FIREFLY_TOKEN=") == 1
+    wizard.set_env("PASSBOOK_ACCOUNT_NUMBER", "new")
+    assert env.read_text().count("PASSBOOK_ACCOUNT_NUMBER=") == 1
     assert "new" in env.read_text()
 
 

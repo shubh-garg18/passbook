@@ -62,7 +62,6 @@ def app(tmp_path, monkeypatch):
     # configured one — otherwise every upload is (correctly) refused.
     monkeypatch.setenv("PASSBOOK_ACCOUNT_NUMBER", FIXTURE_ACCOUNT)
     monkeypatch.setenv("PASSBOOK_ASSET_ACCOUNT", "Test Account")
-    monkeypatch.delenv("FIREFLY_TOKEN", raising=False)
 
     return create_app(
         {
@@ -551,7 +550,6 @@ def test_the_assertion_also_guards_confirm(signed_in, app, monkeypatch):
     """Staged under one setting, pushed under another."""
     signed_in.upload(XLS_FIXTURE.read_bytes())
     monkeypatch.setenv("PASSBOOK_ACCOUNT_NUMBER", "111100009999")
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     r = signed_in.post("/statement/confirm")
     assert r.status_code == 422
     assert r.get_json()["code"] in ("account_mismatch", "unknown_account")
@@ -700,7 +698,6 @@ def test_the_diff_says_what_would_change_in_the_ledger_before_the_write(
     )
 
     shutil.copy(XLS_FIXTURE, app.config["ARCHIVE"] / "statement.xls")
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     seen = {}
 
     def preview(client, settings, archive, **kwargs):
@@ -733,8 +730,6 @@ def test_the_diff_still_works_when_the_ledger_cannot_be_reached(
         payees as api_payees,
     )
 
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
-
     def boom(*a, **k):
         raise api_module.LedgerError("cannot reach the ledger")
 
@@ -765,8 +760,6 @@ def test_applying_a_payee_edit_updates_the_rows_already_in_the_ledger(
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
 
     change = service.ReapplyChange(
         external_id="canara-1111-20260509000001",
@@ -815,8 +808,6 @@ def test_rows_an_update_could_not_fix_are_reported_not_swallowed(
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     stale = service.ReapplyChange(
         external_id="x", date="2026-05-09", amount=Decimal("1"),
         old_description="a", new_description="b",
@@ -853,8 +844,6 @@ def test_a_failed_verification_reads_as_unverified_not_as_clean(
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     stale = service.ReapplyChange(
         external_id="x", date="2026-05-09", amount=Decimal("1"),
         old_description="a", new_description="b",
@@ -892,8 +881,6 @@ def test_the_in_place_sync_needs_no_database_dump(signed_in, app, monkeypatch, c
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([], 93))
     monkeypatch.setattr(
         api_module.service, "sync_ledger", lambda *a: service.SyncResult()
@@ -1239,7 +1226,6 @@ def _register(signed_in, app, monkeypatch, *, existing="Cash wallet", body=None)
     )
 
     fake = FakeLedger([], account=existing)
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
         api_base, "open_ledger", lambda *a, **k: fake)
     staged = signed_in.upload_to("/accounts/inspect", XLS_FIXTURE.read_bytes(), "s.xls")
@@ -1325,7 +1311,6 @@ def test_the_ledger_being_down_stops_before_the_registry_is_touched(
 
     # Stage with a working client, then let the ledger fall over between staging
     # and registering — which is the moment that matters.
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
         api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
     staged = signed_in.upload_to("/accounts/inspect", XLS_FIXTURE.read_bytes(), "s.xls")
@@ -1550,7 +1535,6 @@ def three_accounts(app, monkeypatch, tmp_path):
 
 def test_removal_says_what_it_would_leave_behind(signed_in, three_accounts, monkeypatch):
     """The count is the warning. "Are you sure?" is not one."""
-    monkeypatch.delenv("FIREFLY_TOKEN", raising=False)
     body = signed_in.get("/accounts/a-1/removal").get_json()
 
     assert body["account"]["slug"] == "a-1"
@@ -1618,8 +1602,6 @@ def test_removal_survives_the_ledger_being_asleep(signed_in, three_accounts, mon
     """Refusing to show the screen because the stack is down would make this the
     one management action that needs the stack up to undo a ledger mistake."""
     from passbook.store import LedgerError
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "tok")
 
     class Dead(StoreDouble):
         """Asleep. It fails on the CALL, not on the `with`. §101.
@@ -1914,8 +1896,6 @@ def test_the_diff_warns_when_a_change_would_drop_a_tag(signed_in, app, monkeypat
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     change = service.ReapplyChange(
         external_id="x", date="2026-08-01", amount=Decimal("40"),
         old_description="Day Canteen (UPI)", new_description="Day Canteen (UPI)",
@@ -2561,8 +2541,6 @@ def test_an_unreachable_ledger_is_a_502_not_a_500(signed_in, monkeypatch):
         payees as api_payees,
     )
 
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
-
     def explode(*a, **k):
         raise LedgerError("connection refused")
 
@@ -2753,8 +2731,6 @@ def test_reapply_reports_whether_a_recent_dump_exists(signed_in, tmp_path, monke
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([], 0))
     monkeypatch.setattr(
         api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
@@ -2773,7 +2749,6 @@ def test_reapply_reports_whether_a_recent_dump_exists(signed_in, tmp_path, monke
 def test_a_purge_is_refused_without_a_recent_dump(signed_in, tmp_path, monkeypatch):
     """Refused on the SERVER. A disabled button is a courtesy; the thing standing
     between a purge and an unrecoverable ledger cannot live in the client."""
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     shutil.copy(XLS_FIXTURE, tmp_path / "archive" / "statement.xls")
 
     r = signed_in.post("/reapply/run")
@@ -2799,8 +2774,6 @@ def test_the_refusal_happens_before_anything_is_copied_or_deleted(
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     called = []
     monkeypatch.setattr(
         api_reconcile, "_run_config_backup", lambda: called.append("config") or "x"
@@ -2822,8 +2795,6 @@ def test_a_dump_that_is_exactly_at_the_limit_still_counts(signed_in, tmp_path, m
         ops as api_ops,
         payees as api_payees,
     )
-
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([], 0))
     monkeypatch.setattr(
         api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
@@ -3084,7 +3055,6 @@ def test_registering_an_account_sets_its_opening_balance(
     _second_account(tmp_path)
 
     fake = FakeLedger([], account="Other")
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
         api_base, "open_ledger", lambda *a, **k: fake)
 

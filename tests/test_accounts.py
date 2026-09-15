@@ -328,7 +328,6 @@ def two_account_app(tmp_path, monkeypatch):
         (tmp_path / name).mkdir()
     monkeypatch.delenv("PASSBOOK_ACCOUNT_NUMBER", raising=False)
     monkeypatch.delenv("PASSBOOK_ASSET_ACCOUNT", raising=False)
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
 
     save_accounts(
         [

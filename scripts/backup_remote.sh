@@ -191,10 +191,14 @@ prune() {
     done < <(ls -1t $pattern 2>/dev/null | tail -n +$((KEEP + 1)))
     [ "$n" -gt 0 ] && echo "  pruned $n local $(basename "$pattern")" || true
 }
-prune "$BACKUPS/firefly-*.sql.gz"
+prune "$BACKUPS/ledger-*.sql.gz"
 prune "$BACKUPS/config-*.tar.gz"
-prune "$BACKUPS/firefly-*.sql.gz.gpg"
+prune "$BACKUPS/ledger-*.sql.gz.gpg"
 prune "$BACKUPS/config-*.tar.gz.gpg"
+# The old name. An install that has been upgraded still has dumps under it, and
+# a retention rule that stops seeing them keeps every one of them forever.
+prune "$BACKUPS/firefly-*.sql.gz"
+prune "$BACKUPS/firefly-*.sql.gz.gpg"
 prune "$BACKUPS/config-replaced-*.tar.gz"
 echo "  local backups: $(ls -1 "$BACKUPS" 2>/dev/null | wc -l) file(s)"
 

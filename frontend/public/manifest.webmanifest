@@ -1,7 +1,7 @@
 {
   "name": "passbook",
   "short_name": "passbook",
-  "description": "Canara Bank statements into a categorised Firefly III ledger.",
+  "description": "Your bank statements, as a ledger you can read.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
