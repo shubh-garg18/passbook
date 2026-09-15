@@ -20,7 +20,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import narration as narration_mod
-from . import ops, service
+from . import audit, ops, service
 from .config import (
     Account,
     RegistryError,
@@ -1391,6 +1391,14 @@ def upgrade(
         raise typer.Exit(7)
 
     migrate.record_version(target)
+    with _ledger(settings) as store:
+        audit.record(
+            store,
+            "upgrade",
+            f"upgraded to schema {target}: "
+            + ", ".join(f"{step.version:03d} {step.name}" for step, _ in outstanding)
+            + " — verified against archive/",
+        )
     console.print(f"\n[green]upgraded to schema {target}[/green] and verified.")
 
 

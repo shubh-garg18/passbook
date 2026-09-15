@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flask import current_app, jsonify, request, session
 
-from ... import service
+from ... import audit, service
 from ...config import (
     load_accounts,
     load_attribution,
@@ -715,6 +715,33 @@ def payees_apply():
     if st.passbook_asset_account:
         try:
             with _ledger() as store:
+                # Recorded BEFORE the sync, so the record exists even if the
+                # sync cannot run. What changed is a config decision; whether
+                # the rows caught up is a separate fact, and `resync` records
+                # that one.
+                if renames:
+                    audit.record(
+                        store,
+                        "rename",
+                        "renamed "
+                        + ", ".join(f"{was} → {now}" for was, now in sorted(renames.items())[:4])
+                        + (" and others" if len(renames) > 4 else ""),
+                        count=len(renames),
+                    )
+                if merged:
+                    audit.record(
+                        store,
+                        "categorise",
+                        f"set a category on {len(merged)} payee(s)",
+                        count=len(merged),
+                    )
+                if remove_emptied:
+                    audit.record(
+                        store,
+                        "categorise",
+                        "removed empty categor(y|ies): " + ", ".join(sorted(remove_emptied)),
+                        count=len(remove_emptied),
+                    )
                 synced = _sync_now(store, st)
                 summary += _synced_summary(synced)
         except LedgerError as exc:

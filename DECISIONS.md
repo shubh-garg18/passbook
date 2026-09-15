@@ -4890,3 +4890,178 @@ committed, against `tests/fixtures/statement.xls` and nothing else:
 
 None of that is a test asserting about itself. It is the shipped commands, in
 order, on a database that had never held a row.
+
+---
+
+## 37. Making it hold years
+
+The ledger moved in-house in §36 and every view got correct. None of them got
+*fast*, because nothing had measured them: the fixture is 93 rows, and 93 rows
+hide every mistake in this section.
+
+So a synthetic ten-year ledger was generated — three accounts, four
+transactions a day, tens of thousands of rows — and the endpoints a page load
+actually calls were timed against it. **Every number below is measured, before
+and after.**
+
+| what a page asks | before | after |
+|---|---|---|
+| the balance | 92 ms | 103 ms |
+| the analysis, this month | 1,039 ms | 140 ms |
+| the table, this month | 1,887 ms | 141 ms |
+| the table, everything | 1,861 ms | 169 ms |
+| the table, searched | 1,890 ms | 164 ms |
+| the status strip | 539 ms | 285 ms |
+
+### 37.1 The line that gave it away
+
+> the table, this month — **1,887 ms, to return 100 rows out of the 168 that
+> matched**
+
+Asking for one month cost exactly what asking for ten years cost. That is not
+a slow query; it is the absence of one. Every window, filter, sort and page was
+applied in Python *after* the database had handed over every row an account
+held — so the database did the most expensive possible work, and then most of
+it was thrown away.
+
+Five separate things were wrong, and each was found by measuring rather than by
+reading:
+
+**The window was not a query.** `account_transactions(account)` took no dates.
+It takes them now, and `transactions_account_date` — an index that already
+existed, for exactly this — serves them.
+
+**`GROUP BY` sat below `LIMIT`.** Joining the tags and grouping made the plan
+aggregate every row the account had *before* taking a hundred:
+`HashAggregate (actual rows=…)` feeding `Limit (100)`. Tags are fetched for the
+page that came back instead.
+
+**Then the opposite mistake, one layer down.** Sending a page's hundred ids
+back as a parameter is right; sending a bulk read's tens of thousands is not —
+an eighth of the request went into `psycopg.types.array.dump_list`, dumping a
+parameter, before the query was sent. A bulk read passes the predicate it
+already used and lets the server re-derive the set.
+
+**One unindexed arm scanned the whole table.** The text search is an OR over
+four columns, and three of them had trigram indexes. Three is the same as none:
+the planner cannot bitmap what it cannot index, so it scanned. The fourth
+column got an index.
+
+**A subquery in that OR did the same thing again.** Searching tags by pattern —
+`EXISTS (… WHERE g3.external_id = t.external_id …)`, and `IN (SELECT …)` when
+the first was rewritten — gave the planner nothing to estimate and it abandoned
+the bitmap both times. Tags are a tiny closed vocabulary, so they are resolved
+to names in one cheap query first; when nothing matches, which is the usual
+case, the arm is left out entirely.
+
+### 37.2 The bug the benchmark found on the way past
+
+`/api/analysis?range=month` returned **zero spend**. In green, with no error.
+
+`_splits_within` read each row's date as `split["date"]` — the field name the
+*previous* store used. After §36 that key simply was not there, so every row
+failed the lookup, was skipped, and any window but "everything" reported
+nothing. The suite did not catch it because the tests that exercise windows
+pass rows in directly and the tests that exercise the route do not window.
+
+It is fixed, the window is served by the query now, and the function that
+remains raises on a row with no usable date rather than filtering silently to
+nothing. **A filter that drops what it cannot understand reports zero, and zero
+looks like an answer.**
+
+### 37.3 What was deliberately not made faster
+
+`/api/analysis` over the whole history is still the slowest thing here, and it
+stays that way. It is an aggregation over every row, and the aggregating is
+done by `service.ledger_analysis` — the one function that decides what counts
+as spend, which non-negotiable 9 requires every figure to come from.
+
+Pushing that into SQL would make it quick and would fork the most important
+rule in this repository into two implementations that could disagree. The
+window is what makes it cheap, and the window is a click.
+
+---
+
+## 38. Telling you there is a new version, and not applying it
+
+The goal this serves, in the operator's words: *"if I make a change in future
+so he easily pull that"* — a friend who cloned this should be able to keep up
+without being told how, every time.
+
+**The app detects and explains. One command applies.** That split is a decision,
+not a missing feature.
+
+Applying an update means pulling the repository and rebuilding a container
+image, which needs the Docker socket. The container that would be doing it is
+the one that listens on a port and parses uploaded files — the last place that
+socket may ever appear. A flaw in it would become control of the machine, plus
+the power to delete every backup including the off-site copies.
+`test_ops_only_ever_executes_rclone` asserts at AST level that this process can
+execute nothing but rclone, and an in-app updater would be the first thing to
+break it.
+
+So Status carries a **Version** card: what you are running, what is published,
+and the list of what changed in between. Underneath it, the one thing to run —
+`make update` on a terminal, `launchers/update-passbook.cmd` as a double-click.
+There is a *"why there is no button here"* disclosure saying the above, because
+an absent button with no explanation reads as an oversight.
+
+### 38.1 What it checks against, and what it costs
+
+GitHub's public API, which needs no account and no token: 60 requests an hour
+unauthenticated, against a check that runs at most once every six hours and
+caches its answer to a file. A machine with no internet sees *"could not
+check"* — `behind` is **tri-state**, and `None` is painted amber, never as a
+tick. Non-negotiable 11, applied to a version number.
+
+### 38.2 Which commit is "running"
+
+Two sources, in order: git, then a stamp file written by `make up` into
+`config/`, which is mounted into the container.
+
+The container has no repository in it — the image holds a copy of the source —
+so on the host git answers and inside the container the stamp does. **The stamp
+is the better answer there**, not a fallback: it records the commit the image
+was *built* from, and someone who pulled without rebuilding is still running
+the old code. "What is running" is the question being asked.
+
+### 38.3 What `make update` does, in the order that cannot lose anything
+
+Back up, pull, rebuild, migrate, verify. It refuses to start on a dirty tree or
+a ZIP download, and `.SHELLFLAGS` is `-eu -o pipefail`, so no step can quietly
+continue past a broken one. **A failure leaves the previous version running**,
+which is the property that matters: half-updated is the only outcome worth
+engineering against.
+
+---
+
+## 39. What changed, and when
+
+**The half with no history was config.** Every statement is in `archive/` and
+`verify-ledger` compares the ledger against it row by row — that is the whole
+§20 apparatus, and it means the *money* has a paper trail. Renaming a payee,
+moving a category, deleting one, removing an account: those change what the
+ledger *says*, and `config/` is deliberately gitignored because it names real
+counterparties, so there was no record of them anywhere.
+
+Which left the operator's own question a week later — *"why does this read
+differently from last time?"* — with no answer but memory.
+
+So: one append-only table, one page, an eye in the account menu.
+
+**It is a record, never a source.** Nothing reads it back to compute a figure.
+`ledger_analysis` remains the only thing that says what was spent and
+`verify-ledger` the only thing that says whether the rows are right — an audit
+log that started answering those questions would be a second copy of the truth,
+which is the mistake this project keeps not making. The page says so, in as
+many words, under *"what this does and does not tell you"*.
+
+**Writing it can never fail the thing it records.** A backup that worked and an
+audit row that did not is a backup that worked. `audit.record` swallows its own
+failures, in one place, deliberately — and that is the only swallowing allowed
+anywhere in this repository, because every caller is an action already
+finished.
+
+**It stores sentences, not rows.** The action, a summary written where the
+thing happened, and a small JSON detail. Never a narration, never an account
+number, never a copy of a transaction.

@@ -8,7 +8,7 @@ from datetime import datetime
 
 from flask import current_app, jsonify, request
 
-from ... import backup, ops, reminders, service
+from ... import audit, backup, ops, reminders, release, service
 from ...config import (
     load_accounts,
     load_settings,
@@ -62,6 +62,14 @@ def backup_run():
         return _fail(str(exc), "backup", 500)
 
     log.warning("backup taken from the UI: %s", result.dump)
+    # Best-effort, and after the fact. A backup that worked and an audit row
+    # that did not is a backup that worked — `audit.record` swallows its own
+    # failures for exactly this reason.
+    try:
+        with _ledger() as store:
+            audit.record(store, "backup", f"took a database dump — {result.dump}")
+    except LedgerError:
+        pass
     return jsonify(
         {
             "ok": True,
@@ -247,6 +255,86 @@ def reminder_ics():
             # back yesterday's schedule after an edit.
             "Cache-Control": "no-store",
         },
+    )
+
+
+# --- what happened ----------------------------------------------------------
+
+
+@api.get("/activity")
+@A.login_required
+def activity():
+    """What has been done to this ledger, newest first.
+
+    **Config is the half this exists for.** Every statement is in `archive/`
+    and `verify-ledger` compares the ledger against it, so the rows have a
+    paper trail already. Renaming a payee, moving a category, deleting one,
+    removing an account — those change what the ledger *says* and left no trace
+    anywhere, because `config/` is gitignored and has no history.
+
+    It reports and never computes. No figure on any page comes from here.
+    """
+    action = (request.args.get("action") or "").strip() or None
+    try:
+        limit = min(500, max(1, int(request.args.get("limit") or 200)))
+    except ValueError:
+        limit = 200
+
+    entries = []
+    error = None
+    try:
+        with _ledger() as store:
+            entries = audit.history(store, limit=limit, action=action)
+    except LedgerError as exc:
+        error = str(exc)
+
+    return jsonify(
+        {
+            "entries": entries,
+            "actions": list(audit.ACTIONS),
+            "selected": action,
+            "error": error,
+        }
+    )
+
+
+# --- updates ----------------------------------------------------------------
+
+
+@api.get("/update")
+@A.login_required
+def update_available():
+    """Is there a newer passbook, and what changed in it?
+
+    **This route reports. It does not update**, and that is a decision rather
+    than an omission. Applying an update means pulling the repository and
+    rebuilding an image, which needs the Docker socket — and the one container
+    that listens on a port and parses uploaded files is the last place that
+    socket may ever appear. `test_ops_only_ever_executes_rclone` asserts at AST
+    level that this process can execute nothing but rclone, and shipping an
+    updater here would be the first thing to break it.
+
+    So the page names the one command to run. On Windows that command is a
+    file to double-click.
+    """
+    found = release.check(force=request.args.get("force") == "1")
+    return jsonify(
+        {
+            "current": found.current[:7],
+            "currentDate": found.current_date,
+            "latest": found.latest[:7],
+            "latestDate": found.latest_date,
+            # Tri-state. `null` is "could not check", which the page shows in
+            # amber — never as a tick, and never as "you are behind" either.
+            "behind": found.behind,
+            "changes": found.commits,
+            "error": found.error,
+            # What to run. Sent by the server so the page cannot drift from the
+            # Makefile, and so a Windows user is told about the launcher rather
+            # than a command they have no shell for.
+            "command": "make update",
+            "windows": "launchers\\update-passbook.cmd",
+        }
     )
 
 

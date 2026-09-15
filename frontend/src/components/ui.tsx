@@ -25,6 +25,17 @@ export function Cross({ title }: { title?: string }) {
   )
 }
 
+export function Eye({ title }: { title?: string }) {
+  return (
+    <svg className="mark" width="16" height="16" viewBox="0 0 16 16" role="img"
+         aria-label={title ?? 'activity'}>
+      <path d="M1 8s2.6-4.2 7-4.2S15 8 15 8s-2.6 4.2-7 4.2S1 8 1 8Z" fill="none"
+        stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  )
+}
+
 export function Arrow() {
   return (
     <svg className="mark" width="14" height="10" viewBox="0 0 16 10" aria-hidden="true">

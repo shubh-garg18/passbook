@@ -155,21 +155,30 @@ def _iso(value: date | None) -> str | None:
 
 
 def _splits_within(splits: list[dict], start: date | None, end: date | None) -> list[dict]:
-    """The same window, over the ledger splits rather than parsed transactions.
+    """The same window, over ledger rows rather than parsed transactions.
 
-    A split's `date` is an ISO-8601 *datetime* with an offset
-    (`2026-08-24T00:00:00+05:30`), so it is cut at the `T` rather than parsed:
-    the window is a range of calendar days in `Asia/Kolkata`, and converting to
-    a datetime only to drop the time again invites a timezone shift that would
-    silently move a midnight transaction into the previous day.
+    **A last-resort filter, not the mechanism.** The window belongs in the
+    query — `store.account_transactions` takes it and the index serves it — and
+    everything on the request path passes it there. This stays for a caller
+    holding rows it did not fetch: a test, a rebuild, a preview over a staged
+    statement.
+
+    It also stays because of what it caught. `txn_date` used to be read here as
+    `split["date"]`, the name the previous store used, and after the move that
+    key was simply absent — so every row failed the lookup, was skipped, and
+    **any window but "everything" reported zero**. In green, with no error.
+    A `date` is a `date` now and a missing one raises rather than filtering
+    silently to nothing.
     """
     if start is None and end is None:
         return splits
     out = []
     for split in splits:
-        day = _as_date(str(split.get("date") or "")[:10])
+        day = split["txn_date"]
+        if not isinstance(day, date):
+            day = _as_date(str(day)[:10])
         if day is None:
-            continue
+            raise KeyError("a ledger row with no usable txn_date cannot be windowed")
         if (start is None or day >= start) and (end is None or day <= end):
             out.append(split)
     return out

@@ -8,7 +8,7 @@ from pathlib import Path
 from flask import current_app, jsonify, request, session
 from werkzeug.utils import secure_filename
 
-from ... import service
+from ... import audit, service
 from ...config import (
     RegistryError,
     load_accounts,
@@ -180,6 +180,12 @@ def accounts_add():
                 # account balancing against zero.
                 asset = _store_asset_account(store, asset, parsed.meta)
                 made_asset = True
+                audit.record(
+                    store,
+                    "account",
+                    f"created the asset account {asset!r}, opening "
+                    f"{parsed.meta.opening_balance}",
+                )
     except LedgerError as exc:
         # Nothing has been written to the registry yet, so this is a clean stop.
         return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)

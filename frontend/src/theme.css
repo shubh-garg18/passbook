@@ -4160,3 +4160,59 @@ svg .mark:focus-visible {
   justify-content: flex-end;
 }
 
+
+/* ── Activity: what was done, newest first ────────────────────────────────────
+ *
+ * A log, so it is set in the data face and reads as a list of facts rather
+ * than as prose. The tag is a label, not a status: nothing here is a verdict,
+ * and colouring these like the check marks would imply one.
+ *
+ * `--stamp` and the signal tokens stay out of it entirely — a record of what
+ * happened is not an alarm about it. */
+.activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--data);
+  font-size: 0.82rem;
+}
+.activity li {
+  display: grid;
+  grid-template-columns: 8.5rem 6rem 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--grid);
+}
+.activity li:last-child {
+  border-bottom: 0;
+}
+.activity time {
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.activity__tag {
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  border: 1px solid var(--grid);
+  border-radius: 3px;
+  padding: 0.05rem 0.35rem;
+  text-align: center;
+  white-space: nowrap;
+}
+.activity__what {
+  color: var(--ink);
+}
+
+/* One column on a phone: three columns at 400px puts two words on each line. */
+@media (max-width: 640px) {
+  .activity li {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+  .activity__tag {
+    justify-self: start;
+  }
+}

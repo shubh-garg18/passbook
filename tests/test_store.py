@@ -195,3 +195,102 @@ def test_there_is_no_third_direction():
     store = ledger()
     with pytest.raises(LedgerError, match="not a direction"):
         store.store_transaction(row(kind="opening balance"))
+
+
+# --- reading a lot of rows without reading all of them ------------------------
+
+
+def many(store, n: int = 40, account: str = "Bank savings"):
+    from datetime import timedelta
+
+    first = date(2026, 5, 9)
+    for i in range(n):
+        store.store_transaction(
+            row(
+                f"canara-1111-2026050900{i:04d}",
+                txn_date=first + timedelta(days=i),
+                amount=Decimal(f"{100 + i}.00"),
+                category="Eating out" if i % 2 else "Shopping",
+                description=f"PAYEE{i:03d} (UPI)",
+                counterparty=f"PAYEE{i:03d}",
+                tags=["food"] if i % 3 == 0 else [],
+                kind="deposit" if i % 5 == 0 else "withdrawal",
+            )
+        )
+    return store
+
+
+def test_a_window_is_a_query_not_a_filter():
+    """The window has to be served by the index. Filtering afterwards costs the
+    same as asking for everything — measured, on a synthetic ten-year ledger,
+    one month took as long as ten years."""
+    store = many(ledger())
+    got = store.account_transactions("Bank savings", date(2026, 5, 11), date(2026, 5, 13))
+    assert [r["txn_date"] for r in got] == [
+        date(2026, 5, 11), date(2026, 5, 12), date(2026, 5, 13)
+    ]
+
+
+def test_a_count_does_not_fetch_the_rows_to_count_them():
+    store = many(ledger())
+    assert store.count_transactions("Bank savings") == 40
+    assert store.count_transactions("No such account") == 0
+
+
+def test_search_pages_and_says_how_many_matched():
+    """`matched` is the caption's denominator and a page is a hundred of them,
+    so it cannot be the length of the page."""
+    store = many(ledger())
+    page, matched = store.search_transactions(["Bank savings"], limit=10)
+    assert matched == 40
+    assert len(page) == 10
+
+
+def test_search_narrows_on_every_filter_the_page_offers():
+    store = many(ledger())
+    for kwargs, expected in (
+        ({"kind": "deposit"}, 8),
+        ({"category": "Shopping"}, 20),
+        ({"tag": "food"}, 14),
+        ({"minimum": Decimal("130.00")}, 10),
+        ({"maximum": Decimal("109.00")}, 10),
+        ({"query": "PAYEE007"}, 1),
+    ):
+        _, matched = store.search_transactions(["Bank savings"], **kwargs)
+        assert matched == expected, kwargs
+
+
+def test_search_finds_the_raw_narration_too():
+    """Searching for a bank reference is exactly the case where the payee's
+    name is no help, and it is why this page can replace a general search."""
+    store = ledger()
+    store.store_transaction(row(notes="UPI/DR/412345678901/SOMEONE/YESB"))
+    _, matched = store.search_transactions(["Bank savings"], query="412345678901")
+    assert matched == 1
+
+
+def test_an_empty_category_is_searchable_by_the_name_the_analysis_gives_it():
+    store = ledger()
+    store.store_transaction(row("canara-1111-1", category=""))
+    store.store_transaction(row("canara-1111-2", category="Shopping"))
+    _, matched = store.search_transactions(["Bank savings"], category="(no category)")
+    assert matched == 1
+
+
+def test_search_orders_amounts_as_numbers_not_as_strings():
+    """`"9.00"` sorts above `"10000.00"` lexically, which is the kind of wrong
+    that looks fine."""
+    store = ledger()
+    store.store_transaction(row("canara-1111-1", amount=Decimal("9.00")))
+    store.store_transaction(row("canara-1111-2", amount=Decimal("10000.00")))
+    page, _ = store.search_transactions(["Bank savings"], order="amount")
+    assert [r["amount"] for r in page] == [Decimal("10000.00"), Decimal("9.00")]
+
+
+def test_every_row_comes_back_with_a_tags_list():
+    """Empty where it has none. A caller must never have to tell "no tags" from
+    "tags not loaded"."""
+    store = many(ledger(), 5)
+    page, _ = store.search_transactions(["Bank savings"])
+    assert all(isinstance(r["tags"], list) for r in page)
+    assert any(r["tags"] for r in page) and any(not r["tags"] for r in page)

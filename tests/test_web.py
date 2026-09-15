@@ -2384,12 +2384,36 @@ class FakeLedger(StoreDouble):
             }
         ]
 
-    def account_transactions(self, account):
+    def account_transactions(self, account, start=None, end=None, *, limit=None):
         assert account == self.account
-        return self.splits
+        rows = [
+            s for s in self.splits
+            if (start is None or s["txn_date"] >= start)
+            and (end is None or s["txn_date"] <= end)
+        ]
+        return rows[:limit] if limit is not None else rows
 
     def identities(self, account):
         return {s["external_id"] for s in self.splits if s.get("external_id")}
+
+    def count_transactions(self, account):
+        return len(self.splits)
+
+    def search_transactions(self, accounts, **kw):
+        """The double defers to the real predicate rather than writing a
+        second one — a search fake that matches differently is a search test
+        that passes while the search is wrong."""
+        from passbook.store.memory import MemoryLedger
+
+        scratch = MemoryLedger()
+        scratch._accounts[self.account] = {"name": self.account}
+        for index, row in enumerate(self.splits):
+            # A stored row always has an identity — it is the primary key — but
+            # these fixtures predate that and some carry None. Keying on the
+            # index for those keeps two of them from collapsing into one.
+            key = row.get("external_id") or f"unkeyed-{index}"
+            scratch._rows[key] = {**row, "account": self.account}
+        return scratch.search_transactions([self.account], **kw)
 
     def store_transaction(self, split):
         self.splits.append(split)
@@ -2422,6 +2446,13 @@ def _split(kind, amount, *, category=None, tags=(), when="2026-06-10", external_
         "txn_date": date.fromisoformat(when),
         "description": "",
         "counterparty": "",
+        # Every column the store returns, including the ones that are often
+        # None. A double that omits an optional column is a double whose caller
+        # learns to use `.get`, and `.get` is how a missing column becomes a
+        # silent None instead of a loud error.
+        "txn_time": None,
+        "notes": "",
+        "currency": "INR",
     }
 
 
@@ -2470,11 +2501,20 @@ def test_every_amount_in_the_analysis_is_a_string_never_a_json_number(
     assert isinstance(raw["counted"], int)
 
 
-def test_analysis_joins_the_clock_from_the_archive(
+def test_analysis_reads_the_clock_off_the_row(
     signed_in, app, monkeypatch, config_files
 ):
-    """The clock exists only in the statement (§6.5) — the ledger is never told it.
-    So the hours come from the archive, joined on the bank's transaction id."""
+    """The hour comes from the stored row, not from re-reading the archive.
+
+    It used to be recovered from the statement on every request, joined on the
+    bank's transaction id, because the previous ledger had nowhere to keep a
+    time of day. `txn_time` is a column now — parsed once, when the row is
+    written — so the Day Rail is already in the rows the page fetched.
+
+    That is a correctness improvement as well as a speed one: the join could
+    miss. It was keyed one way and looked up another once already, and a
+    pre-migration row silently lost its hour.
+    """
     shutil.copy(XLS_FIXTURE, app.config["ARCHIVE"] / "statement.xls")
     from passbook import service
 
@@ -2483,10 +2523,13 @@ def test_analysis_joins_the_clock_from_the_archive(
     _fake_ledger(
         monkeypatch,
         [
-            _split(
-                "withdrawal", "10", category="Shopping",
-                when=t.txn_date.isoformat(), external_id=t.txn_id,
-            )
+            {
+                **_split(
+                    "withdrawal", "10", category="Shopping",
+                    when=t.txn_date.isoformat(), external_id=t.txn_id,
+                ),
+                "txn_time": t.txn_time,
+            }
             for t in clocked
         ],
     )
@@ -2495,6 +2538,20 @@ def test_analysis_joins_the_clock_from_the_archive(
     assert sum(body["hours"]) == body["clocked"] == len(clocked)
     assert body["counted"] == len(clocked)
     assert body["coverage"]["from"] == "2026-05-07"
+
+
+def test_a_row_with_no_clock_is_counted_but_not_placed(
+    signed_in, app, monkeypatch, config_files
+):
+    """Not every narration carries a timestamp, and a row without one must not
+    be dropped from the totals to keep a chart tidy."""
+    shutil.copy(XLS_FIXTURE, app.config["ARCHIVE"] / "statement.xls")
+    _fake_ledger(monkeypatch, [_split("withdrawal", "10", category="Shopping")])
+    body = signed_in.get("/analysis").get_json()
+
+    assert body["clocked"] == 0
+    assert sum(body["hours"]) == 0
+    assert body["counted"] == 1
 
 
 def test_analysis_says_which_months_are_partial(signed_in, app, monkeypatch, config_files):

@@ -44,7 +44,7 @@ def _missing(ctx) -> dict[str, tuple[int, int]]:
     marker claiming this is done while the rows disagree is the same failure
     that let a ledger sit at 21 of 93 rows behind an all-green strip.
     """
-    from .. import service
+    from .. import audit, service
 
     known = {a["name"] for a in ctx.store.asset_accounts()}
     statements = service.archived_statements()
@@ -88,7 +88,7 @@ def run(ctx) -> None:
     the earliest statement — without it every figure on the account is short by
     that amount forever, and the balance can never equal the bank's.
     """
-    from .. import service
+    from .. import audit, service
 
     statements = service.archived_statements()
     for account in ctx.registry:
@@ -121,6 +121,14 @@ def run(ctx) -> None:
             already += result.skipped
             failed += result.failed
         ctx.say(f"{account.slug}: wrote {written}, {already} already there, {failed} failed")
+        audit.record(
+            ctx.store,
+            "rebuild",
+            f"rebuilt {account.slug} from archive/: {written} row(s) from "
+            f"{len(mine)} statement(s)",
+            affected=written,
+            account=account.slug,
+        )
         if failed:
             raise RuntimeError(f"{account.slug}: {failed} row(s) could not be written")
 

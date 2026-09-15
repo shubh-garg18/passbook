@@ -14,6 +14,7 @@ ENV_FILE := .env
 URL      := http://localhost:8081
 
 .PHONY: help setup preflight env check up down logs ps backup verify-backup \
+        stamp update \
         verify-ledger upgrade audit-docs dr-drill backup-remote backup-passphrase \
         restore web-password web-totp web-build test doctor sync parse payees \
         fixtures demo-ledger _needs_file
@@ -42,6 +43,7 @@ help:
 	@echo "  make backup-passphrase  create the GPG passphrase (refuses to clobber)"
 	@echo "  make restore  FILE=backups/... CONFIRM=yes   (destructive)"
 	@echo
+	@echo "  make update   pull a new version, rebuild, migrate, verify"
 	@echo "  make upgrade  apply pending migrations (backs up first)"
 	@echo "  make audit-docs  tracked docs must cite fixture values, never a real ledger"
 	@echo
@@ -217,7 +219,16 @@ check:
 
 # ── stack ────────────────────────────────────────────────────────────────────
 
-up: check
+# Stamped before the containers start, not after: the file is mounted into the
+# web container with the rest of `config/`, and it is how the running app knows
+# which commit it was built from. There is no `.git` in the image.
+stamp:
+	@mkdir -p config
+	if git rev-parse HEAD >/dev/null 2>&1; then
+		printf '%s %s\n' "$$(git rev-parse HEAD)" "$$(git log -1 --format=%cs)" > config/.version
+	fi
+
+up: check stamp
 	@$(COMPOSE) up -d --wait
 	echo
 	$(COMPOSE) ps --format 'table {{.Service}}\t{{.Status}}'
@@ -336,6 +347,61 @@ fixtures: _needs_file
 	# RC4-40, like the real export. SPEC §6.8; scripts/pdfwrite.py.
 	uv run python scripts/redact.py "$(FILE)" tests/fixtures/statement.pdf --audit
 	uv run python -m tests.regenerate_golden
+
+# ── updating ─────────────────────────────────────────────────────────────────
+# One command from "there is a new version" to "it is running", in the order
+# that cannot lose data: back up, pull, rebuild, migrate, verify.
+#
+# **It stops at the first failure.** A pull that conflicts, an image that will
+# not build or a migration that cannot verify leaves the previous version
+# running rather than a half-updated one — `.SHELLFLAGS` is `-eu -o pipefail`,
+# so there is no step here that can quietly continue past a broken one.
+#
+# The app cannot run this itself, and that is deliberate: it would need the
+# Docker socket, and the container that parses uploads is the last place that
+# belongs. Status says when there is something to run; this is the running.
+update:
+	@if ! git rev-parse --git-dir >/dev/null 2>&1; then
+		echo "This is not a git checkout, so there is nothing to pull."
+		echo "A ZIP download cannot be updated in place — clone it instead:"
+		echo "  git clone https://github.com/shubh-garg18/passbook.git"
+		echo "then copy your .env, config/ and archive/ across."
+		exit 1
+	fi
+	if [ -n "$$(git status --porcelain -- ':!config' ':!.env' 2>/dev/null)" ]; then
+		echo "You have local changes to tracked files. Commit or stash them first:"
+		git status --short -- ':!config' ':!.env'
+		exit 1
+	fi
+
+	echo "== 1/5  backing up, because the next steps change things =="
+	$(MAKE) --no-print-directory backup
+
+	echo
+	echo "== 2/5  fetching =="
+	before="$$(git rev-parse HEAD)"
+	git pull --ff-only
+	after="$$(git rev-parse HEAD)"
+	if [ "$$before" = "$$after" ]; then
+		echo "Already up to date. Nothing else to do."
+		exit 0
+	fi
+	echo
+	git --no-pager log --oneline "$$before..$$after" | sed 's/^/  /'
+
+	echo
+	echo "== 3/5  rebuilding =="
+	$(MAKE) --no-print-directory up
+
+	echo
+	echo "== 4/5  applying any data migrations =="
+	uv run passbook upgrade
+
+	echo
+	echo "== 5/5  checking the ledger still matches your statements =="
+	uv run passbook verify-ledger
+	echo
+	echo "Updated. $(URL)"
 
 # ── backup / restore ─────────────────────────────────────────────────────────
 # SPEC §11. These dumps are plaintext financial history and live only on this

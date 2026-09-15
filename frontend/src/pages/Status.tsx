@@ -1,9 +1,10 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { api } from '../lib/api'
 import { useBackup } from '../components/reconcile'
-import type { Status, BackupState } from '../lib/types'
+import type { Status, BackupState, UpdateState } from '../lib/types'
 import { Card, Cross, Tick } from '../components/ui'
 import { Skeleton, Why, describe } from '../components/feedback'
 import { count } from '../lib/money'
@@ -76,6 +77,8 @@ export function StatusPage() {
           )}
         </Card>
       </div>
+
+      <UpdateCard />
 
       <Card title="Ledger">
         {data.store.error === null ? (
@@ -184,6 +187,112 @@ function ArtefactTable({
  * git bundle of the source, and there is no repository in this image. The
  * source is on GitHub; the ledger is not anywhere else.
  */
+/**
+ * Whether a newer passbook exists, and the one thing to run.
+ *
+ * **It does not offer a button that updates**, and the absence is the design.
+ * Applying an update rebuilds a container image, which needs the Docker
+ * socket, and the process that listens on a port and parses uploaded files is
+ * the last place that socket belongs — a compromise there would become a
+ * compromise of the machine, plus the power to delete every backup. So this
+ * says what changed and what to run, and the running happens outside.
+ *
+ * Its own query, and a quiet one: it asks GitHub, the answer is cached for
+ * hours, and a machine with no internet sees "could not check" rather than an
+ * error. `behind === null` is that state and is never painted as a tick.
+ */
+function UpdateCard() {
+  const [copied, setCopied] = useState(false)
+  const { data, isPending } = useQuery({
+    queryKey: ['update'],
+    queryFn: () => api.get<UpdateState>('/update'),
+    retry: false,
+    staleTime: 60 * 60 * 1000,
+  })
+
+  if (isPending || !data) return null
+
+  const windows = navigator.platform?.toLowerCase().includes('win')
+  const how = windows ? data.windows : data.command
+  const copy = () => {
+    navigator.clipboard?.writeText(how).then(
+      () => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      },
+      () => undefined,
+    )
+  }
+
+  return (
+    <Card title="Version" state={data.behind === null ? 'warn' : undefined}>
+      {data.behind === null ? (
+        <>
+          <p className="muted">
+            {data.current ? (
+              <>
+                Running <code>{data.current}</code>
+                {data.currentDate && ` from ${data.currentDate}`}.
+              </>
+            ) : (
+              'Version unknown.'
+            )}
+          </p>
+          <p className="warn">Could not check for updates — {data.error}</p>
+        </>
+      ) : data.behind ? (
+        <>
+          <p className="figure">Update available</p>
+          <p className="muted">
+            You are on <code>{data.current}</code> from {data.currentDate};{' '}
+            <code>{data.latest}</code> was published on {data.latestDate}.
+          </p>
+          {data.changes.length > 0 && (
+            <ul className="changes">
+              {data.changes.map((c) => (
+                <li key={c.sha}>
+                  <span className="muted">{c.date}</span> {c.title}
+                </li>
+              ))}
+            </ul>
+          )}
+          <p>
+            {windows ? 'Double-click' : 'Run'} <code>{how}</code>
+            {'. '}
+            It backs up first, then pulls, rebuilds and checks your ledger
+            against your statements. Nothing is half-applied if a step fails.
+          </p>
+          <div className="actions">
+            <button type="button" onClick={copy}>
+              {copied ? 'Copied' : 'Copy the command'}
+            </button>
+          </div>
+          <Why label="Why there is no button here">
+            <p>
+              Updating rebuilds this container, which needs control of Docker.
+              Giving that to the one process that listens on a port and reads
+              uploaded files would turn any flaw in it into control of the whole
+              machine — including the power to delete your backups. So passbook
+              tells you, and you run it.
+            </p>
+          </Why>
+        </>
+      ) : (
+        <>
+          <p className="ok">
+            <Tick title="up to date" /> Up to date
+          </p>
+          <p className="muted">
+            <code>{data.current}</code>
+            {data.currentDate && ` from ${data.currentDate}`}
+          </p>
+        </>
+      )}
+    </Card>
+  )
+}
+
+
 function BackupNow() {
   const backup = useBackup()
   const { data } = useQuery({

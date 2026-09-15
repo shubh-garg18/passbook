@@ -378,11 +378,19 @@ def _fake_ledger_two(monkeypatch, per_account):
                 for name, (bal, _) in per_account.items()
             ]
 
-        def account_transactions(self, account):
-            return per_account[account][1]
+        def account_transactions(self, account, start=None, end=None, *, limit=None):
+            rows = [
+                r for r in per_account[account][1]
+                if (start is None or r["txn_date"] >= start)
+                and (end is None or r["txn_date"] <= end)
+            ]
+            return rows[:limit] if limit is not None else rows
 
         def identities(self, account):
             return {r["external_id"] for r in per_account.get(account, (None, []))[1]}
+
+        def count_transactions(self, account):
+            return len(per_account.get(account, (None, []))[1])
 
     monkeypatch.setattr(api_base, "open_ledger", lambda *a, **k: Fake())
 
@@ -397,6 +405,13 @@ def _split(external_id, amount="10", kind="withdrawal", category="Shopping"):
         "txn_date": date(2026, 6, 10),
         "description": "",
         "counterparty": "",
+        # Every column the store returns, including the ones that are often
+        # None. A double that omits an optional column is a double whose caller
+        # learns to use `.get`, and `.get` is how a missing column becomes a
+        # silent None instead of a loud error.
+        "txn_time": None,
+        "notes": "",
+        "currency": "INR",
     }
 
 

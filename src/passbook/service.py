@@ -41,6 +41,7 @@ from .rules import (  # noqa: F401
     predict_tags,
     rule_categories,
 )
+from . import audit
 from .push import PushResult, push_transactions
 from .store import LedgerError, LedgerStore, open_ledger
 from .identity import (  # noqa: F401  (re-exported, §119)
@@ -326,13 +327,28 @@ def push_statement(
     store = store or open_ledger(settings)
     try:
         target = account or resolve_account(parsed.meta, settings, store=store)
-        return push_transactions(
+        result = push_transactions(
             store,
             parsed.transactions,
             target,
             rules=load_rules(),
             threshold=settings.large_txn_threshold,
         )
+        if result.pushed:
+            audit.record(
+                store,
+                "import",
+                f"imported {parsed.path.name}: {result.pushed} new row(s), "
+                f"{result.skipped} already there",
+                affected=result.pushed,
+                account=getattr(target, "slug", str(target)),
+                # The period, not the rows. A record of what happened, never a
+                # second copy of what happened to.
+                period=[parsed.meta.period_from.isoformat(),
+                        parsed.meta.period_to.isoformat()],
+                failed=result.failed,
+            )
+        return result
     finally:
         if owned:
             store.close()
@@ -815,6 +831,21 @@ def sync_ledger(
             result.updated += 1
         if on_progress:
             on_progress(result)
+
+    if result.updated:
+        renamed = sum(1 for c in changes if c.name_changed)
+        recategorised = sum(1 for c in changes if c.category_changed)
+        audit.record(
+            store,
+            "resync",
+            f"applied config to {result.updated} row(s)"
+            + (f" — {renamed} renamed" if renamed else "")
+            + (f", {recategorised} re-categorised" if recategorised else ""),
+            affected=result.updated,
+            renamed=renamed,
+            recategorised=recategorised,
+            failed=result.failed,
+        )
     return result
 
 
@@ -1090,12 +1121,18 @@ def balance_series(
 def _split_amount(split: dict) -> Decimal:
     """The row's amount, to the paisa. Decimal, never float (non-negotiable 1).
 
-    `NUMERIC` already reads back as `Decimal`, so this is a quantize rather
-    than a parse — but it still goes through `str`, because a row can reach
-    here from a test fixture or from an archive rebuild as well as from the
-    database.
+    `NUMERIC` reads back as a `Decimal` already quantized to two places, so the
+    common path returns it untouched. It used to go through `Decimal(str(x))`
+    unconditionally — a round trip out to text and back for every row, on the
+    one function called once per row: 0.29s of a 2.2s request, doing nothing.
+
+    The slow path stays for a row that reached here from a fixture or an
+    archive rebuild, where the amount may be a string.
     """
-    return Decimal(str(split.get("amount") or "0")).quantize(_CENT)
+    amount = split.get("amount")
+    if type(amount) is Decimal and amount.as_tuple().exponent == -2:
+        return amount
+    return Decimal(str(amount or "0")).quantize(_CENT)
 
 
 def _split_day(split: dict) -> date | None:
@@ -1749,8 +1786,15 @@ def verify_ledger(
             )
         ])
 
-    splits = store.account_transactions(account.asset_account)
-    raw_ids = [str(s["external_id"]) for s in splits if s.get("external_id")]
+    # **Identities, not rows.** Every check below reads `external_id` and
+    # nothing else, and asking for whole rows to look at one column of them is
+    # what made this the slowest thing on a page load: measured on ten years of
+    # history, 286ms per account against 21ms for the ids alone.
+    #
+    # Equivalent, not merely cheaper: `external_id` is the primary key, so the
+    # set and the list hold the same members. The repeat this check counts is
+    # two DIFFERENT ids mapping to one bank id, which a set of ids still shows.
+    raw_ids = sorted(str(i) for i in store.identities(account.asset_account) if i)
     # Tolerant read (§21.1): a row pushed before the migration carries the bank's
     # bare id, one pushed after carries `<slug>-<txn_id>`. Both map to the same
     # transaction, and comparing them any other way would report the entire

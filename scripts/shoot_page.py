@@ -8,6 +8,10 @@ a new user is in the first time they need Add a bank.
 
     uv run --with playwright --with pyotp --with waitress \
         python scripts/shoot_page.py /banks/add add-bank r1
+
+Add `--hero` for a README picture: the viewport only, at 1x. A full-page
+capture of a long page is a ten-thousand-pixel image, which is a wall a reader
+scrolls past rather than a picture they look at.
 """
 
 from __future__ import annotations
@@ -32,6 +36,13 @@ CHROME = os.environ.get("PW_CHROME")
 
 def main() -> int:
     route, label, tag = sys.argv[1], sys.argv[2], sys.argv[3]
+    # `--hero` captures the VIEWPORT rather than the whole page.
+    #
+    # A full-page capture of a long page is a 10,000-pixel-tall image, and in a
+    # README that is a wall a reader scrolls past rather than a picture they
+    # look at. The first screen is what a screenshot is for; the rest of the
+    # page is what the app is for.
+    hero = "--hero" in sys.argv
     out = ROOT / "docs" / "shots" / tag
     out.mkdir(parents=True, exist_ok=True)
 
@@ -39,8 +50,15 @@ def main() -> int:
         username=USER,
         password_hash=webauth.hash_password(PASSWORD),
         totp_secret=SECRET,
-        backup_codes=[],
+        # A full set, so the "0 backup codes left" warning does not appear in
+        # a picture of a healthy ledger. The warning is correct and wanted on a
+        # real install; it is demo furniture in a screenshot of a feature.
+        backup_codes=[webauth.hash_password(f"code-{i}") for i in range(8)],
     )
+    # A hero shot is for a README, where one image per page is the point, and
+    # at 1x it is already 1440 wide — plenty, and a quarter of the bytes.
+    scale = 1 if hero else 2
+
     with tempfile.TemporaryDirectory() as tmp:
         port = start(auth, Path(tmp))
         base = f"http://127.0.0.1:{port}"
@@ -49,7 +67,7 @@ def main() -> int:
             for theme in ("light", "dark"):
                 for size, viewport in (("desktop", DESKTOP), ("mobile", MOBILE)):
                     ctx = browser.new_context(
-                        viewport=viewport, color_scheme=theme, device_scale_factor=2
+                        viewport=viewport, color_scheme=theme, device_scale_factor=scale
                     )
                     page = ctx.new_page()
                     sign_in(page, base, auth)
@@ -65,7 +83,7 @@ def main() -> int:
                         print(f"  !! {label}-{theme}-{size}: still loading after 15s")
                     page.wait_for_timeout(400)
                     shot = out / f"{label}-{theme}-{size}.png"
-                    page.screenshot(path=str(shot), full_page=True)
+                    page.screenshot(path=str(shot), full_page=not hero)
                     print(f"  {shot.relative_to(ROOT)}")
                     ctx.close()
             browser.close()

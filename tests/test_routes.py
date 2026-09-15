@@ -73,8 +73,8 @@ def test_the_route_count_is_the_one_the_split_produced():
     and emailed sign-in recovery to 53. Moving the ledger in-house took it back
     to 52: `/bootstrap` pushed `rules.yaml` into a separate rules engine, and
     there is no separate rules engine — the rules are applied when a row is
-    written."""
-    assert len(declared()) == 52
+    written. `/update` and `/activity` took it to 54."""
+    assert len(declared()) == 54
 
 
 @pytest.mark.parametrize(

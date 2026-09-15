@@ -37,6 +37,7 @@ import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from . import audit
 from .store import LedgerError
 
 log = logging.getLogger(__name__)
@@ -112,4 +113,14 @@ def purge(store, candidates: list[Candidate], on_progress=None) -> PurgeResult:
             result.deleted += 1
         if on_progress:
             on_progress(result)
+
+    if result.deleted or result.failed:
+        audit.record(
+            store,
+            "purge",
+            f"deleted {result.deleted} row(s)"
+            + (f", {result.failed} failed" if result.failed else ""),
+            affected=result.deleted,
+            failed=result.failed,
+        )
     return result

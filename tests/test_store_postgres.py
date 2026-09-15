@@ -70,8 +70,13 @@ def store():
     try:
         yield opened
     finally:
-        for row in opened.account_transactions(ACCOUNT):
-            opened.delete_transaction(row["external_id"])
+        for stored in opened.account_transactions(ACCOUNT):
+            opened.delete_transaction(stored["external_id"])
+        # The audit entries these tests wrote, and only those: the table is
+        # append-only by design, so a test that leaves rows in it is a test
+        # that pollutes a real operator's history.
+        with opened._conn.cursor() as cur:
+            cur.execute("DELETE FROM audit WHERE summary IN ('one', 'two')")
         opened.close()
 
 
@@ -187,3 +192,70 @@ def test_a_ledger_that_is_not_there_gives_up_rather_than_hanging():
         # timeout rather than about which port was drawn.
         PostgresLedger("postgresql://nobody:nothing@127.0.0.1:5999/nowhere")
     assert time.monotonic() - start < CONNECT_TIMEOUT * 3
+
+
+# --- the reads a page actually makes ------------------------------------------
+
+
+def test_the_window_is_served_by_the_index(store):
+    """Not a Python filter over everything. The index is on
+    `(account, txn_date)` precisely so that "this month" reads a month."""
+    from datetime import timedelta
+
+    for i in range(6):
+        store.store_transaction(row(str(i), txn_date=date(2026, 5, 9) + timedelta(days=i)))
+    got = store.account_transactions(ACCOUNT, date(2026, 5, 11), date(2026, 5, 12))
+    assert [r["txn_date"] for r in got] == [date(2026, 5, 11), date(2026, 5, 12)]
+
+
+def test_search_matches_the_same_things_the_double_does(store):
+    """The double is held to this, not the other way round — a fake that
+    matches more than the database makes a search test green and a search
+    wrong."""
+    store.store_transaction(row("a", description="ZOKVEX QI (UPI)", category="Eating out",
+                                tags=["food"], amount=Decimal("65.00")))
+    # A different counterparty as well as a different description: the default
+    # row carries `ZOKVEX QI` in both, and leaving it made the first case match
+    # twice — which is the search doing its job over the column the test forgot.
+    store.store_transaction(row("b", description="Employer (NEFT)", counterparty="Employer",
+                                category="Salary", kind="deposit", tags=[],
+                                amount=Decimal("9000.00")))
+
+    for kwargs, expected in (
+        ({"query": "zokvex"}, 1),          # case-insensitive
+        ({"query": "UPI/DR"}, 2),          # the raw narration
+        ({"query": "salary"}, 1),          # the category
+        ({"query": "food"}, 1),            # a tag, resolved before it joins
+        ({"kind": "deposit"}, 1),
+        ({"category": "Eating out"}, 1),
+        ({"tag": "food"}, 1),
+        ({"minimum": Decimal("100")}, 1),
+        ({"maximum": Decimal("100")}, 1),
+    ):
+        _, matched = store.search_transactions([ACCOUNT], **kwargs)
+        assert matched == expected, kwargs
+
+
+def test_a_page_is_a_page_and_matched_is_the_whole_answer(store):
+    for i in range(7):
+        store.store_transaction(row(str(i)))
+    page, matched = store.search_transactions([ACCOUNT], limit=3)
+    assert matched == 7 and len(page) == 3
+    second, _ = store.search_transactions([ACCOUNT], limit=3, offset=3)
+    assert {r["external_id"] for r in page} & {r["external_id"] for r in second} == set()
+
+
+def test_count_does_not_fetch(store):
+    for i in range(4):
+        store.store_transaction(row(str(i)))
+    assert store.count_transactions(ACCOUNT) == 4
+
+
+def test_the_audit_log_is_append_only_and_reads_newest_first(store):
+    store.record_event("import", "one", {"a": 1}, 3)
+    store.record_event("rename", "two", {}, None)
+    entries = store.events()
+    assert [e["summary"] for e in entries[:2]] == ["two", "one"]
+    assert entries[1]["detail"] == {"a": 1}
+    assert entries[1]["affected"] == 3
+    assert [e["action"] for e in store.events(action="rename")] == ["rename"]

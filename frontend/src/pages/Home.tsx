@@ -19,7 +19,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { api } from '../lib/api'
-import type { Analysis, Overview, Status, SyncStatus } from '../lib/types'
+import type { Analysis, Overview, Status, SyncStatus, UpdateState } from '../lib/types'
 import {
   BalanceLine,
   CategoryBars,
@@ -272,6 +272,14 @@ function StatusStrip() {
     queryKey: ['status', param],
     queryFn: () => api.get<Status>(`/status${param}`),
   })
+  // Separate, and allowed to fail: it asks GitHub, and the strip must render
+  // whether or not the machine has internet.
+  const { data: update } = useQuery({
+    queryKey: ['update'],
+    queryFn: () => api.get<UpdateState>('/update'),
+    retry: false,
+    staleTime: 60 * 60 * 1000,
+  })
 
   // Silent while loading. A skeleton for a strip that is usually empty is a
   // flash of furniture that then disappears.
@@ -295,6 +303,11 @@ function StatusStrip() {
   }
   if (data.store.error !== null) {
     problems.push({ key: 'store', bad: true, text: 'The ledger is unreachable' })
+  }
+  if (update?.behind) {
+    // Not `bad`: a newer version existing is not a fault, and painting it red
+    // would train the same "ignore the strip" reflex the strip exists to avoid.
+    problems.push({ key: 'update', text: 'A new version is available' })
   }
   if (data.backups.ageDays === null) {
     problems.push({ key: 'backup', bad: true, text: 'No backup' })

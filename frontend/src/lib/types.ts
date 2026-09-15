@@ -341,6 +341,38 @@ export type Artefact = {
   ageDays: number
 }
 
+/** Whether a newer passbook has been published.
+ *
+ *  `behind` is tri-state: `null` means the check could not be made — no
+ *  network, a ZIP download with no history, GitHub throttling — which is shown
+ *  in amber and never as a tick. */
+/** What was done to the ledger. A record, never a source: no figure anywhere
+ *  is computed from these entries. */
+export type Activity = {
+  entries: {
+    at: string
+    action: string
+    summary: string
+    detail: Record<string, unknown>
+    affected: number | null
+  }[]
+  actions: string[]
+  selected: string | null
+  error: string | null
+}
+
+export type UpdateState = {
+  current: string
+  currentDate: string
+  latest: string
+  latestDate: string
+  behind: boolean | null
+  changes: { sha: string; title: string; date: string }[]
+  error: string
+  command: string
+  windows: string
+}
+
 export type Status = {
   sync: SyncStatus
   /** Reachability, asked of the ledger rather than inferred from a credential

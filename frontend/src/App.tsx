@@ -23,6 +23,7 @@ import { Payees } from './pages/Payees'
 import { PayeesDiff } from './pages/PayeesDiff'
 import { Reapply } from './pages/Reapply'
 import { ReapplyDone } from './pages/ReapplyDone'
+import { ActivityPage } from './pages/Activity'
 import { StatusPage } from './pages/Status'
 import { Password } from './pages/Password'
 import { AccountsPage } from './pages/Accounts'
@@ -279,6 +280,7 @@ function AccountMenu({ session }: { session: Session }) {
         <p className="menu__who">
           Signed in as <strong>{session.username}</strong>
         </p>
+        <NavLink to="/activity">What has changed</NavLink>
         <NavLink to="/password">Password &amp; second factor</NavLink>
         <NavLink to="/status">Status &amp; backups</NavLink>
         <button
@@ -442,6 +444,7 @@ export default function App() {
             <Route path="/payees/diff" element={<PayeesDiff />} />
             <Route path="/reapply" element={<Reapply />} />
             <Route path="/reapply/done" element={<ReapplyDone />} />
+            <Route path="/activity" element={<ActivityPage />} />
             <Route path="/status" element={<StatusPage />} />
             <Route path="/password" element={<Password />} />
             <Route path="/accounts" element={<AccountsPage />} />

@@ -47,9 +47,20 @@ class FakeLedger(StoreDouble):
             }
         ]
 
-    def account_transactions(self, account):
+    def account_transactions(self, account, start=None, end=None, *, limit=None):
         assert account == self.account
-        return self.splits
+        rows = [
+            r for r in self.splits
+            if (start is None or r["txn_date"] >= start)
+            and (end is None or r["txn_date"] <= end)
+        ]
+        return rows[:limit] if limit is not None else rows
+
+    def identities(self, account):
+        return {str(r["external_id"]) for r in self.splits if r.get("external_id")}
+
+    def count_transactions(self, account):
+        return len(self.splits)
 
 
 def row(external_id, amount="10.00", *, slug="canara-1111"):
@@ -275,38 +286,37 @@ def test_ops_still_cannot_execute_anything_but_rclone():
 # --- the check that could not count -----------------------------------------
 
 
-def test_a_transaction_stored_twice_fails_the_rows_check(archive, settings):
-    """The incident this check missed.
+def test_the_duplicate_this_check_was_written_for_is_now_unwritable(archive, settings):
+    """The incident this check missed, and why the test for it moved.
 
     `rows` compared `set(live) == set(archived)`, so a row written twice was
-    invisible to it: the ledger held more rows than the archive had
-    transactions and the check said "one per archived transaction", in green.
-    The balance check caught it; this one told the operator everything was
-    fine, which is the half that decides where they look.
+    invisible: the ledger held more rows than the archive had transactions and
+    the check said "one per archived transaction", in green. The balance check
+    caught it; this one told the operator everything was fine, which is the
+    half that decides where they look.
 
-    Non-negotiable 11, literally: a set says which ids are present, only a
-    count says how many times.
-
-    The state is now unwritable — `external_id` is the primary key — and the
-    check stays, because a check that cannot fail is the cheapest possible
-    evidence that the guarantee is still the one being relied on.
+    **The state cannot be reached any more.** `external_id` is the primary key,
+    so a second write of one identity is refused by the database — asserted in
+    `test_store.py`, where it belongs, against the constraint that enforces it.
+    What `verify_ledger` reads is the set of identities, and the duplicate it
+    can still see is the one that survives that: two DIFFERENT ids mapping to
+    the same bank id, which the test below covers.
     """
-    ids = all_ids(archive)
-    doubled = ids[:7]
-    verdict = verdict_for(
-        archive,
-        settings,
-        [row(i) for i in ids] + [row(i) for i in doubled]
-    )
+    from passbook.store import LedgerError
+    from passbook.store.memory import MemoryLedger
 
-    rows = check_named(verdict, "rows")
-    assert rows.ok is False
-    assert "7 transaction(s) are in the ledger MORE THAN ONCE" in rows.detail
-    assert "7 extra row(s)" in rows.detail
-    assert doubled[0] in rows.detail
-    # It names what to look at and does not repair it (non-negotiable 12).
-    assert "primary key" in rows.detail
-    assert verdict.ok is False
+    store = MemoryLedger()
+    store.store_account(ACCOUNT, Decimal("12612.64"), date(2026, 5, 6), "INR")
+    row = {
+        "external_id": "canara-1111-20260509000001",
+        "account": ACCOUNT,
+        "kind": "withdrawal",
+        "txn_date": date(2026, 5, 9),
+        "amount": Decimal("10.00"),
+    }
+    store.store_transaction(row)
+    with pytest.raises(LedgerError, match="already in the ledger"):
+        store.store_transaction({**row, "description": "renamed since"})
 
 
 def test_the_rows_check_counts_splits_not_identities(archive, settings):

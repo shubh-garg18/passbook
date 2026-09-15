@@ -64,3 +64,76 @@ CREATE TABLE IF NOT EXISTS transaction_tags (
 );
 
 CREATE INDEX IF NOT EXISTS transaction_tags_tag ON transaction_tags (tag);
+
+-- What happened, and when. Append-only by convention and by the absence of any
+-- code that updates or deletes a row here.
+--
+-- **The gap it closes is config, not money.** Every statement is in `archive/`
+-- and `verify-ledger` compares the ledger against it, so the rows have a paper
+-- trail. Renaming a payee, moving a category, deleting one, removing an
+-- account — those change what the ledger *says* and left no trace anywhere:
+-- `config/` is gitignored because it names real counterparties, so there is no
+-- history of it, and the operator's own question a week later ("why does this
+-- read differently?") had no answer.
+--
+-- Deliberately small. It records the action, a short human sentence, and a
+-- JSON detail for the things worth naming. It is **not** a second copy of the
+-- ledger and must never become one: nothing here is read back to compute a
+-- figure, and `verify-ledger` remains the authority on whether the rows are
+-- right.
+CREATE TABLE IF NOT EXISTS audit (
+    id         BIGSERIAL PRIMARY KEY,
+    at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A short slug: `import`, `rename`, `categorise`, `purge`, `backup`,
+    -- `upgrade`, `account`. Matched on by the page's filter, so it is a
+    -- vocabulary rather than free text.
+    action     TEXT NOT NULL,
+    -- One sentence, already written for a person to read. Composed where the
+    -- thing happened, because that is the only place that knows what it was.
+    summary    TEXT NOT NULL,
+    -- Whatever is worth keeping and is not in the sentence. Never a full row,
+    -- never a narration, never an account number.
+    detail     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- How many ledger rows it touched, where that is a meaningful number.
+    affected   INTEGER
+);
+
+-- The page reads "most recent first", always.
+CREATE INDEX IF NOT EXISTS audit_at ON audit (at DESC);
+
+-- Free-text search over the narration and the payee.
+--
+-- `ILIKE '%…%'` cannot use an ordinary index — there is no prefix to seek on —
+-- so a search of a long history scans every row. A trigram index can serve it,
+-- and `pg_trgm` is a trusted extension, so the database owner can create it
+-- without superuser.
+--
+-- **Both statements tolerate not working.** An operator running a Postgres
+-- built without contrib gets a slower search, not a broken install, and that
+-- is the right trade for a personal ledger: correctness does not depend on
+-- either line. Wrapped in a DO block so a failure is caught rather than
+-- aborting the schema.
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pg_trgm unavailable; text search will scan. %', SQLERRM;
+END $$;
+
+DO $$
+BEGIN
+    CREATE INDEX IF NOT EXISTS transactions_notes_trgm
+        ON transactions USING gin (notes gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS transactions_description_trgm
+        ON transactions USING gin (description gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS transactions_counterparty_trgm
+        ON transactions USING gin (counterparty gin_trgm_ops);
+    -- `category` too, and it is not an afterthought: the search is an OR over
+    -- four columns, and ONE unindexed arm makes the planner scan the table for
+    -- all of them. Measured — with three of the four indexed, a search still
+    -- read every row.
+    CREATE INDEX IF NOT EXISTS transactions_category_trgm
+        ON transactions USING gin (category gin_trgm_ops);
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'trigram indexes not created; text search will scan. %', SQLERRM;
+END $$;

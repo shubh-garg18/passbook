@@ -29,6 +29,7 @@ class MemoryLedger:
     def __init__(self) -> None:
         self._accounts: dict[str, dict] = {}
         self._rows: dict[str, dict] = {}
+        self._events: list[dict] = []
 
     # --- accounts ------------------------------------------------------------
 
@@ -55,10 +56,79 @@ class MemoryLedger:
 
     # --- transactions --------------------------------------------------------
 
-    def account_transactions(self, account: str) -> list[dict]:
-        rows = [dict(r) for r in self._rows.values() if r["account"] == account]
+    def account_transactions(
+        self, account: str, start=None, end=None, *, limit: int | None = None
+    ) -> list[dict]:
+        rows = [
+            dict(r)
+            for r in self._rows.values()
+            if r["account"] == account
+            and (start is None or r["txn_date"] >= start)
+            and (end is None or r["txn_date"] <= end)
+        ]
         rows.sort(key=lambda r: (r["txn_date"], r["external_id"]))
-        return rows
+        return rows[:limit] if limit is not None else rows
+
+    def search_transactions(
+        self, accounts, *, start=None, end=None, kind=None, category=None,
+        tag=None, minimum=None, maximum=None, query=None, order="newest",
+        limit=100, offset=0,
+    ) -> tuple[list[dict], int]:
+        """The same predicate as the schema's, in Python.
+
+        Held to the real one deliberately: a double that matches more than the
+        database does turns a search test green and a search wrong.
+        """
+        wanted = set(accounts)
+        rows = [dict(r) for r in self._rows.values() if r["account"] in wanted]
+
+        def keep(row) -> bool:
+            if start is not None and row["txn_date"] < start:
+                return False
+            if end is not None and row["txn_date"] > end:
+                return False
+            if kind and row["kind"] != kind:
+                return False
+            if category is not None:
+                want = "" if category == "(no category)" else category
+                if row["category"] != want:
+                    return False
+            if tag and tag not in (row["tags"] or []):
+                return False
+            if minimum is not None and row["amount"] < Decimal(str(minimum)):
+                return False
+            if maximum is not None and row["amount"] > Decimal(str(maximum)):
+                return False
+            if query:
+                hay = " ".join(
+                    [
+                        str(row.get("description") or ""),
+                        str(row.get("counterparty") or ""),
+                        str(row.get("category") or ""),
+                        str(row.get("notes") or ""),
+                        str(row["amount"]),
+                        " ".join(row.get("tags") or []),
+                    ]
+                ).lower()
+                if query.lower() not in hay:
+                    return False
+            return True
+
+        rows = [r for r in rows if keep(r)]
+        matched = len(rows)
+
+        orders = {
+            "newest": (lambda r: (r["txn_date"], r["external_id"]), True),
+            "oldest": (lambda r: (r["txn_date"], r["external_id"]), False),
+            "amount": (lambda r: (r["amount"], r["txn_date"]), True),
+            "amount-asc": (lambda r: (r["amount"], r["txn_date"]), False),
+        }
+        key, reverse = orders.get(order, orders["newest"])
+        rows.sort(key=key, reverse=reverse)
+        return rows[offset : offset + limit], matched
+
+    def count_transactions(self, account: str) -> int:
+        return sum(1 for r in self._rows.values() if r["account"] == account)
 
     def identities(self, account: str) -> set[str]:
         return {r["external_id"] for r in self._rows.values() if r["account"] == account}
@@ -129,6 +199,25 @@ class MemoryLedger:
     def __exit__(self, *exc) -> bool:
         self.close()
         return False
+
+    # --- what happened -------------------------------------------------------
+
+    def record_event(self, action: str, summary: str, detail: dict, affected) -> None:
+        from datetime import datetime, timezone
+
+        self._events.append(
+            {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "action": action,
+                "summary": summary,
+                "detail": dict(detail),
+                "affected": affected,
+            }
+        )
+
+    def events(self, limit: int = 200, action: str | None = None) -> list[dict]:
+        rows = [e for e in self._events if not action or e["action"] == action]
+        return list(reversed(rows))[:limit]
 
     def close(self) -> None:
         return None

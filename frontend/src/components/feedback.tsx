@@ -118,7 +118,20 @@ export function describe(error: unknown): { title: string; detail: string } {
       empty_archive: 'Nothing in archive/ to re-push — sync a statement first.',
       too_large: 'A three-month statement is tens of kilobytes. This is not that file.',
     }
-    return { title: 'That did not work', detail: `${error.message} ${next[error.code] ?? ''}`.trim() }
+    // **The hint is dropped when the server already said it.** These two are
+    // written independently — the server names what went wrong, the hint says
+    // what to do — and when they converge the page printed the same sentence
+    // twice: *"Nothing pending — upload a statement first. Upload a statement
+    // first."* Compared without punctuation or case, because "…first." and
+    // "First…" are the same sentence to a reader and different strings to a
+    // computer.
+    const hint = next[error.code] ?? ''
+    const said = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim()
+    const echo = hint && said(error.message).includes(said(hint))
+    return {
+      title: 'That did not work',
+      detail: (echo ? error.message : `${error.message} ${hint}`).trim(),
+    }
   }
   return {
     title: 'That did not work',

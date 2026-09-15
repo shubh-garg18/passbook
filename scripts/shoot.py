@@ -89,6 +89,9 @@ PAGES = [
     ("/transactions", "transactions", False),
     ("/reports", "reports", False),
     ("/reminder", "reminder", False),
+    # What was done to the ledger. Reads the audit table, so it renders with
+    # or without rows — an empty log is a state worth photographing too.
+    ("/activity", "activity", False),
 ]
 
 

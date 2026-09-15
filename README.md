@@ -21,18 +21,19 @@ that read **three times** what was actually spent — because moving money to yo
 own savings is not spending, and a refund is not income. passbook fixes that, and
 shows you what it excluded instead of hiding it.
 
+<sub>**Spent** is not the same as **money out**, and the difference is named rather than hidden:</sub>
+
 ![The Ledger page](docs/screenshots/ledger.png)
 
-<sub>Reports cuts the same analysis five ways — by category, by payee, by tag,
-over time, and the rhythm of the week:</sub>
+<sub>Reports cuts the same analysis five ways — by category, by payee, by tag, over time, and the rhythm of your week:</sub>
 
 ![Reports](docs/screenshots/reports.png)
 
-<sub>Every row, searchable — by payee, category, amount band, tag or date:</sub>
+<sub>Every row, searchable — by payee, category, amount band, tag, or the bank's own narration:</sub>
 
 ![Transactions](docs/screenshots/transactions.png)
 
-<sub>All generated from `tests/fixtures/statement.xls` — never a real ledger.</sub>
+<sub>Every picture here is generated from `tests/fixtures/statement.xls`. Never from a real ledger — the payee names are invented and so are the categories.</sub>
 
 ## Install
 
@@ -57,14 +58,30 @@ It asks you two things: a statement to read, and a password.
 > **Using Claude Code?** Paste this and it does the whole thing:
 > `Clone https://github.com/shubh-garg18/passbook.git and set it up by following its SETUP.md.`
 
-> **Already running an older passbook?** `git pull && make up && make upgrade`.
-> This release keeps the ledger in its own tables instead of a second
-> application, and `make upgrade` rebuilds it from `archive/` — the files your
-> bank produced, which is the only source that cannot have inherited a mistake.
-> [What happens, and what to delete afterwards →](docs/usage.md#coming-from-the-version-that-used-firefly-iii)
+Then everything happens at **http://localhost:8081** — upload, categories,
+reports, backups. No terminal.
 
-Then everything happens at **http://localhost:8081** — upload, push, categories.
-No terminal.
+## Keeping it current
+
+passbook tells you when there is a new version, on its own Status page, with the
+list of what changed. Applying it is one command, or on Windows one double-click:
+
+```bash
+make update          # or: double-click launchers/update-passbook.cmd
+```
+
+It backs up first, then pulls, rebuilds, applies any data migrations, and checks
+every row against the statements in your archive. If a step fails it stops there
+— the version you had is still the one running.
+
+> **There is deliberately no "update" button in the app.** Updating rebuilds the
+> container, which needs control of Docker, and the one process that listens on a
+> port and reads uploaded files is the last place that belongs.
+
+> **Already running the version that used Firefly III?** Same command.
+> `make upgrade` rebuilds your ledger from `archive/` — the files your bank
+> produced, which is the only source that cannot have inherited a mistake.
+> [What happens, and what to delete afterwards →](docs/usage.md#coming-from-the-version-that-used-firefly-iii)
 
 ## Is it for you?
 
@@ -90,8 +107,14 @@ open it.
 | **Payees** | name them once; the naming sticks, and edits reach rows already in the ledger |
 | **Accounts** | add, rename and remove accounts; combine any subset in one view |
 | **Add a bank** | not one of the three that ship? Map your own columns in about ten minutes |
+| **Activity** | what changed your ledger and when — every import, rename, category and deletion |
 | **Reminder** | a real calendar invitation, so it reaches you when the laptop is shut |
 | **Backups** | take a database dump from a button; verified, off-site archives from the host |
+| **Status** | is the ledger reachable, does it still match your statements, is there a new version |
+
+<sub>Activity answers the question a week later — *why does this read differently?*</sub>
+
+![Activity](docs/screenshots/activity.png)
 
 ## What makes it different
 
@@ -116,6 +139,10 @@ wrong number.
   nothing raised anywhere.
 - **Backups are drilled, not assumed.** `make dr-drill` rebuilds the whole ledger
   from the encrypted archives on every run.
+- **It stays fast with years in it.** Every window, filter and search is a
+  database query, not a Python loop over everything you have — measured on a
+  synthetic ten-year ledger, where a page that took nearly two seconds now
+  takes a seventh of one.
 - **A rename reaches the rows you already have.** Editing a payee used to
   change only what *future* imports produced; now it updates the ledger in
   place, touching only the four fields config owns. The ledger **refuses** an
@@ -150,7 +177,8 @@ will. There is no install counter and there is not going to be one.
 | [Usage](docs/usage.md) | the weekly cycle, rules, reports, reminders, more than one account |
 | [Backups](docs/backups.md) | `make backup`, off-site, the recovery runbook |
 | [Operations](docs/operations.md) | what runs, the threat model, tests |
-| [Contributing](CONTRIBUTING.md) · [SPEC](DECISIONS.md) | house rules, and every decision with the measurement behind it |
+| [Contributing](CONTRIBUTING.md) | how to work on it, if you want to |
+| [Decisions](DECISIONS.md) | every decision, with the measurement behind it. Long, and meant to be |
 
 ## Licence
 

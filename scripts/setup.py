@@ -295,6 +295,22 @@ def read_statement(path: Path):
     return meta.account_number, meta.opening_balance, min(t.txn_date for t in transactions)
 
 
+def default_account_name(statement, number: str) -> str:
+    """`Canara ****1111`. The one name that cannot collide and needs no thought.
+
+    Derived from the statement's own filename where it says which bank, and
+    from the last four digits either way — the same shape the app shows for an
+    account nobody has renamed, so the wizard and the UI agree on day one.
+    """
+    banks = ("canara", "sbi", "union", "hdfc", "icici", "axis", "kotak")
+    bank = ""
+    if statement is not None:
+        lowered = statement.name.lower()
+        bank = next((b for b in banks if b in lowered), "")
+    last_four = (number or "")[-4:] or "0000"
+    return f"{bank.capitalize()} ****{last_four}".strip()
+
+
 def create_asset_account(name: str, opening, on) -> bool:
     """The step the old setup got wrong, and now cannot.
 
@@ -466,17 +482,25 @@ def main() -> int:
                 f"opening balance {BOLD}{opening}{OFF} on {first}.")
             set_env("PASSBOOK_ACCOUNT_NUMBER", number)
             if not chosen:
-                chosen = ask("Name this account", "Bank savings")
+                # **Not a question.** The statement already says which bank and
+                # which account, so `Canara ****1111` is a name nothing else
+                # can collide with — and it is exactly what the app shows for
+                # an account nobody has renamed. Asking here made the operator
+                # invent a label before they had seen a single page, which is
+                # the worst possible moment to ask for one.
+                chosen = default_account_name(statement, number)
                 if create_asset_account(chosen, opening, first):
                     say(f"   {GREEN}created {chosen!r} with the statement's opening "
                         f"balance.{OFF}")
                     say(f"   {DIM}Not your CURRENT balance: that counts the closing{OFF}")
                     say(f"   {DIM}figure twice and leaves the account short forever.{OFF}")
+                say(f"   {DIM}Rename it any time from Accounts in the app.{OFF}")
                 set_env("PASSBOOK_ASSET_ACCOUNT", chosen)
         else:
-            # No statement, or one this build cannot read. Ask, as before —
-            # and the first upload will create the account either way.
-            say(f"   {YELLOW}Falling back to asking.{OFF}")
+            # No statement, or one this build cannot read. Ask for the one
+            # thing that cannot be derived, and let the first upload do the
+            # rest — it creates the account with the right opening balance.
+            say(f"   {YELLOW}No statement to read yet.{OFF}")
             if not number:
                 while True:
                     number = ask("Your full bank account number")
@@ -485,10 +509,12 @@ def main() -> int:
                     say(f"   {RED}Digits only, at least 8 of them.{OFF}")
                 set_env("PASSBOOK_ACCOUNT_NUMBER", number)
             if not chosen:
-                chosen = ask("Name this account", "Bank savings")
+                chosen = default_account_name(None, number)
                 set_env("PASSBOOK_ASSET_ACCOUNT", chosen)
-                say(f"   {DIM}It will be created, with the right opening balance,{OFF}")
-                say(f"   {DIM}by the first statement you upload.{OFF}")
+                say(f"   Your account will be called {BOLD}{chosen}{OFF} — rename it")
+                say("   any time from Accounts in the app.")
+                say(f"   {DIM}It is created, with the right opening balance, by the{OFF}")
+                say(f"   {DIM}first statement you upload.{OFF}")
 
     step(5, "A password for passbook itself")
     auth = ROOT / "config" / "web-auth.json"
@@ -508,11 +534,16 @@ def main() -> int:
             say(f"   {YELLOW}Skipped.{OFF} Run `make web-password` when you are ready;")
             say("   the UI will say 'Not set up yet' until you do.")
 
-    say(f"\n{GREEN}{BOLD}Done.{OFF}\n")
-    say(f"  passbook   {BOLD}http://localhost:8081{OFF}")
+    say(f"\n{GREEN}{BOLD}Done. Everything else happens in the app.{OFF}\n")
+    say(f"  {BOLD}http://localhost:8081{OFF}")
     say()
-    say("  Next: download a statement from your bank's net banking, then open")
-    say("  the passbook page and drop the file on Upload.")
+    say("  Next: download a statement from your bank's net banking and drop it")
+    say("  on Upload. The app reads it, checks the arithmetic, and shows you")
+    say("  what it found before anything is saved.")
+    say()
+    say(f"  {DIM}To start it again later, double-click the same launcher you{OFF}")
+    say(f"  {DIM}used just now. To update it later, the app tells you when — and{OFF}")
+    say(f"  {DIM}the launcher beside it does the updating.{OFF}")
     say()
     say(f"  {DIM}Never upload a bank statement to an online converter. It carries{OFF}")
     say(f"  {DIM}your account number, your address and your counterparties' details.{OFF}")
