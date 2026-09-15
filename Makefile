@@ -92,7 +92,9 @@ env:
 	secret=$$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 48)
 	sed -i "s|^PASSBOOK_WEB_SECRET=.*|PASSBOOK_WEB_SECRET=$$secret|" "$(ENV_FILE)"
 	echo "wrote $(ENV_FILE) (mode 600) with a fresh DB_PASSWORD."
-	echo "PASSBOOK_ACCOUNT_NUMBER stays blank until you have a statement to hand."
+	echo "PASSBOOK_ACCOUNT_NUMBER and PASSBOOK_ASSET_ACCOUNT are still blank, and"
+	echo "the stack will not start until they are filled in: run \`make setup\`,"
+	echo "which reads both out of your first statement."
 
 # ── prerequisite checks ──────────────────────────────────────────────────────
 # This gates the other targets. Anything that needs the ledger running is
@@ -134,9 +136,17 @@ check:
 			echo "warn  $(ENV_FILE) is mode $$(stat -c '%a' $(ENV_FILE)); 600 is safer (chmod 600 $(ENV_FILE))"
 		fi
 		set -a; . ./$(ENV_FILE); set +a
-		for v in DB_DATABASE DB_USERNAME DB_PASSWORD TZ; do
+		# PASSBOOK_ACCOUNT_NUMBER and PASSBOOK_ASSET_ACCOUNT are `:?required`
+		# in docker-compose.yml, so a blank one does not start the stack — it
+		# stops `docker compose` with an interpolation error at the last step,
+		# after `make env` has said the value can stay blank for now. Caught
+		# here, where the message can name the command that fills it in.
+		for v in DB_DATABASE DB_USERNAME DB_PASSWORD TZ PASSBOOK_ACCOUNT_NUMBER PASSBOOK_ASSET_ACCOUNT; do
 			if [ -z "$${!v:-}" ]; then
 				echo "FAIL  $(ENV_FILE): $$v is empty"
+				case "$$v" in PASSBOOK_ACCOUNT_NUMBER|PASSBOOK_ASSET_ACCOUNT)
+					echo "      run: make setup — it reads both out of your statement" ;;
+				esac
 				fail=1
 			fi
 		done
