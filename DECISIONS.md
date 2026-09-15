@@ -5513,3 +5513,35 @@ measurement you failed to take.** And a page thousands of pixels tall, scaled
 into a review window, is not looking either: the first read of this same
 screenshot called the amounts fine, the second called them truncated, and only
 the 3× crop settled it.
+
+
+---
+
+## 48. One missing space
+
+Re-checking every page at 320, 390 and 430px after §46 and §47. The check that
+matters is the one §47 needed and neither earlier probe made: for every
+element, find the nearest clipping ancestor and ask whether it can be
+**scrolled**. `auto`/`scroll` is a table you can swipe; `clip`/`hidden` is
+content that is simply gone. Unreachable came back zero on every route at every
+width, and the only clipping left is the table containers, all reachable.
+
+Then, reading the rendered pages at 3× rather than glancing at them scaled
+down — the mistake §47 records — one thing was left:
+
+    <Known />
+    Any other bank needs a one-off description of
+
+**JSX strips the newline and indentation between an element and a following
+text line**, so that rendered as *"…Add an account.Any other bank needs…"*, on
+the page a new user reads precisely when their bank is not one of the ones that
+ship.
+
+Invisible in review and invisible to every test: the words are right, the
+markup is valid, and nothing measures a space. The private repository had the
+identical line, and the test written there failed here on its first run.
+
+It is a shape, so it is checked as one.
+`test_no_jsx_element_is_glued_to_the_words_after_it` flags a self-closing
+component alone on a line followed by a line beginning with a letter; `{' '}`
+is the fix. Zero other occurrences in either repository.

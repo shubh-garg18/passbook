@@ -700,3 +700,35 @@ def test_no_grid_floor_can_exceed_the_screen():
         "ancestor with `overflow-x: clip` makes that content unreachable rather "
         "than scrollable. Write `minmax(min(<floor>, 100%), 1fr)`."
     )
+
+
+def test_no_jsx_element_is_glued_to_the_words_after_it():
+    """`<Known />` on its own line, then a line of prose, renders with no space.
+
+    JSX strips the newline and indentation between an element and a following
+    text line, so `<Known />\\n  Any other bank…` came out as
+    *"…Add an account.Any other bank needs…"* — one missing space in the middle
+    of a sentence on the page a new user reads when their bank is not one of
+    the three that ship.
+
+    Invisible in review and invisible to every test, because the words are
+    right and the markup is valid. It is a shape, so it is checked as a shape:
+    a self-closing component alone on a line, followed by a line that starts
+    with a letter. Writing them on one line, or `{' '}`, is the fix.
+    """
+    import re
+
+    glued = []
+    for path in sorted((ROOT / "frontend" / "src").rglob("*.tsx")):
+        lines = path.read_text().splitlines()
+        for i, line in enumerate(lines[:-1]):
+            if not re.match(r"^\s*<[A-Z]\w*\s*/>\s*$", line):
+                continue
+            nxt = lines[i + 1]
+            if re.match(r"^\s*[A-Za-z]", nxt):
+                glued.append(f"{path.name}:{i + 1} {line.strip()} + {nxt.strip()[:40]!r}")
+
+    assert not glued, (
+        "JSX joins these with no space between them:\n  " + "\n  ".join(glued)
+        + "\nPut them on one line, or end the element line with {' '}."
+    )

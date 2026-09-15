@@ -255,7 +255,7 @@ export function AddBank() {
         {/* SPEC §55. "One bank out of the box" stopped being true when profiles
             started shipping, and the list is the first thing worth knowing on
             this page — most people arriving here do not need it. */}
-        <Known />
+        <Known />{' '}
         Any other bank needs a one-off description of
         where its columns are — no code, and the file never leaves this machine.
       </p>

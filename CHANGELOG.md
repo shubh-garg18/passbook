@@ -27,6 +27,9 @@ ever say no, and now they answer.
   straight away, for when you have just updated and want to see it land.
 - **Commands read as commands.** Messages like *run `make up`* were showing you
   the backtick characters.
+- **A missing space on "Add a bank."** The sentence ran two words together
+  right where it tells you what to do if your bank is not one of the built-in
+  ones.
 - **Reports shows whole amounts on a phone.** Every figure in the category
   breakdown was losing its last character, and the category totals showed only
   their first few digits — the content was wider than the screen and the part
