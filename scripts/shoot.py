@@ -213,18 +213,28 @@ def shoot_written(browser, base: str, auth, out: Path, written: list[str]) -> No
     """
     import os
 
-    scratch = Path(tempfile.mkdtemp(prefix="shots-config-"))
-    shutil.copytree("config", scratch / "config")
-    for name in (".env", "archive", "backups"):
-        source = Path(name).resolve()
-        if source.exists():
-            (scratch / name).symlink_to(source)
+    # **A fresh copy per theme.** One scratch directory shared by both meant the
+    # light pass wrote its category into it and the dark pass then had nothing
+    # left to disagree about: `/payees/diff` rendered with no `.diff` at all and
+    # the shot timed out waiting for it. The second theme has to start from the
+    # same state as the first, and the state is the config on disk.
     origin = Path.cwd()
-    assert (scratch / "config").resolve() != (origin / "config").resolve()
+    scratches: list[Path] = []
+
+    def fresh_scratch() -> Path:
+        scratch = Path(tempfile.mkdtemp(prefix="shots-config-"))
+        scratches.append(scratch)
+        shutil.copytree(origin / "config", scratch / "config")
+        for name in (".env", "archive", "backups"):
+            source = (origin / name).resolve()
+            if source.exists():
+                (scratch / name).symlink_to(source)
+        assert (scratch / "config").resolve() != (origin / "config").resolve()
+        return scratch
 
     try:
-        os.chdir(scratch)
         for theme in ("light", "dark"):
+            os.chdir(fresh_scratch())
             ctx = browser.new_context(viewport=DESKTOP, color_scheme=theme, device_scale_factor=2)
             page = ctx.new_page()
             sign_in(page, base, auth)
@@ -252,7 +262,8 @@ def shoot_written(browser, base: str, auth, out: Path, written: list[str]) -> No
             ctx.close()
     finally:
         os.chdir(origin)
-        shutil.rmtree(scratch, ignore_errors=True)
+        for scratch in scratches:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 
