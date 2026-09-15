@@ -200,6 +200,42 @@ starts with a delete. Without a dump newer than an hour it refuses.
 uv run passbook upgrade --check    # what is pending and why; exits 3 if any
 ```
 
+### Coming from the version that used Firefly III
+
+One command, and it is the same one:
+
+```bash
+git pull && make up && make upgrade
+```
+
+`make upgrade` finds the ledger empty, reads every file in `archive/`, and
+writes your rows into passbook's own tables — with the opening balance taken
+from your earliest statement, which is what makes the balance match the bank's.
+Then it runs `verify-ledger` and records the new version only if that passed.
+
+**Nothing is read out of the old database.** `archive/` holds the files your
+bank produced, every one of them already validated by the balance check, so a
+rebuild from them cannot inherit whatever was wrong in the store it replaces.
+It is also the same path `make dr-drill` exercises on every run.
+
+Afterwards the old container is no longer started, and nothing reads its tables.
+Delete it when you are satisfied:
+
+```bash
+docker rm -f passbook_firefly       # the old container
+```
+
+You can also delete `FIREFLY_TOKEN`, `FIREFLY_URL`, `APP_KEY`, `APP_URL`,
+`SITE_OWNER` and the other `APP_*` lines from `.env`. `make check` says so too.
+Leave `DB_*` exactly as they are: passbook creates its own schema inside the
+database that already exists.
+
+What does not come back: a category you set by clicking a single row in the old
+application's own UI. passbook never saw those. Everything it did set is
+re-derived from `config/rules.yaml` as each row is written, and **Payees** is
+where that decision belongs now — it reaches every row carrying the payee
+rather than the one you clicked.
+
 **The version marker is a record, not the authority.** `config/schema-version`
 holds what this install last recorded, and nothing trusts it — every migration
 decides for itself by looking at the data. Delete the file and the worst that

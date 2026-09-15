@@ -11,11 +11,11 @@ second Canara account emits *the same ids*: measured on the two committed
 fixtures, 93 of 93 identical, and the same masked last four. A dict keyed on the
 bare id merged two accounts and kept 93 of 186 rows with no error at all.
 
-**Why it cannot be an in-place edit.** the ledger's API has no way to change an
-`external_id` without rewriting the row, so the only path is the proven one from
-§19.5: purge, then re-push from `archive/`. That is a delete, which is why this
-migration refuses to start without a fresh dump and why nothing is marked
-applied until §20 passes.
+**Why it cannot be an in-place edit.** `external_id` is the identity a row is
+addressed by, so changing it is not an update — it is a different row. The only
+path is the proven one: purge, then re-push from `archive/`. That is a delete,
+which is why this migration refuses to start without a fresh dump and why
+nothing is marked applied until the ledger verifies.
 """
 
 from __future__ import annotations
@@ -69,11 +69,10 @@ def run(ctx) -> None:
     """Purge and re-push, per account, through the code that already does it.
 
     Nothing bespoke happens here. `ctx.purge_and_repush` is the same path
-    `passbook purge --confirm --yes` and `passbook purge --resume` take: intent
-    is recorded before the first delete, the tombstones are force-deleted so the
-    re-push is not refused as duplicates (§7.3), every archived statement goes
-    back, and the record is cleared only once §20 passes. A second copy of the
-    most dangerous path in this project is the last thing a migration should be.
+    `passbook purge --confirm --yes` takes, followed by the same write `passbook
+    sync` does, and it refuses to delete rows this machine cannot rebuild from
+    `archive/`. A second copy of the most dangerous path in this project is the
+    last thing a migration should be.
     """
     for account in ctx.registry:
         ctx.purge_and_repush(account)

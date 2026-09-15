@@ -57,6 +57,12 @@ It asks you two things: a statement to read, and a password.
 > **Using Claude Code?** Paste this and it does the whole thing:
 > `Clone https://github.com/shubh-garg18/passbook.git and set it up by following its SETUP.md.`
 
+> **Already running an older passbook?** `git pull && make up && make upgrade`.
+> This release keeps the ledger in its own tables instead of a second
+> application, and `make upgrade` rebuilds it from `archive/` — the files your
+> bank produced, which is the only source that cannot have inherited a mistake.
+> [What happens, and what to delete afterwards →](docs/usage.md#coming-from-the-version-that-used-firefly-iii)
+
 Then everything happens at **http://localhost:8081** — upload, push, categories.
 No terminal.
 

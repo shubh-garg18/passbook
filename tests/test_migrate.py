@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import FIXTURE_TXN_COUNT
 from passbook import migrate
 
 
@@ -196,3 +197,89 @@ def test_the_baseline_never_deletes_rows_it_cannot_rebuild():
     )
     m001.run(ctx)
     assert calls == [ctx.registry[0]], "run() delegates; it owns no delete of its own"
+
+
+# ── m002: the rebuild from archive/ ───────────────────────────────────────────
+
+
+def _archive_with_the_fixture(tmp_path, slug="canara-1111"):
+    import shutil
+
+    from conftest import XLS_FIXTURE
+
+    folder = tmp_path / "archive" / slug / "2026-08"
+    folder.mkdir(parents=True)
+    shutil.copy(XLS_FIXTURE, folder / "statement.xls")
+    return tmp_path
+
+
+def _rebuild_ctx(tmp_path, monkeypatch, store=None):
+    from decimal import Decimal  # noqa: F401  (imported for the store's own use)
+
+    from conftest import FIXTURE_ACCOUNT
+    from passbook.config import Account, Settings
+    from passbook.store.memory import MemoryLedger
+
+    monkeypatch.chdir(_archive_with_the_fixture(tmp_path))
+    account = Account(
+        slug="canara-1111",
+        bank="canara",
+        account_number=FIXTURE_ACCOUNT,
+        asset_account="Bank savings",
+    )
+    return _ctx(
+        settings=Settings(passbook_account_number=FIXTURE_ACCOUNT,
+                          passbook_asset_account="Bank savings"),
+        store=store if store is not None else MemoryLedger(),
+        registry=[account],
+    ), account
+
+
+def test_the_rebuild_is_pending_on_an_empty_ledger(tmp_path, monkeypatch):
+    """Which is exactly the state an install upgrading off the old store is in:
+    its rows are in tables that are not ours, and none of them is read."""
+    from passbook.migrations import m002_rebuild_from_archive as m002
+
+    ctx, _ = _rebuild_ctx(tmp_path, monkeypatch)
+    reason = m002.pending(ctx)
+    assert reason is not None
+    assert "0 of 93" in reason
+
+
+def test_the_rebuild_writes_every_archived_row(tmp_path, monkeypatch):
+    from passbook.migrations import m002_rebuild_from_archive as m002
+
+    ctx, account = _rebuild_ctx(tmp_path, monkeypatch)
+    m002.run(ctx)
+
+    rows = ctx.store.account_transactions(account.asset_account)
+    assert len(rows) == FIXTURE_TXN_COUNT
+    assert m002.verify(ctx) is None
+    assert m002.pending(ctx) is None, "and it is a no-op the second time"
+
+
+def test_the_rebuild_sets_the_opening_balance(tmp_path, monkeypatch):
+    """Without it every figure on the account is short by that amount forever,
+    and the balance can never equal the bank's."""
+    from passbook.migrations import m002_rebuild_from_archive as m002
+    from passbook import service
+
+    ctx, account = _rebuild_ctx(tmp_path, monkeypatch)
+    m002.run(ctx)
+
+    live = next(a for a in ctx.store.asset_accounts() if a["name"] == account.asset_account)
+    earliest = min(service.archived_statements(), key=lambda s: s.meta.period_from)
+    assert live["opening_balance"] == earliest.meta.opening_balance
+    assert live["current_balance"] == earliest.meta.closing_balance
+
+
+def test_running_it_twice_writes_nothing_the_second_time(tmp_path, monkeypatch):
+    """`push_statement` skips a row whose identity is already stored, so a
+    rebuild interrupted halfway is finished by running it again."""
+    from passbook.migrations import m002_rebuild_from_archive as m002
+
+    ctx, account = _rebuild_ctx(tmp_path, monkeypatch)
+    m002.run(ctx)
+    before = ctx.store.account_transactions(account.asset_account)
+    m002.run(ctx)
+    assert ctx.store.account_transactions(account.asset_account) == before

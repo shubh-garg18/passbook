@@ -13,6 +13,8 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
+from contextlib import contextmanager
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -47,11 +49,33 @@ from .validate import (
     check,
 )
 
-app = typer.Typer(add_completion=False, help="Canara Bank -> the ledger ingest pipeline.")
+app = typer.Typer(add_completion=False, help="Bank statements -> a ledger you can read.")
 
 TOKEN_WARN_DAYS = 30
 console = Console()
 err = Console(stderr=True)
+
+
+@contextmanager
+def _ledger(settings):
+    """The ledger, or a message and a non-zero exit.
+
+    Every command here opens it the same way, and an unreachable one is an
+    ordinary condition — the containers are stopped, or the port moved — not a
+    bug. Without this it surfaced as a traceback, which reads as "passbook is
+    broken" rather than "start the stack".
+    """
+    try:
+        store = open_ledger(settings)
+    except LedgerError as exc:
+        err.print(f"[red]the ledger did not answer:[/red] {exc}")
+        err.print("Is the stack up? [bold]make up[/bold], then try again.")
+        raise typer.Exit(2) from exc
+    try:
+        yield store
+    finally:
+        store.close()
+
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -585,7 +609,7 @@ def accounts_add(
     settings = load_settings()
     target = (asset_account or "").strip()
     if not target:
-        with open_ledger(settings) as store:
+        with _ledger(settings) as store:
             names = [a["name"] for a in store.asset_accounts()]
         taken = {a.asset_account for a in registry}
         free = [n for n in names if n not in taken]
@@ -664,7 +688,7 @@ def doctor(verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
     # stack already runs, so the only question worth asking is whether it
     # answers — and the way to find that out is to ask it.
     try:
-        with open_ledger(settings) as store:
+        with _ledger(settings) as store:
             accounts = store.asset_accounts()
             names = [a["name"] for a in accounts]
             ok("the ledger answers")
@@ -690,7 +714,7 @@ def doctor(verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
     registry = load_accounts(settings=settings)
     if registry:
         try:
-            with open_ledger(settings) as store:
+            with _ledger(settings) as store:
                 for entry in registry:
                     console.print(
                         f"\n[bold]ledger integrity[/bold] — {entry.slug} ({entry.masked})"
@@ -719,7 +743,7 @@ def _require_pushable(meta):
     """
     settings = load_settings()
     try:
-        with open_ledger(settings) as store:
+        with _ledger(settings) as store:
             account = service.resolve_account(meta, settings, store=store)
     except UnknownAccount as exc:
         err.print(f"[red]unregistered account:[/red] {exc}")
@@ -807,7 +831,7 @@ def verify_ledger_command(
     # arrived is exactly as invisible as the first one's were during §19.
     verdicts = []
     try:
-        with open_ledger(settings) as store:
+        with _ledger(settings) as store:
             for entry in registry:
                 verdicts.append(
                     (entry, service.verify_ledger(store, entry))
@@ -879,7 +903,7 @@ def push(
         console.print(f"rows parsed        {len(transactions)}\nwould push         {len(transactions)}")
         return
 
-    with open_ledger(settings) as store:
+    with _ledger(settings) as store:
         with console.status(f"pushing {len(transactions)} transactions..."):
             result = push_transactions(store, transactions, account)
     _report(result, len(transactions), warnings)
@@ -921,7 +945,7 @@ def sync(
             )
             continue
 
-        with open_ledger(settings) as store:
+        with _ledger(settings) as store:
             with console.status(f"pushing {len(transactions)}..."):
                 result = push_transactions(store, transactions, account)
         _report(result, len(transactions), warnings)
@@ -963,7 +987,7 @@ def resync(
     _setup_logging(verbose)
     settings = load_settings()
 
-    with open_ledger(settings) as store:
+    with _ledger(settings) as store:
         changes, considered = service.reapply_preview(store, settings)
 
         if considered == 0:
@@ -1132,7 +1156,7 @@ def purge(
         err.print("[red]no account given[/red] and PASSBOOK_ASSET_ACCOUNT is unset.")
         raise typer.Exit(5)
 
-    with open_ledger(settings) as store:
+    with _ledger(settings) as store:
         known = {a["name"] for a in store.asset_accounts()}
         if target not in known:
             err.print(f"[red]no asset account named {target!r}[/red]; have {sorted(known)}")
@@ -1287,7 +1311,7 @@ def upgrade(
         raise typer.Exit(5)
 
     registry = load_accounts(settings=settings)
-    with open_ledger(settings) as store:
+    with _ledger(settings) as store:
         ctx = _migration_context(store, settings, registry)
         outstanding = migrate.pending(ctx)
 

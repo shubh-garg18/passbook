@@ -4868,3 +4868,25 @@ exception `test_stack.py` already was.
 It earned its place immediately. `MemoryLedger` was not checking `kind`, so a
 row with a direction the database would have refused went straight in — which
 is precisely the class of gap the file exists to close, found by writing it.
+
+### 36.7 Proven end to end, not assumed
+
+The whole path was walked on a scratch database before any of this was
+committed, against `tests/fixtures/statement.xls` and nothing else:
+
+* `passbook upgrade --check` reported the rebuild pending, and said why —
+  *"the ledger is short of what archive/ holds (canara-1111: 0 of 93)"*.
+* `passbook upgrade` refused without a recent dump, then wrote 93 rows, 0
+  already there, 0 failed.
+* `verify-ledger` came back with four checks passing: the balance matches the
+  fixture's own closing figure, 93 rows one per archived transaction, every id
+  namespaced, and the opening balance set to the statement's.
+* `/api/overview`, `/api/analysis`, `/api/transactions` and `/api/status` all
+  answered 200 off that ledger, with the balance the statement closes at.
+* The Ledger and Status pages were rendered in both themes at both widths and
+  **looked at**. The Status page's token card is gone, its rules-sync button is
+  gone, and the ledger card reports reachability instead of a credential's
+  shape.
+
+None of that is a test asserting about itself. It is the shipped commands, in
+order, on a database that had never held a row.
