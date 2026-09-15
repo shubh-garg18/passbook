@@ -172,6 +172,7 @@ will. There is no install counter and there is not going to be one.
 
 | | |
 |---|---|
+| [What changed](CHANGELOG.md) | what is new, and what it means for you |
 | [What is this?](docs/what-is-this.md) | the idea in plain language — start here if you are not a developer |
 | [SETUP.md](SETUP.md) | install, first run, signing in, when it breaks |
 | [Usage](docs/usage.md) | the weekly cycle, rules, reports, reminders, more than one account |

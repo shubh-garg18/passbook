@@ -1,6 +1,6 @@
 # Using it
 
-[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · **Usage** · [Backups](backups.md) · [Operations](operations.md)
+[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · **Usage** · [Backups](backups.md) · [Operations](operations.md) · [What changed](../CHANGELOG.md)
 
 > **On Windows?** `make` is a Unix tool and Windows does not ship it. Every
 > `make …` below has a one-line equivalent —

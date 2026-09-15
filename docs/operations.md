@@ -1,6 +1,6 @@
 # Operations
 
-[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · [Usage](usage.md) · [Backups](backups.md) · **Operations**
+[← README](../README.md) · [What is this?](what-is-this.md) · [Setup](../SETUP.md) · [Usage](usage.md) · [Backups](backups.md) · **Operations** · [What changed](../CHANGELOG.md)
 
 What runs, what it assumes about your threat model, and how to run the tests.
 

@@ -1,6 +1,6 @@
 [project]
 name = "passbook"
-version = "0.2.0"
+version = "0.3.0"
 description = "Bank statements into a ledger that tells you the truth about your spending"
 requires-python = ">=3.11"
 dependencies = [

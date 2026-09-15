@@ -1,6 +1,6 @@
 # What is this?
 
-[← README](../README.md) · **What is this?** · [Setup](../SETUP.md) · [Usage](usage.md) · [Backups](backups.md) · [Operations](operations.md)
+[← README](../README.md) · **What is this?** · [Setup](../SETUP.md) · [Usage](usage.md) · [Backups](backups.md) · [Operations](operations.md) · [What changed](../CHANGELOG.md)
 
 A plain explanation. No technical words, nothing you need to know beforehand.
 
