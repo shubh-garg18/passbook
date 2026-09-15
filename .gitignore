@@ -16,10 +16,14 @@ config/bills.yaml
 config/accounts.yaml
 !config/*.example.yaml
 
-# Per-install state, not repository state: which migrations this ledger has had
-# applied. SPEC §22.2. Detection reads the ledger, so losing this file costs a
-# re-check, never a re-run of finished work.
+# Per-install state, not repository state. `schema-version` records which
+# migrations this ledger has had applied (§41); `.version` stamps which commit
+# the running app was built from (§38.2). Both describe one machine, and a
+# committed stamp would tell every clone it is at the sha it was written on.
+# Detection reads the ledger and `git rev-parse`, not these files, so losing
+# either costs a re-check, never a re-run of finished work.
 config/schema-version
+config/.version
 
 # Web UI credentials: password hash, TOTP secret, backup-code digests. SPEC §16.2.
 config/web-auth.json
