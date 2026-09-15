@@ -12,11 +12,17 @@ and reads the age from `backups/`, so the single most destructive action in the
 app was gated behind a terminal — and the operator who most needs a backup is
 the one who has never opened one.
 
-**What this cannot do, and says so.** `make backup` also writes a verified git
-bundle of the source. There is no repository in this image and there should not
-be, so a UI backup carries the ledger and the config and not the source. The
-source is on GitHub; the ledger is not anywhere else. The response names the
-difference rather than letting "backed up" mean two things.
+**What it carries, and it says which.** `make backup` also writes a git bundle
+of the source. This did not, because the image holds a copy of the source
+rather than a repository — so the first backup taken from the UI replaced the
+host's tarball for that day with a poorer one and said nothing about it. It
+writes one now: from the repository when compose mounts `.git` read-only, and
+otherwise by carrying forward the bundle from the tarball it is replacing. When
+there is neither, `source_bundle` is False and the response says the source is
+on GitHub rather than implying a complete archive.
+
+Still host-only: **checking that a dump restores**. That needs a scratch
+database, which needs Docker. Taking a dump does not.
 """
 
 from __future__ import annotations
@@ -41,6 +47,8 @@ BACKUPS = Path("backups")
 # passbook` and `GRANT ... TO passbook`, which make the restore fail with
 # `role "passbook" does not exist` on any machine where DB_USERNAME differs.
 # The DR drill caught precisely that.
+BUNDLE_TIMEOUT_SECONDS = 120
+
 PG_DUMP_FLAGS = ("--clean", "--if-exists", "--no-owner", "--no-privileges")
 
 DUMP_TIMEOUT_SECONDS = 300
@@ -71,19 +79,50 @@ class BackupResult:
     dump_bytes: int
     config: str | None
     config_bytes: int
-    # Always false from here. Named so the caller cannot quietly imply
-    # otherwise: `make backup` on the host is still the only thing that writes
-    # a verified source bundle.
+    # Whether `recovery/source.bundle` is in the tarball. Named rather than
+    # assumed, because it is the one part of a backup that can legitimately be
+    # absent — see `_source_bundle`.
     source_bundle: bool = False
 
 
-def _settings():
+def _settings() -> dict[str, str]:
+    """Where to dump from — read from the same place the ledger is read from.
+
+    This used to read `DB_HOST`/`DB_PASSWORD` out of the environment directly,
+    and **compose sets neither**: the web container is handed one assembled
+    `PASSBOOK_DATABASE_URL` and nothing else. So `available()` answered
+    "DB_PASSWORD is not set for this container" on every install that has ever
+    run, and the button this whole module exists for was never once offered.
+    `pg_dump` has been sitting in the image the entire time.
+
+    It was also wrong on the host, quietly: `DB_HOST` there is `db`, left over
+    from the container that used to front this database, and `db` does not
+    resolve from the host. `ledger_dsn` already knows both cases — one source
+    of truth for where the database is, rather than a second one that agrees
+    with the first on no install at all.
+    """
+    parsed: dict[str, str] = {}
+    try:
+        from psycopg.conninfo import conninfo_to_dict
+
+        from .config import load_settings
+
+        parsed = {
+            key: str(value)
+            for key, value in conninfo_to_dict(load_settings().ledger_dsn).items()
+            if value is not None
+        }
+    except Exception:  # a malformed DSN, or settings that will not load
+        log.debug("could not resolve the ledger DSN for a backup", exc_info=True)
+
+    # The environment stays as a fallback so an install that sets DB_* and
+    # nothing else keeps working.
     return {
-        "host": os.environ.get("DB_HOST", "db"),
-        "port": os.environ.get("DB_PORT", "5432"),
-        "database": os.environ.get("DB_DATABASE", "passbook"),
-        "user": os.environ.get("DB_USERNAME", "passbook"),
-        "password": os.environ.get("DB_PASSWORD", ""),
+        "host": parsed.get("host") or os.environ.get("DB_HOST", "db"),
+        "port": parsed.get("port") or os.environ.get("DB_PORT", "5432"),
+        "database": parsed.get("dbname") or os.environ.get("DB_DATABASE", "passbook"),
+        "user": parsed.get("user") or os.environ.get("DB_USERNAME", "passbook"),
+        "password": parsed.get("password") or os.environ.get("DB_PASSWORD", ""),
     }
 
 
@@ -97,9 +136,9 @@ def available() -> tuple[bool, str]:
     if shutil.which("pg_dump") is None:
         return False, "pg_dump is not in this image — rebuild it with `make up`."
     if not _settings()["password"]:
-        return False, "DB_PASSWORD is not set for this container — run `make up`."
+        return False, "the ledger connection has no password — check `.env` and run `make up`."
     if not BACKUPS.is_dir():
-        return False, "backups/ is not mounted into this container."
+        return False, "backups/ is not mounted into this container — run `make up`."
     if not os.access(BACKUPS, os.W_OK):
         return False, "backups/ is mounted read-only."
     return True, ""
@@ -173,16 +212,65 @@ def run(backups: Path | None = None, today: date | None = None) -> BackupResult:
     partial.replace(dump)
     log.warning("database dump written: %s (%d bytes)", dump.name, dump.stat().st_size)
 
-    config, config_bytes = _config_tarball(backups, stamp)
+    config, config_bytes, bundled = _config_tarball(backups, stamp)
     return BackupResult(
         dump=dump.name,
         dump_bytes=dump.stat().st_size,
         config=config,
         config_bytes=config_bytes,
+        source_bundle=bundled,
     )
 
 
-def _config_tarball(backups: Path, stamp: str) -> tuple[str | None, int]:
+def _source_bundle(destination: Path, replacing: Path) -> bool:
+    """Put `recovery/source.bundle` next to the config it belongs with.
+
+    `make backup` on the host has always written one, and this module could
+    not: the image holds a COPY of the source, not a repository. So the first
+    backup taken from the UI replaced the host's tarball of the same day with a
+    poorer one, silently. The ledger is irreplaceable and the config nearly so,
+    and the source is on GitHub — but "backed up" quietly meaning two different
+    things is how the day you need it becomes the day you find out.
+
+    Two ways to have one, in order:
+
+    1. **Write a fresh one.** A repository is reachable when compose mounts
+       `.git` read-only, which it does where the Version card needs it (§123).
+       `git bundle create` reads; it never writes into the repository.
+    2. **Carry the existing one forward.** Otherwise take it out of the tarball
+       this one is about to replace. That is not a stale copy: the source moves
+       when you pull, not when you back up.
+
+    Returns whether there is one. False is an answer, not a failure — an
+    install with neither is a public clone whose source is a `git clone` away,
+    and the caller says so rather than implying a complete archive.
+    """
+    done = subprocess.run(
+        ["git", "bundle", "create", str(destination), "--all"],
+        capture_output=True, text=True, timeout=BUNDLE_TIMEOUT_SECONDS, check=False,
+    ) if shutil.which("git") and Path(".git").exists() else None
+    if done is not None and done.returncode == 0 and destination.exists():
+        return True
+    if done is not None:
+        log.debug("could not bundle the source: %s", done.stderr.strip()[:200])
+        destination.unlink(missing_ok=True)
+
+    if not replacing.exists():
+        return False
+    try:
+        with tarfile.open(replacing, "r:gz") as archive:
+            member = archive.extractfile("recovery/source.bundle")
+            if member is None:
+                return False
+            destination.write_bytes(member.read())
+    except (KeyError, OSError, tarfile.TarError):
+        log.debug("no source bundle to carry forward from %s", replacing.name)
+        destination.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def _config_tarball(backups: Path, stamp: str) -> tuple[str | None, int, bool]:
     """`config/*.yaml` plus APP_KEY. **Never `config/web-auth.json`.**
 
     The yaml is irreplaceable — aliases and rules are months of knowledge that
@@ -196,14 +284,16 @@ def _config_tarball(backups: Path, stamp: str) -> tuple[str | None, int]:
     sources = sorted(Path("config").glob("*.yaml"))
     app_key = os.environ.get("APP_KEY", "")
     if not sources and not app_key:
-        return None, 0
+        return None, 0, False
 
     path = backups / f"config-{stamp}.tar.gz"
     partial = backups / f".config-{stamp}.tar.gz.partial"
     stage = Path(tempfile.mkdtemp(prefix="passbook-cfg-"))
+    bundled = False
     try:
         recovery = stage / "recovery"
         recovery.mkdir()
+        bundled = _source_bundle(recovery / "source.bundle", path)
         if app_key:
             key_file = recovery / "app-key.env"
             key_file.write_text(f"APP_KEY={app_key}\n", encoding="utf-8")
@@ -222,4 +312,4 @@ def _config_tarball(backups: Path, stamp: str) -> tuple[str | None, int]:
 
     partial.chmod(0o600)
     partial.replace(path)
-    return path.name, path.stat().st_size
+    return path.name, path.stat().st_size, bundled

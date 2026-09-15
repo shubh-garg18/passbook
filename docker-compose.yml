@@ -73,6 +73,12 @@ services:
       - ./archive:/app/archive
       # Writable: the payees page edits these after showing a diff.
       - ./config:/app/config
+      # Dumps. `backup.py` runs from here and `pg_dump` is in the image for it;
+      # this mount was the missing half, so the Status page said "no database
+      # dump in backups/" on every install while the host had a shelf of them.
+      # `make check` creates the directory before compose binds it, so it is
+      # owned by you rather than by root. §44.
+      - ./backups:/app/backups
     environment:
       # Inside the compose network the database is `db` on its own port, so the
       # DSN is assembled here rather than read from `.env` — the values there

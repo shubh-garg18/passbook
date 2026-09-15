@@ -58,6 +58,11 @@ yarn-error.log*
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
+
+# Parsed statements and the archive index, remembered so an immutable archive
+# is not re-parsed on every cold start. Both hold real payees and amounts —
+# the same rule as archive/, and both are rebuildable from it.
+.cache/
 *.py[cod]
 .venv/
 venv/

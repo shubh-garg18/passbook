@@ -146,6 +146,29 @@ export function describe(error: unknown): { title: string; detail: string } {
  * to write down — but a paragraph you have read fifty times is furniture. This
  * keeps them one click away and out of the daily path.
  */
+/**
+ * Render a sentence that came from the server, honouring its `code` spans.
+ *
+ * The Python side writes messages like "run `make up`" because that is how
+ * every other sentence in this codebase marks a command. React renders a
+ * string verbatim, so the backticks were arriving on screen as backticks —
+ * three of them on the Status page at once, which is the page a new user is
+ * most likely to be reading closely.
+ *
+ * Deliberately not a markdown renderer. One delimiter, no nesting, no HTML: a
+ * server message is text, and the only markup it may carry is the one this
+ * splits on.
+ */
+export function Sentence({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(/`([^`]+)`/).map((part, i) =>
+        i % 2 === 1 ? <code key={i}>{part}</code> : part,
+      )}
+    </>
+  )
+}
+
 export function Why({ label, children }: { label: string; children: ReactNode }) {
   return (
     <details className="why">

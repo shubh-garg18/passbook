@@ -1,12 +1,12 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { api } from '../lib/api'
 import { useBackup } from '../components/reconcile'
 import type { Status, BackupState, UpdateState } from '../lib/types'
 import { Card, Cross, Tick } from '../components/ui'
-import { Skeleton, Why, describe } from '../components/feedback'
+import { Sentence, Skeleton, Why, describe } from '../components/feedback'
 import { count } from '../lib/money'
 
 export function StatusPage() {
@@ -126,17 +126,24 @@ export function StatusPage() {
         {data.backups.remote.length > 0 ? (
           <ArtefactTable rows={data.backups.remote} />
         ) : (
-          <p className="muted">{data.backups.remoteError}</p>
+          <p className="muted">
+            <Sentence text={data.backups.remoteError ?? 'No off-site copy is configured.'} />
+          </p>
         )}
       </Card>
 
-      <Why label="Why backups cannot be run from here">
+      <Why label="What a backup here does and does not carry">
         <p>
-          It would need the Docker socket — <code>make backup</code> shells into the database
-          container and <code>verify-backup</code> starts a scratch one. Mounting the socket
-          into the container that listens on a port and parses uploads would make a web
-          compromise a host compromise, including the power to delete these archives. Run
-          them from the host; this page tells you whether you need to.
+          The button above writes the same two files <code>make backup</code> writes: your
+          ledger and your <code>config/</code>. It does <em>not</em> write the git bundle of
+          passbook's own source, because this container holds a copy of the source rather
+          than a repository — and the source is on GitHub, while your ledger is not
+          anywhere else.
+        </p>
+        <p>
+          Checking that a dump restores needs a scratch database, which needs Docker, so{' '}
+          <code>make verify-backup</code> stays on the host. Taking one does not: it is a
+          connection to the database this app is already talking to.
         </p>
       </Why>
     </div>
@@ -203,12 +210,31 @@ function ArtefactTable({
  */
 function UpdateCard() {
   const [copied, setCopied] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const queries = useQueryClient()
   const { data, isPending } = useQuery({
     queryKey: ['update'],
     queryFn: () => api.get<UpdateState>('/update'),
     retry: false,
     staleTime: 60 * 60 * 1000,
   })
+
+  // The answer is cached for an hour so that opening the page is not a request
+  // to GitHub every time. That is right for the automatic check and wrong for
+  // a person who has just updated and wants to see it land, so the button
+  // sends `force=1`, which skips the cache on the way out and refills it.
+  const recheck = async () => {
+    setChecking(true)
+    try {
+      queries.setQueryData(['update'], await api.get<UpdateState>('/update?force=1'))
+    } catch {
+      // The route never raises on a failed check — it answers with `behind:
+      // null` and a sentence — so there is nothing to show here that the card
+      // is not about to show properly.
+    } finally {
+      setChecking(false)
+    }
+  }
 
   if (isPending || !data) return null
 
@@ -239,6 +265,9 @@ function UpdateCard() {
             )}
           </p>
           <p className="warn">Could not check for updates — {data.error}</p>
+          <div className="actions">
+            <CheckNow checking={checking} onClick={recheck} />
+          </div>
         </>
       ) : data.behind ? (
         <>
@@ -266,6 +295,7 @@ function UpdateCard() {
             <button type="button" onClick={copy}>
               {copied ? 'Copied' : 'Copy the command'}
             </button>
+            <CheckNow checking={checking} onClick={recheck} />
           </div>
           <Why label="Why there is no button here">
             <p>
@@ -286,9 +316,21 @@ function UpdateCard() {
             <code>{data.current}</code>
             {data.currentDate && ` from ${data.currentDate}`}
           </p>
+          <div className="actions">
+            <CheckNow checking={checking} onClick={recheck} />
+          </div>
         </>
       )}
     </Card>
+  )
+}
+
+/** Ask GitHub now rather than waiting for the hourly answer to expire. */
+function CheckNow({ checking, onClick }: { checking: boolean; onClick: () => void }) {
+  return (
+    <button type="button" className="quiet" onClick={onClick} disabled={checking}>
+      {checking ? 'Checking GitHub…' : 'Check GitHub now'}
+    </button>
   )
 }
 
@@ -302,7 +344,11 @@ function BackupNow() {
   })
 
   if (data && !data.available)
-    return <p className="muted">Cannot back up from here — {data.reason}</p>
+    return (
+      <p className="muted">
+        Cannot back up from here — <Sentence text={data.reason} />
+      </p>
+    )
 
   return (
     <>

@@ -562,3 +562,41 @@ def test_writing_the_selection_notifies_everyone_reading_it():
     write = write[: write.index("\n}\n") + 2]
     assert "notify()" in write, "store() writes localStorage and tells no one"
 
+
+
+def test_the_web_container_can_reach_everything_the_ui_offers():
+    """A button's wiring is in a different file from the button.
+
+    `backup.py` was written to take a dump from the container, `pg_dump` was
+    added to the image for it, the route and the button were built and tested —
+    and `backups/` was never mounted. So the Status page said "no database dump
+    in backups/" on every install while the host had a shelf of them, and the
+    one thing `/reapply/run` requires before it will run was unreachable from
+    the app that requires it. Nothing failed; the feature was simply never
+    available, and no test could see it because every test mounts a tmp_path.
+
+    **`.git` is deliberately not in this list.** The private repository mounts
+    it read-only so its Version card can compare against the checkout; this one
+    asks GitHub instead and does not need it. A clone's `.git/config` can hold
+    a credential in its remote URL, and while a public repository gives nobody
+    a reason to put one there, "nobody would" is not a property this can check
+    on somebody else's machine. The cost of leaving it out is that a backup
+    taken here carries no source bundle unless one is already in the tarball it
+    replaces — and the source is on GitHub, which the toast says. §44.1.
+    """
+    compose = (ROOT / "docker-compose.yml").read_text()
+    web = compose[compose.index("  web:") :]
+    web = web[: web.index("\n  caddy:")] if "\n  caddy:" in web else web
+
+    for mount, why in (
+        ("./backups:/app/backups", "the backup button and the reapply precondition"),
+        ("./inbox:/app/inbox", "uploads"),
+        ("./archive:/app/archive", "archived statements"),
+        ("./config:/app/config", "rules, aliases and the version stamp"),
+    ):
+        assert mount in web, f"web does not mount {mount} — {why} cannot work"
+
+    assert "/app/.git" not in web, (
+        "a clone's .git/config can carry a credential in its remote URL; this "
+        "container parses uploaded files and does not need the repository"
+    )

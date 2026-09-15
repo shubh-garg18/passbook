@@ -10,6 +10,29 @@ double-click on `launchers\update-passbook.cmd`.
 
 ---
 
+## 0.3.1 — the buttons on the Status page work now
+
+Nothing about your ledger changed. Three things on the Status page could only
+ever say no, and now they answer.
+
+- **"Back up now" works.** It said *"Cannot back up from here"* on every
+  install — the container was never given the folder to write into, or the
+  database password to use. Both are wired up. The button writes the same
+  ledger dump and config archive `make backup` writes.
+- **That matters beyond backups.** Re-apply refuses to run without a backup
+  from the last hour, so the most destructive thing in the app was only
+  reachable if you opened a terminal first. Now it is not.
+- **"Check GitHub now."** The update check answers from an hour-old cache so
+  that opening the page is not a request to GitHub every time. The button asks
+  straight away, for when you have just updated and want to see it land.
+- **Commands read as commands.** Messages like *run `make up`* were showing you
+  the backtick characters.
+
+Upgrading is `make update` as always. On Windows, double-click
+`launchers\update-passbook.cmd`.
+
+---
+
 ## 0.3.0 — the ledger moved in-house
 
 **If you are upgrading, one command does it:** `make update`. It backs up,

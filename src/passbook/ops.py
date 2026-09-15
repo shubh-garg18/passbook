@@ -123,9 +123,9 @@ def remote_backups(remote: str | None, limit: int = 12) -> tuple[list[Artefact],
     which is accurate rather than alarming.
     """
     if not remote:
-        return [], "PASSBOOK_RCLONE_REMOTE is not set"
+        return [], "No off-site copy is set up yet. `make backup-remote` on the host does it."
     if shutil.which("rclone") is None:
-        return [], "rclone is not available in this container (by design — see §15.3)"
+        return [], "Off-site copies run from the host — `make backup-remote`."
 
     try:
         result = subprocess.run(

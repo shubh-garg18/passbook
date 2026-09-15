@@ -24,8 +24,20 @@ import pytest
 from passbook import backup
 
 
+#: Captured before any test patches it. `subprocess.run` is implemented on top
+#: of `Popen`, so a fake patched onto the module intercepts every subprocess in
+#: the code under test — including the `git bundle` the config tarball takes.
+_REAL_POPEN = subprocess.Popen
+
+
 class FakePgDump:
-    """A `pg_dump` that writes what it is told to, and exits how it is told to."""
+    """A `pg_dump` that writes what it is told to, and exits how it is told to.
+
+    **Anything that is not pg_dump goes through to the real one.** This is
+    patched onto `subprocess.Popen` rather than onto a call site, so without
+    that it answers for every process the module starts, and the one that
+    bundles the source came back as a pg_dump.
+    """
 
     def __init__(self, payload: bytes = b"", code: int = 0, errors: bytes = b""):
         self.payload = payload
@@ -34,9 +46,11 @@ class FakePgDump:
         self.command: list[str] | None = None
         self.env: dict | None = None
 
-    def __call__(self, command, stdout=None, stderr=None, env=None):
+    def __call__(self, command, *args, **kwargs):
+        if not command or command[0] != "pg_dump":
+            return _REAL_POPEN(command, *args, **kwargs)
         self.command = command
-        self.env = env
+        self.env = kwargs.get("env")
         return _Process(self.payload, self.code, self.errors)
 
 
@@ -89,7 +103,31 @@ def test_unavailable_without_a_password(ready, monkeypatch):
     monkeypatch.delenv("DB_PASSWORD")
     ok, why = backup.available()
     assert not ok
-    assert "DB_PASSWORD" in why
+    assert "no password" in why
+
+
+def test_the_connection_comes_from_the_ledger_dsn(ready, monkeypatch):
+    """Where the dump connects is where the ledger connects, and nowhere else.
+
+    This read `DB_HOST`/`DB_PASSWORD` out of the environment, and **compose
+    sets neither** — the web container is handed one assembled
+    `PASSBOOK_DATABASE_URL`. So `available()` said "DB_PASSWORD is not set for
+    this container" on every install that has ever run, and the button was
+    never once offered, with `pg_dump` sitting in the image for it the whole
+    time. It was wrong on the host too: `DB_HOST` there is `db`, which does not
+    resolve from the host.
+    """
+    monkeypatch.delenv("DB_PASSWORD")
+    monkeypatch.setenv(
+        "PASSBOOK_DATABASE_URL", "postgresql://ledger:from-the-dsn@elsewhere:6000/books"
+    )
+    found = backup._settings()
+    assert found["host"] == "elsewhere"
+    assert found["port"] == "6000"
+    assert found["database"] == "books"
+    assert found["user"] == "ledger"
+    assert found["password"] == "from-the-dsn"
+    assert backup.available() == (True, "")
 
 
 def test_unavailable_when_backups_is_not_mounted(ready):
@@ -105,7 +143,7 @@ def test_available_when_everything_is_there(ready):
 
 def test_run_refuses_rather_than_half_working(ready, monkeypatch):
     monkeypatch.delenv("DB_PASSWORD")
-    with pytest.raises(backup.BackupFailed, match="DB_PASSWORD"):
+    with pytest.raises(backup.BackupFailed, match="no password"):
         backup.run()
 
 
@@ -265,3 +303,84 @@ def test_nothing_partial_is_left_behind_on_success(ready, monkeypatch):
     backup.run(today=date(2026, 9, 3))
 
     assert not list((ready / "backups").glob(".*partial"))
+
+# --- the source bundle -------------------------------------------------------
+#
+# `make backup` on the host has always written one. This module could not, so
+# the first backup taken from the UI replaced the host's tarball for that day
+# with a poorer one and said nothing — the ledger was safe and the archive
+# quietly meant two different things.
+
+
+def _tarball_with_a_bundle(path: Path, payload: bytes = b"a bundle") -> None:
+    stage = path.parent / "stage"
+    (stage / "recovery").mkdir(parents=True, exist_ok=True)
+    (stage / "recovery" / "source.bundle").write_bytes(payload)
+    with tarfile.open(path, "w:gz") as archive:
+        archive.add(stage / "recovery", arcname="recovery")
+
+
+def test_a_bundle_is_carried_forward_when_there_is_no_repository(ready, monkeypatch):
+    """Not a stale copy: the source moves when you pull, not when you back up."""
+    (ready / "config" / "rules.yaml").write_text("categories: {}\n")
+    _tarball_with_a_bundle(ready / "backups" / "config-2026-09-03.tar.gz", b"carried")
+    monkeypatch.setattr(backup.subprocess, "Popen", FakePgDump(_plausible_dump()))
+
+    result = backup.run(today=date(2026, 9, 3))
+
+    assert result.source_bundle is True
+    with tarfile.open(ready / "backups" / result.config) as archive:
+        member = archive.extractfile("recovery/source.bundle")
+        assert member is not None and member.read() == b"carried"
+        # and the config in it is the CURRENT config, not the old tarball's
+        assert "config/rules.yaml" in archive.getnames()
+
+
+def test_no_bundle_anywhere_is_reported_as_no_bundle(ready, monkeypatch):
+    """False is an answer. A public clone's source is a `git clone` away, and
+    the caller says so rather than implying a complete archive."""
+    (ready / "config" / "rules.yaml").write_text("categories: {}\n")
+    monkeypatch.setattr(backup.subprocess, "Popen", FakePgDump(_plausible_dump()))
+
+    result = backup.run(today=date(2026, 9, 3))
+
+    assert result.source_bundle is False
+    with tarfile.open(ready / "backups" / result.config) as archive:
+        assert "recovery/source.bundle" not in archive.getnames()
+
+
+def test_a_repository_is_bundled_rather_than_carried_forward(ready, monkeypatch):
+    """The preferred half, against a real repository — `git bundle` reads the
+    repository and writes only its output, which is why `.git` can be mounted
+    read-only."""
+    import shutil as _shutil
+
+    git = _shutil.which("git")
+    if git is None:
+        pytest.skip("no git on PATH")
+    # The fixture's `which` answers pg_dump for everything; put the real one back.
+    monkeypatch.setattr(backup.shutil, "which", lambda name: git if name == "git" else "/usr/bin/pg_dump")
+
+    # Content first: `git commit` on an empty tree exits 1, and git does not
+    # track empty directories, so `backups/` and `config/` are not content.
+    (ready / "config" / "rules.yaml").write_text("categories: {}\n")
+    for args in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@example.com"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-qm", "fixture"],
+    ):
+        subprocess.run(args, cwd=ready, check=True, capture_output=True)
+    _tarball_with_a_bundle(ready / "backups" / "config-2026-09-03.tar.gz", b"carried")
+    monkeypatch.setattr(backup.subprocess, "Popen", FakePgDump(_plausible_dump()))
+
+    result = backup.run(today=date(2026, 9, 3))
+
+    assert result.source_bundle is True
+    with tarfile.open(ready / "backups" / result.config) as archive:
+        member = archive.extractfile("recovery/source.bundle")
+        assert member is not None
+        written = member.read()
+    assert written != b"carried", "a reachable repository beats carrying one forward"
+    assert written.startswith(b"# v2 git bundle")

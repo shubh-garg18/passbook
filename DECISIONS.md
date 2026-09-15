@@ -5328,3 +5328,68 @@ the one thing here that genuinely needs the real store.
 It opts out by name: `@pytest.mark.live_ledger`, registered in
 `pyproject.toml` and honoured by the fixture. An exception that cannot be seen
 at the place it is taken is indistinguishable from the rule not existing.
+
+---
+
+## 44. The backup button that was never once offered
+
+The Status page said "Newest backup — none. No database dump in `backups/`",
+and under it, "Cannot back up from here — DB_PASSWORD is not set for this
+container." Both true. Both permanent: neither could have said anything else on
+any install, because the button had never been connected to anything.
+
+The observation it was built on was right — **a dump does not need the Docker
+socket, it needs a TCP connection to Postgres**, which this container already
+has. `pg_dump` was added to the image for it. The route, the toast and the
+precondition on `/reapply/run` were all written and tested.
+
+Two things were missing, in two other files:
+
+* **`backups/` was never mounted.** Every test mounts a `tmp_path`, so every
+  test passed. `test_the_web_container_can_reach_everything_the_ui_offers`
+  reads the mounts out of the compose file now, which is the one place a test
+  could have seen it.
+* **It looked for the wrong credentials.** `_settings()` read `DB_HOST` and
+  `DB_PASSWORD` from the environment, and compose hands the container one
+  assembled `PASSBOOK_DATABASE_URL` and nothing else. It was wrong on the host
+  too, in the other direction: `DB_HOST` there is `db`, which does not resolve
+  from the host. It agreed with reality on no install at all. It reads
+  `ledger_dsn` now — where the dump connects is where the ledger connects.
+
+`make check` creates `backups/` before compose binds it, so the directory is
+owned by you rather than created as root by Docker. That already worked; it
+matters more now that something writes there.
+
+### 44.1 The source bundle, and the one thing this repository does not do
+
+`make backup` writes a git bundle of the source into the config tarball. The
+backup taken from the UI could not, and both are named
+`config-<date>.tar.gz` — so a UI backup replaced the host's tarball for that
+day with one that had no source in it, silently. The ledger was never at risk.
+"Backed up" meaning two different things depending on which button made it is
+the risk.
+
+`_source_bundle` writes a fresh bundle when a repository is reachable and
+otherwise carries forward the one in the tarball it is replacing — not a stale
+copy, since the source moves when you pull, not when you back up.
+
+**A repository is not reachable here, on purpose.** The private repository
+mounts `.git` read-only so its Version card can compare the running commit
+against the checkout; this one asks GitHub and does not need it. A clone's
+`.git/config` can carry a credential in its remote URL, and a public repository
+gives nobody a reason to put one there — but "nobody would" is not a property
+this can check on somebody else's machine, and the container it would be
+mounted into is the one that parses uploaded files. So a backup taken here
+carries a source bundle only when one is already in the tarball it replaces,
+`source_bundle` is False otherwise, and the toast says the source is on GitHub
+rather than implying a complete archive.
+
+### 44.2 Check GitHub now
+
+The update check is cached for an hour so that opening the page is not a
+request to GitHub every time. That is right for the automatic check and wrong
+for someone who has just updated and wants to see it land, so the card has a
+button that sends `force=1` — the route already took it.
+
+It still does not apply anything, for the reason it never has: that needs the
+Docker socket, in the process that listens on a port and reads uploaded files.

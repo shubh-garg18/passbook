@@ -93,7 +93,11 @@ export function useBackup() {
       toast({
         kind: 'ok',
         title: 'Backed up',
-        detail: `${result.dump} — ${Math.round(result.dumpBytes / 1024)} KB. The ledger and your config.`,
+        detail:
+          `${result.dump} — ${Math.round(result.dumpBytes / 1024)} KB. ` +
+          (result.sourceBundle
+            ? 'The ledger, your config and a bundle of the source.'
+            : 'The ledger and your config — the source is on GitHub.'),
       })
     },
     onError: (error) => toast({ kind: 'bad', ...describe(error) }),
