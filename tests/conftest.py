@@ -107,7 +107,7 @@ class StoreDouble:
 
 
 @pytest.fixture(autouse=True)
-def _no_real_ledger(monkeypatch):
+def _no_real_ledger(request, monkeypatch):
     """Tests never open a real database. Enforced, not remembered.
 
     Every route reaches the ledger through `_base.open_ledger`, so a test that
@@ -121,6 +121,14 @@ def _no_real_ledger(monkeypatch):
     overrides this by patching the same name, which is what every one of them
     already does.
     """
+    if request.node.get_closest_marker("live_ledger"):
+        # One deliberate exception, named at the call site rather than allowed
+        # by default: `test_stack` asks whether the published database port
+        # still answers, and a fake cannot be asked that. It is skipped unless
+        # something is listening, so a suite run with no stack up still never
+        # opens a connection.
+        return
+
     from passbook.store import LedgerError
 
     def refuse(*_args, **_kwargs):

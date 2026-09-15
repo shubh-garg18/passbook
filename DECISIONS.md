@@ -5025,6 +5025,19 @@ is the better answer there**, not a fallback: it records the commit the image
 was *built* from, and someone who pulled without rebuilding is still running
 the old code. "What is running" is the question being asked.
 
+Which makes the stamp only as honest as the recipe that writes it, so the
+prerequisite is checked rather than remembered:
+`test_every_recipe_that_starts_the_app_writes_the_stamp` parses the Makefile
+into per-target blocks, finds every recipe whose **own** body runs `$(COMPOSE)
+up` or `restart`, and requires `stamp` among its prerequisites. `up` has had it
+from the start; the test exists so that the next recipe to start a container
+inherits the rule without having read this paragraph. The private repository
+grew a second such recipe and shipped it without the prerequisite, and the
+symptom was an update offered for the commit already running.
+
+The stamp is also install-local and gitignored: it describes one machine, and a
+committed one would tell every clone it is at the sha it was written on.
+
 ### 38.3 What `make update` does, in the order that cannot lose anything
 
 Back up, pull, rebuild, migrate, verify. It refuses to start on a dirty tree or
@@ -5270,3 +5283,48 @@ the three that ship. A test asserts the branch exists and that the words
 **The general rule: an empty state is a different screen from a broken one, and
 the cost of conflating them is paid entirely by the person who has just
 arrived.**
+
+---
+
+## 43. A port probe is not a gate
+
+`tests/test_stack.py` is the one deliberate exception to "tests use fixtures,
+never the network": host-based routing cannot be asserted from a file, so a
+handful of requests go to the running stack. Each was gated on *is something
+listening on the port?*
+
+That is not the question. On a machine holding two installs of this product —
+which is exactly the machine it is developed on, a public clone beside a
+private one — the compose project is named `passbook` in both and :80, :8081
+and the database port are shared. Only one install can hold each.
+
+So these tests ran against the other install's containers and seven of the
+eight passed. The assertions were true. They were true of a stack this
+checkout had never started, and `make test` reported a routing layer as proven.
+
+**The eighth is the only reason it was noticed.** It opens the database rather
+than fetching a URL, so it connected to a Postgres that was listening and was
+then refused the credentials, which belonged to somebody else's install. Six
+HTTP checks against the same wrong stack had nothing to disagree about.
+
+Containers carry the working directory of the project that started them. The
+gate reads `com.docker.compose.project.working_dir` and compares it against
+this checkout's root; anything that stops that being answerable — no docker, no
+daemon, a permission error — reports nothing running, and the tests skip. Skip
+is the honest direction: this file's own premise is that a suite on a laptop
+with containers stopped should be green and honest rather than red and ignored.
+
+Checked in both directions on one machine, which is the only place the claim
+can be checked at all: with the other install up, this checkout's stack tests
+skip; with this checkout's own stack up, they pass.
+
+### 43.1 The test that does want a real database
+
+The conftest guard refuses a real connection everywhere, because a test that
+falls through to one does not fail fast — it waits out the driver's timeout,
+and a suite of those is an afternoon of "slowness". The database-port test is
+the one thing here that genuinely needs the real store.
+
+It opts out by name: `@pytest.mark.live_ledger`, registered in
+`pyproject.toml` and honoured by the fixture. An exception that cannot be seen
+at the place it is taken is indistinguishable from the rule not existing.

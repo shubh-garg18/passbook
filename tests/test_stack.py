@@ -68,10 +68,56 @@ def _up(url: str, host: str | None = None) -> bool:
         return False
 
 
+def _own_services() -> frozenset[str]:
+    """Which of THIS checkout's containers are running.
+
+    Not "is something listening on the port". Both repositories declare
+    `name: passbook` in their compose file and both publish 80, 8081 and the
+    database port, so on a machine holding a public clone and a private one
+    only one install can hold each port — and a probe cannot tell which. These
+    tests therefore ran against the *other* install's containers and passed,
+    because it is the same product and the assertions held. The thing under
+    test had never been started.
+
+    What surfaced it was the one assertion the other install could not satisfy:
+    its database answered the connect and then refused the credentials. That is
+    the tell, and it only exists because one test opens the database; the six
+    HTTP ones would have gone on passing indefinitely.
+
+    Containers carry the working directory of the project that started them, so
+    that is the question asked. Anything that stops it being answerable —
+    docker absent, the daemon down, a permission error — reports nothing
+    running, and every test here skips rather than asserting against whatever
+    happens to hold the port.
+    """
+    import subprocess
+
+    root = str(Path(__file__).resolve().parents[1])
+    try:
+        done = subprocess.run(
+            [
+                "docker", "ps",
+                "--filter", f"label=com.docker.compose.project.working_dir={root}",
+                "--format", '{{.Label "com.docker.compose.service"}}',
+            ],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    if done.returncode != 0:
+        return frozenset()
+    return frozenset(line.strip() for line in done.stdout.splitlines() if line.strip())
+
+
+OURS = _own_services()
+MINE = "this checkout's stack is not running; run `make up`"
+
+
 needs_caddy = pytest.mark.skipif(
-    not _up(CADDY, "passbook.localhost"), reason="stack is down; run `make up`"
+    "caddy" not in OURS or not _up(CADDY, "passbook.localhost"),
+    reason=MINE,
 )
-needs_ports = pytest.mark.skipif(not _up(WEB), reason="stack is down; run `make up`")
+needs_ports = pytest.mark.skipif("web" not in OURS or not _up(WEB), reason=MINE)
 
 
 def _database_listening() -> bool:
@@ -91,8 +137,8 @@ def _database_listening() -> bool:
 
 
 needs_database = pytest.mark.skipif(
-    not _database_listening(),
-    reason=f"nothing listening on 127.0.0.1:{_database_host_port()}; run `make up`",
+    "db" not in OURS or not _database_listening(),
+    reason=f"{MINE} (database port {_database_host_port()})",
 )
 
 
@@ -157,6 +203,7 @@ def test_port_8081_still_answers_directly():
 
 
 @needs_database
+@pytest.mark.live_ledger
 def test_the_database_port_is_published_for_the_cli():
     """`passbook sync`, `verify-ledger` and `upgrade` all run on the HOST while
     the web container reaches the same database over the compose network. If
