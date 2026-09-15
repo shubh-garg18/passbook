@@ -82,7 +82,7 @@ def _git(*args: str) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-#: Written by `make up` and `make reload`, and mounted into the web container
+#: Written by `make up`, and mounted into the web container
 #: with the rest of `config/`. The container has no `.git` — the image holds a
 #: copy of the source, not a repository — so this is how the running app knows
 #: which commit it was built from.
