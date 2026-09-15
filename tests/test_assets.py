@@ -600,3 +600,40 @@ def test_the_web_container_can_reach_everything_the_ui_offers():
         "a clone's .git/config can carry a credential in its remote URL; this "
         "container parses uploaded files and does not need the repository"
     )
+
+
+@pytest.mark.parametrize("name", ["ledger-2026-09-16.sql.gz", "firefly-2026-08-08.sql.gz"])
+def test_the_drill_finds_a_dump_under_either_name(tmp_path, name):
+    """The drill picks its dump with globs, and `ls` cannot do this job.
+
+    It used to be `ls -1 "$tmp"/ledger-*.sql.gz "$tmp"/firefly-*.sql.gz
+    2>/dev/null | head -1`. **Exactly one of those patterns can ever match** — a
+    dump carries the current name or the old one — and `ls` exits non-zero when
+    any operand is missing. Under `set -euo pipefail`, with stderr discarded and
+    a cleanup trap, the drill ended after step 1 having printed nothing about
+    why. It did that from the moment the second pattern was added for backward
+    compatibility, so the one check that proves recovery works stopped working
+    and said nothing.
+
+    This runs the script's own selection lines against a directory holding one
+    dump under each name in turn — the case that was broken, both ways round.
+    """
+    import subprocess
+
+    script = (ROOT / "scripts" / "dr_drill.sh").read_text()
+    start = script.index("shopt -s nullglob")
+    end = script.index('[ -n "$dump" ]')
+    selection = script[start:end]
+    assert "ls -1" not in selection, "ls cannot report 'one of these two' without failing"
+
+    (tmp_path / name).write_bytes(b"gz")
+    (tmp_path / "config-2026-09-16.tar.gz").write_bytes(b"gz")
+
+    done = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", f'tmp="$1"\n{selection}\necho "$dump"\necho "$cfg"', "_", str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert done.returncode == 0, f"the selection aborted: {done.stderr.strip()}"
+    found, config = done.stdout.strip().splitlines()
+    assert found.endswith(name)
+    assert config.endswith("config-2026-09-16.tar.gz")

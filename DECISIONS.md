@@ -5393,3 +5393,38 @@ button that sends `force=1` — the route already took it.
 
 It still does not apply anything, for the reason it never has: that needs the
 Docker socket, in the process that listens on a port and reads uploaded files.
+
+
+---
+
+## 45. The recovery drill had been ending after step 1, in silence
+
+`make dr-drill` is the one check whose entire purpose is to prove that a
+machine dying is survivable: it recovers from the two encrypted archives and a
+passphrase, and nothing else. It exited 2 with nothing printed after *"ok
+decrypted …"*.
+
+    dump="$(ls -1 "$tmp"/ledger-*.sql.gz "$tmp"/firefly-*.sql.gz 2>/dev/null | head -1)"
+
+**Exactly one of those two patterns can ever match** — a dump carries the
+current name or the name it had before 0.3.0, never both. `ls` exits non-zero
+when any operand is missing; `2>/dev/null` discarded the only sentence that
+said so; `set -euo pipefail` and a cleanup trap turned it into a script that
+vanishes. The line worked with one pattern. **Adding the second one, for
+backward compatibility with older dumps, is what broke it.**
+
+`bash -x` named the line in one run: the variable was assigned correctly and
+then `cleanup` ran on the very next line, which rules out every theory about
+the restore itself. Tracing took less time than the first guess did.
+
+Globs and an array now, with `nullglob` — which is what "one of these, if
+present" actually is in bash — and an explicit exit when there is no dump,
+because `fail` counts rather than stops and the remaining steps would have had
+nothing to be about. `test_the_drill_finds_a_dump_under_either_name` runs the
+script's own selection lines against a directory holding one dump under each
+name in turn, and fails on the old form both ways round.
+
+**The general shape: a compatibility fallback widened a command's arguments and
+changed its exit status, and every guard around that command was built to hide
+exactly that.** A drill that fails silently is worse than no drill, because it
+is the thing you believe.

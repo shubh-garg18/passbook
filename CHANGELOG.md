@@ -27,6 +27,10 @@ ever say no, and now they answer.
   straight away, for when you have just updated and want to see it land.
 - **Commands read as commands.** Messages like *run `make up`* were showing you
   the backtick characters.
+- **`make dr-drill` runs again.** The disaster-recovery drill — the one that
+  proves you could rebuild from your encrypted backups alone — had been
+  stopping right after the decrypt step without saying why, since 0.3.0
+  renamed the dump files. If you have never run it, now is a good time.
 
 Upgrading is `make update` as always. On Windows, double-click
 `launchers\update-passbook.cmd`.

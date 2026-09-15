@@ -122,8 +122,22 @@ for g in "$tmp"/*.gpg; do
         -o "${g%.gpg}" "$g"
     ok "decrypted $(basename "${g%.gpg}")"
 done
-dump="$(ls -1 "$tmp"/ledger-*.sql.gz "$tmp"/firefly-*.sql.gz 2>/dev/null | head -1)"
-cfg="$(ls -1 "$tmp"/config-*.tar.gz 2>/dev/null || true)"
+# `ls` exits non-zero when ANY operand is missing, and exactly one of these two
+# patterns can ever match: a dump carries the current name or the old one. With
+# `set -euo pipefail`, `2>/dev/null` and a cleanup trap, that made this drill
+# end after step 1 with no message — and it did, from the moment the second
+# pattern was added for backward compatibility (0.3.0 renamed the dumps). The
+# one check that proves recovery works stopped working, silently, which is the
+# worst possible way for a drill to fail. Globs, not `ls`.
+shopt -s nullglob
+dumps=("$tmp"/ledger-*.sql.gz "$tmp"/firefly-*.sql.gz)
+configs=("$tmp"/config-*.tar.gz)
+shopt -u nullglob
+dump="${dumps[0]:-}"
+cfg="${configs[0]:-}"
+# `fail` counts rather than stops, which is right for a check and wrong here:
+# with no dump there is nothing for the remaining steps to be about.
+[ -n "$dump" ] || { fail "no ledger dump in the decrypted archive — nothing to restore"; exit 1; }
 
 echo
 echo "== 2. stand up a scratch database and load the dump =="
