@@ -474,7 +474,7 @@ kbd {
 .cards {
   display: grid;
   gap: 0.75rem;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
   margin-bottom: 1rem;
 }
 /* Roll-ups: one figure and one bar each, so they go side by side. 20rem is the
@@ -482,9 +482,19 @@ kbd {
 .rollups {
   display: grid;
   gap: 0.75rem;
-  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
   margin-bottom: 1rem;
 }
+/* §47. Every `auto-fit` floor above is `min(<floor>, 100%)`, not the bare
+   floor. A grid track's minimum is a HARD floor: `minmax(27rem, 1fr)` makes a
+   432px column even in a 358px box, and `.swap` above it is `overflow-x: clip`
+   — `clip`, not `auto` — so the 74px that did not fit was not scrolled to, it
+   was gone. On the Reports breakdown that meant every amount lost its tail and
+   the category totals read "₹10" where the figure was five digits: the page
+   whose job is showing numbers, showing the first two characters of them.
+   Measured at 390px: content 432 in a client 358. `min(x, 100%)` is exactly x
+   wherever x already fits, so this changes nothing above the width where it
+   was broken. */
 .rollups .card {
   margin-bottom: 0;
 }
@@ -1294,7 +1304,7 @@ h2.section::after {
 .flows {
   display: grid;
   gap: 1.4rem;
-  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
 }
 .flow__head {
   display: flex;
@@ -1716,7 +1726,7 @@ select {
 
 .ways {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
   gap: 0.7rem;
   margin-bottom: 1.4rem;
 }
@@ -2344,7 +2354,7 @@ input[aria-invalid='true'] {
 
 .codes {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(9rem, 100%), 1fr));
   gap: 0.5rem;
   padding: 0;
   margin: 0.8rem 0;
@@ -3191,7 +3201,7 @@ input[aria-invalid='true'] {
  */
 .kpis {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(9.5rem, 100%), 1fr));
   gap: 0.75rem;
   margin-bottom: 0.9rem;
 }
@@ -3353,7 +3363,7 @@ svg .mark:focus-visible {
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(9.5rem, 100%), 1fr));
   gap: 0.55rem 0.7rem;
   align-items: end;
   margin: 0 0 0.8rem;
@@ -3670,7 +3680,7 @@ svg .mark:focus-visible {
    1440px the fixed label and figure columns left the track about 30px wide —
    a bar that cannot show a length is not a bar. */
 .rollups--wide {
-  grid-template-columns: repeat(auto-fit, minmax(27rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(27rem, 100%), 1fr));
 }
 
 /* Inside a card the label has to give way, because the TRACK is the thing that

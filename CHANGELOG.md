@@ -27,6 +27,10 @@ ever say no, and now they answer.
   straight away, for when you have just updated and want to see it land.
 - **Commands read as commands.** Messages like *run `make up`* were showing you
   the backtick characters.
+- **Reports shows whole amounts on a phone.** Every figure in the category
+  breakdown was losing its last character, and the category totals showed only
+  their first few digits — the content was wider than the screen and the part
+  that did not fit could not be scrolled to.
 - **The account switcher fits on a phone.** With three or more accounts the
   chips wrap onto two rows instead of the last one being cut off at the edge.
 - **`make dr-drill` runs again.** The disaster-recovery drill — the one that

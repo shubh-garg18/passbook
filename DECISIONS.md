@@ -5465,3 +5465,51 @@ than two rows hold.
 second is measurable.** Ten seconds with `getBoundingClientRect` said which,
 and the fix that followed was a different fix from the one the screenshot
 implied.
+
+
+---
+
+## 47. Every amount on Reports lost its tail
+
+Checking the pages at 390px after §46. Nothing overflowed the page —
+`scrollWidth == 390` on every route — and no text element was internally
+clipped. Both probes said clean. The screenshot did not: cropped at 3× and read
+rather than glanced at, every amount in the Reports breakdown ended one
+character short, and each category heading showed three characters of a
+five-digit total.
+
+Walking up from a cut amount found it in one step:
+
+    div.rollups--wide   client=358  scroll=432   CLIPS
+    div.swap            overflow-x: clip
+
+`.rollups--wide` was `repeat(auto-fit, minmax(27rem, 1fr))`, and **27rem is
+432px**. A grid track's minimum is a hard floor — `auto-fit` collapses empty
+tracks, it does not shrink a track below its stated minimum — so a 432px column
+sat in a 358px box. The element above it is `overflow-x: clip`, not `auto`: the
+74px that did not fit was not somewhere you could scroll to. It was gone.
+
+The floor was not arbitrary. At desktop widths the fixed label and figure
+columns left the bar track about 30px, and a bar that cannot show a length is
+not a bar. The floor protected the track, and nobody asked what it did to a
+screen narrower than the floor.
+
+`minmax(min(27rem, 100%), 1fr)` is the fix, applied to every `auto-fit` grid
+rather than the one that was caught: `min(x, 100%)` is exactly `x` wherever `x`
+already fits, so it is free where it was working, and the 20rem grid had the
+same bug waiting on a 320px phone. Measured after at 320, 390 and 768: content
+equals container at all three, and the widest is unchanged.
+
+### 47.1 What this says about probes
+
+Two measurements agreed the page was fine and a picture disagreed. Both probes
+were right about what they measured and neither measured this, because each had
+a rule excluding exactly this case — one skipped `overflow` containers because
+a scroll container clipping its content is not a bug, the other only looked
+*inside* elements and this box was outside its parent.
+
+**Looking is not a slower way of measuring. It is what tells you which
+measurement you failed to take.** And a page thousands of pixels tall, scaled
+into a review window, is not looking either: the first read of this same
+screenshot called the amounts fine, the second called them truncated, and only
+the 3× crop settled it.

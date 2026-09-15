@@ -673,3 +673,30 @@ def test_the_tab_strip_cannot_collide_with_the_combine_control():
         "the strip must wrap rather than scroll at phone width, or a chip is "
         "clipped with nothing on screen saying it can be scrolled"
     )
+
+
+def test_no_grid_floor_can_exceed_the_screen():
+    """A grid track's minimum is a HARD floor, and phones are narrower than it.
+
+    `repeat(auto-fit, minmax(27rem, 1fr))` makes a 432px column inside a 358px
+    box — `auto-fit` collapses empty tracks, it does not shrink a track below
+    its stated minimum. The element above it is `overflow-x: clip`, which is
+    not `auto`: the 74px that did not fit could not be scrolled to, it was
+    simply gone. On the Reports breakdown that cut the tail off every amount
+    and rendered five-digit category totals as "₹10" — the page whose whole job
+    is showing numbers, showing the first two characters of them. Measured at
+    390px: content 432 in a client 358.
+
+    `min(<floor>, 100%)` is exactly `<floor>` wherever it already fits, so this
+    is free above the width where it was broken. §47.
+    """
+    import re
+
+    css = (ROOT / "frontend" / "src" / "theme.css").read_text()
+    bare = re.findall(r"repeat\(auto-fit, minmax\((?!min\()([^,]+), 1fr\)\)", css)
+    assert not bare, (
+        f"{len(bare)} auto-fit grid(s) state a hard floor — {bare}. On a screen "
+        "narrower than the floor the track overflows its container, and an "
+        "ancestor with `overflow-x: clip` makes that content unreachable rather "
+        "than scrollable. Write `minmax(min(<floor>, 100%), 1fr)`."
+    )
