@@ -1,18 +1,37 @@
-"""Registering an account from its own statement."""
+"""Staging a statement for an account that does not exist yet. SPEC §26."""
+
+from __future__ import annotations
 
 from pathlib import Path
+
+
 from flask import current_app, jsonify, request, session
 from werkzeug.utils import secure_filename
+
 from ... import service
-from ...config import RegistryError, load_accounts, load_settings
+from ...config import (
+    RegistryError,
+    load_accounts,
+    load_settings,
+)
 from ...firefly.client import FireflyError, ValidationFailed
 from ...loaders import UnsupportedFormat, sniff
 from ...loaders._table import ParseError
 from ...loaders.pdf import PdfPasswordRequired, PdfPasswordWrong
 from ...validate import BalanceBreak, IntegrityError
 from .. import auth as A
-from ._base import _client, ACCEPTED_SNIFF, MAX_UPLOAD_BYTES, _fail, _parsed, api, log
-from .accounts import _pending_password, _store_asset_account
+
+from ._base import (
+    ACCEPTED_SNIFF,
+    MAX_UPLOAD_BYTES,
+    _client,
+    _fail,
+    _parsed,
+    _pending_password,
+    api,
+    log,
+)
+from .accounts import _store_asset_account
 from .banks import _with_try_hint
 
 
@@ -193,6 +212,7 @@ def accounts_add():
         }
     )
 
+
 def _registered(account) -> dict:
     """Masked to last 4, always — this crosses the boundary into a page (§11)."""
     return {
@@ -201,5 +221,3 @@ def _registered(account) -> dict:
         "account": account.masked,
         "assetAccount": account.asset_account,
     }
-
-

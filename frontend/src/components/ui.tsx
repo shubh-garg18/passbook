@@ -1,7 +1,7 @@
 /* Small shared pieces. SPEC §16.4. */
 
-import type { ReactNode } from 'react'
 import { useState } from 'react'
+import type { ReactNode } from 'react'
 import { formatAmount, formatINR } from '../lib/money'
 
 /* Status marks are SVG, not `✓`/`✗` characters: those glyphs are absent from
@@ -57,22 +57,49 @@ export function Token({ token, strong }: { token: string | null; strong?: boolea
 }
 
 /**
- * The app's mark: the Day Rail, stamped.
+ * The app's mark: the die, the day's track, and one entry struck through it.
  *
  * Not a wallet and not a rupee glyph — those belong to every finance app ever
- * made. This is the one shape that is only ours: a 24-hour track with the
- * midnight-to-six band shaded and a single transaction tick. The same artwork
- * is the favicon and the installed-app icon.
+ * made. This is the stamp die the whole design is built on, and inside it the
+ * Day Rail: a 24-hour track with one transaction struck through it.
+ *
+ * **Redrawn because the first one could not be seen.** It carried the rail as
+ * two translucent fills at 22% and 45%, which is legible at 200px and gone at
+ * the 26px it actually ships at — on the header's dark ground both washes
+ * collapsed into the square and the mark read as a plain blue box. Everything
+ * here is now either full ink or knocked out of it, which is what a stamp can
+ * actually print.
+ *
+ * Three shapes, and the tick overhangs the rail top and bottom — that overhang
+ * is the entire reading. Without it the mark is two blocks in a box, which is
+ * what the first redraw produced and what a pause button looks like. The same
+ * artwork is the favicon and the installed-app icon, where it is 16px.
  */
 export function StampMark({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 32 32" role="img" aria-label="passbook">
-      <rect x="1.5" y="1.5" width="29" height="29" rx="5"
-        fill="none" stroke="currentColor" strokeWidth="2.5" />
-      <rect x="6.5" y="12" width="19" height="8" rx="1.5"
-        fill="currentColor" opacity="0.22" />
-      <rect x="6.5" y="12" width="4.75" height="8" rx="1.5" fill="currentColor" opacity="0.45" />
-      <rect x="9" y="10.5" width="2.6" height="11" rx="1" fill="currentColor" />
+      {/* §82. A ledger column with a rising line through it.
+       *
+       * Three bare bars said "chart" and nothing else — every analytics tool
+       * on earth has that mark, and it did not say *ledger*. This says both:
+       * the two grouped uprights are a column of entries, the line rising
+       * across them is the reckoning drawn from them, and the dot is where it
+       * lands. The mark is a passbook, not a graph.
+       *
+       * Solid fills and a 2.6 stroke, no tints. The mark it replaces carried a
+       * track at `opacity: 0.5` and its own comment recorded why that value
+       * had to keep going up: what reads at 200px is gone at the 26px a
+       * browser tab renders.
+       *
+       * Same geometry as `mark()` in `scripts/icons.py`, which generates the
+       * favicon and the PWA icons. **Change one and change the other** — the
+       * last time they drifted the app shipped four phases with the wrong
+       * coloured tab. */}
+      <rect x="3.2" y="14.6" width="5.4" height="14.2" rx="1.9" fill="var(--cat-8, currentColor)" opacity="0.55" />
+      <rect x="11.1" y="9.4" width="5.4" height="19.4" rx="1.9" fill="var(--cat-2, currentColor)" />
+      <path d="M4 12.2 L13.8 6.4 L28 3.2" fill="none" stroke="var(--cat-1, currentColor)"
+        strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="27.6" cy="3.4" r="2.9" fill="var(--cat-1, currentColor)" />
     </svg>
   )
 }
@@ -140,6 +167,29 @@ export function Diff({ text }: { text: string }) {
         )
       })}
     </pre>
+  )
+}
+
+
+/**
+ * A teller's stamp, landing. The one thing this app should be remembered by.
+ *
+ * A passbook gets **stamped** — that is the whole ritual of the object, and it
+ * is the moment the bank says "recorded". The palette has carried a token
+ * called `--stamp` since Phase 13 and nothing has ever actually printed one.
+ *
+ * It thumps: overshoots, settles, slightly off-square, because a hand-held
+ * stamp never lands straight. Everything around it stays quiet — this is the
+ * one place the design raises its voice, so it earns being loud by being rare.
+ * Used only where something is genuinely confirmed, never as decoration.
+ */
+export function StampImpression({ label }: { label: string }) {
+  return (
+    <span className="impress" role="img" aria-label={label}>
+      <span className="impress__ring">
+        <span className="impress__text">{label}</span>
+      </span>
+    </span>
   )
 }
 

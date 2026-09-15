@@ -482,7 +482,7 @@
       "debit": "2408.74",
       "is_reversal": false,
       "narration": "SMS ZOKVEXJ XQ LWUBKV ZABFL",
-      "payee": null,
+      "payee": "SMS ZOKVEXJ XQ LWUBKV ZABFL",
       "payee_alias": null,
       "txn_date": "2026-06-13",
       "txn_id": "20260613000001",

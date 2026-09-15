@@ -1,51 +1,40 @@
-"""Adding a bank without writing Python."""
+"""Adding a bank without writing Python. SPEC §27, §49."""
+
+from __future__ import annotations
 
 import json
 import re
 import shutil
 import tempfile
 from pathlib import Path
+
 import yaml
+
 from flask import jsonify, request
 from werkzeug.utils import secure_filename
-from ...config import BUILTIN_BANKS, SUPPORTED_BANKS
+
+from ...config import (
+    BUILTIN_BANKS,
+    SUPPORTED_BANKS,
+    mask_account,
+)
 from ...loaders import profiles, read_grid, sniff
 from ...loaders._table import CORE_COLS, REQUIRED_COLS, _all_aliases
 from ...loaders._table import norm as COL_ALIASES_NORM
 from ...loaders.pdf import PdfPasswordRequired, PdfPasswordWrong
-from ...models import mask_account
 from .. import auth as A
+
 from ._base import (
-    BANDED_PREVIEW,
     MAX_UPLOAD_BYTES,
-    SHAPE_LINES,
     _fail,
     _money,
     api,
     log,
 )
-
-
-# -- adding a bank, from the browser -----------------------------------------
-# SPEC §27, §34, §49. A bank is a description of where its columns are, written
-# from this page and saved to `config/banks/<slug>.yaml`. No Python, and no
-# statement leaves the machine: every route below reads the uploaded file in a
-# temporary directory and deletes it.
-
-@api.get("/banks")
-@A.login_required
-def bank_list():
-    """Which banks passbook can already read. SPEC §23.2.
-
-    A GET, because the Add-a-bank page asks this on load: most people who land
-    there do not need the page at all — a profile for their bank ships — and
-    the opening line saying so is the difference between a ten-minute task and
-    none.
-
-    Resolves through `supported_banks()` rather than a constant, so a profile
-    dropped into `config/banks/` shows up without a restart.
-    """
-    return jsonify({"banks": list(SUPPORTED_BANKS), "builtin": list(BUILTIN_BANKS)})
+from ._scope import (
+    BANDED_PREVIEW,
+    SHAPE_LINES,
+)
 
 
 @api.post("/banks/try")
@@ -509,5 +498,3 @@ def bank_inspect():
         )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-
-

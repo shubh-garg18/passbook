@@ -5,18 +5,24 @@ financial data. It is verified to hold cleanly on real data — 93 rows, 0 break
 computed final balance equal to the Closing Balance sentinel exactly.
 
 **So if it fails, the parser is wrong, not the data. Never soften or skip this
-check to make a test pass.** non-negotiable #3.
+check to make a test pass.** CLAUDE.md non-negotiable #3.
 
 Hard failures (raise) are reserved for things that mean the parse is wrong or
 the ledger would be corrupted. Soft failures (warn) are observations about the
 bank's habits that could legitimately change without any data being wrong.
 """
 
+import re
 from decimal import Decimal
 
 from .models import StatementMeta, Transaction, mask_account
 
 TOLERANCE = Decimal("0.01")
+
+# A bank-numbered transaction id: `YYYYMMDD` + a daily ordinal, which is what
+# Canara writes. A derived id (§44.4) is `d-<sha256[:16]>` and matches nothing
+# here, which is the point.
+_BANK_NUMBERED = re.compile(r"\d{8}\d+")
 
 
 class BalanceBreak(Exception):
@@ -75,7 +81,7 @@ def check(meta: StatementMeta, transactions: list[Transaction]) -> list[str]:
             raise IntegrityError(
                 f"duplicate transaction ID {txn.txn_id} at sheet rows "
                 f"{seen[txn.txn_id]} and {txn.sheet_row}; it is used as the "
-                f"Firefly external_id and must be unique"
+                f"ledger external_id and must be unique"
             )
         seen[txn.txn_id] = txn.sheet_row
 
@@ -88,7 +94,22 @@ def check(meta: StatementMeta, transactions: list[Transaction]) -> list[str]:
         )
 
     # --- soft: the bank's habits, not correctness ----------------------------
+    #
+    # **Only for a bank that numbers its rows.** Canara's id is `YYYYMMDD` plus
+    # a daily ordinal, so a prefix that disagrees with the date means a row was
+    # misread. A bank with no reference column gets a DERIVED id instead
+    # (§44.4) — `d-<sha256[:16]>` over the row's own fields — which contains no
+    # date by construction, so checking it against one warns about something
+    # the format guarantees.
+    #
+    # Measured on a real 32-row Union statement: 32 warnings, one per row,
+    # every one of them noise, in a list the operator has to read to find the
+    # seven that might matter. A check that cries wolf on every row of a whole
+    # bank is worse than no check, because it trains the reader to skip the
+    # section it lives in.
     for txn in transactions:
+        if not _BANK_NUMBERED.fullmatch(txn.txn_id):
+            continue
         prefix = txn.txn_id[:8]
         if prefix != txn.txn_date.strftime("%Y%m%d"):
             warnings.append(
@@ -106,10 +127,24 @@ def check(meta: StatementMeta, transactions: list[Transaction]) -> list[str]:
     # SPEC §6.5: direction lives in the narration too, but the
     # Withdrawals/Deposits columns are authoritative. A disagreement is worth
     # surfacing and is explicitly not an error.
+    #
+    # **`/DR/` and `/CR/` are Canara's convention**, and the marker sits in a
+    # specific PLACE: segment 1 of a slash-delimited narration, immediately
+    # after the channel — `UPI/DR/<utr>/…`. Verified against the fixture, which
+    # is unanimous: marker index 1, twelve segments, channel `UPI`.
+    #
+    # Anywhere else those two letters are somebody else's reference. A first
+    # attempt only required two slashes, which still fired on seven rows of a
+    # real Union statement — and the balance chain on that file closes on its
+    # own sentinel with zero breaks, which is proof the COLUMNS are right and
+    # therefore that the narration marker means something other than this
+    # row's direction. §6.6 is the arbiter; a soft warning is not.
     for txn in transactions:
         upper = txn.narration.upper()
-        says_debit = "/DR/" in upper
-        says_credit = "/CR/" in upper or upper.startswith("NEFT CR")
+        segments = upper.split("/")
+        marker = segments[1] if len(segments) > 2 else ""
+        says_debit = marker == "DR"
+        says_credit = marker == "CR" or upper.startswith("NEFT CR")
         if says_debit and txn.debit is None:
             warnings.append(f"row {txn.sheet_row}: narration says DR but column says deposit")
         if says_credit and txn.credit is None:

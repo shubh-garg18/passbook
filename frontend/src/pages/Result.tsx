@@ -20,8 +20,8 @@ export function Result() {
           <p className="figure">{result.pushed}</p>
           <p className="muted">of {result.parsed} parsed</p>
         </Card>
-        <Card title="Duplicates skipped">
-          <p className="figure">{result.duplicates}</p>
+        <Card title="Already in ledger">
+          <p className="figure">{(result.already ?? 0) + result.duplicates}</p>
           <p className="muted">expected on overlapping downloads</p>
         </Card>
         <Card title="Failed" state={result.failed ? 'bad' : undefined}>

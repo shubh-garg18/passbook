@@ -85,20 +85,41 @@ function PasswordStep() {
 
 function SecondFactor() {
   const queryClient = useQueryClient()
+  // Three ways in, one at a time. `mode` rather than a pile of booleans: they
+  // are alternatives, and two of them being true at once is a state the server
+  // would have to arbitrate.
+  const [mode, setMode] = useState<'totp' | 'backup' | 'email'>('totp')
   const [code, setCode] = useState('')
   const [backupCode, setBackupCode] = useState('')
-  const [useBackup, setUseBackup] = useState(false)
+  const [emailCode, setEmailCode] = useState('')
   const [remember, setRemember] = useState(false)
+  const [sentTo, setSentTo] = useState<{ to: string; minutes: number } | null>(null)
 
   const toast = useToast()
   const submit = useMutation({
     mutationFn: () =>
       api.post<{ stage: Stage; backupCodesLeft: number }>('/session/totp', {
-        code: useBackup ? '' : code,
-        backupCode: useBackup ? backupCode : '',
+        code: mode === 'totp' ? code : '',
+        backupCode: mode === 'backup' ? backupCode : '',
+        recoveryCode: mode === 'email' ? emailCode : '',
         remember,
       }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['session'] }),
+    onError: (error) => toast({ kind: 'bad', ...describe(error) }),
+  })
+
+  const sendEmail = useMutation({
+    mutationFn: () =>
+      api.post<{ to: string; expiresInMinutes: number }>('/session/recover'),
+    onSuccess: (result) => {
+      setMode('email')
+      setSentTo({ to: result.to, minutes: result.expiresInMinutes })
+      toast({
+        kind: 'ok',
+        title: 'Code sent',
+        detail: `Check ${result.to}. It works once and expires in ${result.expiresInMinutes} minutes.`,
+      })
+    },
     onError: (error) => toast({ kind: 'bad', ...describe(error) }),
   })
 
@@ -106,9 +127,13 @@ function SecondFactor() {
     <div className="page page--narrow">
       <h1>Second factor</h1>
       <p className="lede">
-        {useBackup
+        {mode === 'backup'
           ? 'One of the eight codes issued at enrolment. Each works once.'
-          : 'The six-digit code from your authenticator.'}
+          : mode === 'email'
+            ? sentTo
+              ? `Sent to ${sentTo.to}. It works once and expires in ${sentTo.minutes} minutes.`
+              : 'A one-time code, emailed to your recovery address.'
+            : 'The six-digit code from your authenticator.'}
       </p>
 
       <form
@@ -118,7 +143,21 @@ function SecondFactor() {
           submit.mutate()
         }}
       >
-        {useBackup ? (
+        {mode === 'email' ? (
+          <label htmlFor="emailed">
+            Emailed code
+            <input
+              id="emailed"
+              name="recoveryCode"
+              autoFocus
+              autoComplete="one-time-code"
+              spellCheck={false}
+              autoCapitalize="characters"
+              value={emailCode}
+              onChange={(e) => setEmailCode(e.target.value.toUpperCase())}
+            />
+          </label>
+        ) : mode === 'backup' ? (
           <label htmlFor="backup">
             Backup code
             <input
@@ -164,9 +203,25 @@ function SecondFactor() {
           <button type="submit" className="primary" disabled={submit.isPending}>
             {submit.isPending ? 'Checking…' : 'Sign in'}
           </button>
-          <button type="button" onClick={() => setUseBackup(!useBackup)}>
-            {useBackup ? 'Use authenticator' : 'Use a backup code'}
-          </button>
+          {mode === 'totp' ? (
+            <>
+              <button type="button" onClick={() => setMode('backup')}>
+                Use a backup code
+              </button>
+              <button
+                type="button"
+                onClick={() => sendEmail.mutate()}
+                disabled={sendEmail.isPending}
+                data-working={sendEmail.isPending}
+              >
+                {sendEmail.isPending ? 'Sending…' : 'Email me a code'}
+              </button>
+            </>
+          ) : (
+            <button type="button" onClick={() => setMode('totp')}>
+              Use authenticator
+            </button>
+          )}
         </div>
       </form>
 

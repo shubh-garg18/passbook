@@ -1,7 +1,12 @@
-"""The account registry — list, rename, remove."""
+"""The account registry, and the asset accounts it points at. SPEC §21."""
+
+from __future__ import annotations
 
 from datetime import timedelta
-from flask import jsonify, request, session
+
+
+from flask import jsonify, request
+
 from ... import service
 from ...config import (
     ACCOUNTS_FILE,
@@ -11,12 +16,22 @@ from ...config import (
     load_settings,
     save_accounts,
 )
-from ...firefly.push import CURRENCY
 from ...firefly.client import FireflyError, ValidationFailed
-from ...models import StatementMeta
+from ...firefly.push import CURRENCY
 from .. import auth as A
-from ._base import _client, ACCOUNT_LABEL_MAX, _fail, api, log
-from ._scope import _account_scope, _account_summary
+
+from ...models import StatementMeta  # noqa: F401  (a string annotation)
+from ._base import (
+    _client,
+    _fail,
+    api,
+    log,
+)
+from ._scope import (
+    ACCOUNT_LABEL_MAX,
+    _account_scope,
+    _account_summary,
+)
 
 
 @api.get("/accounts")
@@ -37,24 +52,8 @@ def accounts():
     )
 
 
-# -- managing accounts, from the browser -------------------------------------
-# SPEC §25. Registering, renaming and removing an account were CLI-only, which
-# made the registry something only a terminal could reach — on the one screen
-# where a wrong value is permanent, because the slug namespaces every
-# `external_id` the account will ever push.
+# --- overview -------------------------------------------------------------
 
-def _pending_password() -> str | None:
-    """The password for the staged file, for this session only. §30.
-
-    An encrypted PDF is decrypted at upload and then read again by the preview,
-    the confirm and the payee inventory. Without carrying the password those
-    later reads fail on a file the operator has already unlocked — which reads
-    as the upload having silently half-worked.
-
-    Session-scoped and never written to disk. The cookie is signed and
-    httpOnly; signing out or discarding the file drops it.
-    """
-    return (session.get("pending_password") or "").strip() or None
 
 @api.patch("/accounts/<slug>")
 @A.login_required
@@ -192,6 +191,7 @@ def remove_account(slug: str):
         }
     )
 
+
 @api.get("/accounts/candidates")
 @A.login_required
 def account_candidates():
@@ -265,6 +265,7 @@ def create_asset_account():
 
     return jsonify({"ok": True, "name": name})
 
+
 def _store_asset_account(client, name: str, opening: "StatementMeta | None" = None) -> str:
     """Create one asset account and return the name Firefly settled on. §56.1.
 
@@ -314,4 +315,3 @@ def _store_asset_account(client, name: str, opening: "StatementMeta | None" = No
         f" opening {opening.opening_balance}" if opening else " (no opening balance)",
     )
     return (created.get("data") or {}).get("attributes", {}).get("name", name)
-

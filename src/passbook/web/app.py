@@ -25,7 +25,7 @@ from flask import Flask, g, jsonify, request, send_from_directory
 from ..config import load_settings
 from ..webauth import WEB_AUTH_FILE, migrate_from_env, save
 from . import auth as A
-from .api import MAX_UPLOAD_BYTES, api
+from .api import MAX_UPLOAD_BYTES, api, close_clients
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,13 @@ def create_app(config: dict | None = None) -> Flask:
     _migrate_credentials(app)
 
     app.register_blueprint(api)
+
+    # One ledger-store client per request, closed when the request ends. §101.
+    # Registered here rather than on the blueprint: `teardown_appcontext` is an
+    # app-level hook, and a blueprint's teardown fires only for requests routed
+    # into that blueprint — which would leak a client for anything else that
+    # touched the store.
+    app.teardown_appcontext(close_clients)
 
     @app.before_request
     def _csrf():

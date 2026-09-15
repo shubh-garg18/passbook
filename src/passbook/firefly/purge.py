@@ -1,7 +1,12 @@
 """Delete previously-pushed transactions from one asset account.
 
 Not in SPEC §3's layout — added when a re-push was needed after aliases changed
-the display names, since aliases apply at push time and re-pushing hits dedup.
+the display names, since aliases apply at push time.
+
+**Rarely the right tool since §119.** A re-push now skips rows already in the
+ledger by `external_id`, so purging to make one "take" destroys a good ledger
+for nothing; `passbook resync` applies config to existing rows in place.
+`find_duplicates` below is the surgical case that remains.
 
 **The `external_id` is the safety mechanism, not a date range.** Every row this
 tool pushed carries the bank's transaction ID there; nothing else on the account
@@ -163,3 +168,42 @@ def purge(
         )
 
     return result
+
+
+# --- §119.2: the extra copies, and only those --------------------------------
+
+
+def find_duplicates(
+    client: FireflyClient, account_id: str | int
+) -> list[tuple[str, list[Candidate]]]:
+    """Identities this account holds more than once, keeper first.
+
+    The repair for §119's incident, and deliberately *not* part of the check
+    that found it — non-negotiable 12: a check reports, names the remedy and
+    exits non-zero. This is the remedy, and it is a separate act.
+
+    Grouped through `txn_id_of`, so a bare pre-migration id and a namespaced one
+    for the same transaction count as one identity — which is the shape a
+    migration run twice would leave.
+
+    **Keeper first**, and the order is a decision, not an accident: a namespaced
+    id beats a bare one (it is the current scheme, and §21.1 is what everything
+    else joins on), and among equals the lowest group id wins, which is the
+    original rather than the copy. Everything after the first is surplus.
+    """
+    from ..identity import is_namespaced, txn_id_of
+
+    candidates, _ = find_candidates(client, account_id)
+    by_identity: dict[str, list[Candidate]] = {}
+    for candidate in candidates:
+        by_identity.setdefault(txn_id_of(candidate.external_id), []).append(candidate)
+
+    def rank(c: Candidate) -> tuple[int, int, str]:
+        numeric = int(c.group_id) if c.group_id.isdigit() else 0
+        return (0 if is_namespaced(c.external_id) else 1, numeric, c.group_id)
+
+    return [
+        (identity, sorted(rows, key=rank))
+        for identity, rows in sorted(by_identity.items())
+        if len(rows) > 1
+    ]

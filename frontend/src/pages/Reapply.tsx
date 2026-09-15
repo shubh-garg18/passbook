@@ -49,16 +49,13 @@ export function Reapply() {
 
       <Why label="Why the ledger still shows the old names">
         <p>
-          Aliases and rules are applied <em>when a statement is pushed</em>. Editing them on
-          Payees changes what <em>future</em> pushes produce; it cannot reach back into rows
-          already in Firefly. The ledger is a record of what config said at push time, so
-          nothing is broken — this page is the reconciliation.
+          Aliases and rules are applied <em>when a statement is pushed</em>, so a row keeps
+          what it was pushed with. Nothing is broken — this page is the reconciliation, and
+          Payees now does it in the same action that writes the config.
         </p>
       </Why>
 
-      {/* Zero compared is not zero differing (§24.1) — `ReconcileCall` owns
-          that distinction, so both branches go through it. */}
-      {data.changes.length === 0 || data.considered === 0 ? (
+      {data.changes.length === 0 ? (
         <ReconcileCall data={data} />
       ) : (
         <>
@@ -71,23 +68,17 @@ export function Reapply() {
             </Card>
             <Card title="Renames">
               <p className="figure">{data.renames}</p>
-              {/* §24. A rename moves four things, not two: the description, the
-                  category, the payee account on the other side, and the rule
-                  tags. Showing only the first two made the other two look like
-                  they had not happened. */}
               <p className="muted">
-                {count(data.recats, 'category change')},{' '}
-                {count(data.counterparties, 'payee account rename')},{' '}
-                {count(data.retags, 'tag change')}
+                {count(data.recats, 'category change')}, {count(data.retags, 'tag change')}
               </p>
             </Card>
           </div>
 
           <div className="sheet">
             <div className="sheet__scroll">
-              <table>
+              <table className="changes">
                 <caption className="visually-hidden">
-                  Rows whose name or category would change
+                  Rows whose name, category, payee account or tags would change
                 </caption>
                 <thead>
                   <tr>
@@ -95,6 +86,8 @@ export function Reapply() {
                     <th scope="col" className="num">Amount</th>
                     <th scope="col">Name</th>
                     <th scope="col">Category</th>
+                    <th scope="col">Payee account</th>
+                    <th scope="col">Tags</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -120,6 +113,27 @@ export function Reapply() {
                           </>
                         ) : (
                           <span className="muted">{c.oldCategory || '(none)'}</span>
+                        )}
+                      </td>
+                      <td>
+                        {c.counterpartyChanged ? (
+                          <>
+                            <span className="was">{c.oldCounterparty || '—'}</span> <Arrow />{' '}
+                            <span className="now">{c.newCounterparty}</span>
+                          </>
+                        ) : (
+                          <span className="muted">{c.oldCounterparty || '—'}</span>
+                        )}
+                      </td>
+                      <td>
+                        {c.tagsChanged ? (
+                          <>
+                            <span className="was">{c.oldTags.join(', ') || '(none)'}</span>{' '}
+                            <Arrow />{' '}
+                            <span className="now">{c.newTags.join(', ') || '(none)'}</span>
+                          </>
+                        ) : (
+                          <span className="muted">{c.oldTags.join(', ') || '—'}</span>
                         )}
                       </td>
                     </tr>

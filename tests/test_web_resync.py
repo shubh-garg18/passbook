@@ -43,7 +43,18 @@ def firefly(monkeypatch):
             return False
 
         def asset_accounts(self):
-            return [{"id": "1", "attributes": {"name": "Test Account"}}]
+            # `current_balance` is not optional: the verdict reads it, and a
+            # fake without it fails inside a route rather than in the test.
+            return [
+                {
+                    "id": "1",
+                    "attributes": {
+                        "name": "Test Account",
+                        "current_balance": "5068.09",
+                        "currency_code": "INR",
+                    },
+                }
+            ]
 
         def account_transactions(self, account_id):
             return []
@@ -51,6 +62,12 @@ def firefly(monkeypatch):
         def update_transaction(self, group_id, payload):
             self.updates.append((group_id, payload))
             return {}
+
+        # §101: the client memoises per instance, and a push must read the
+        # ledger fresh before deciding a row is new. A fake without this is a
+        # fake the pusher cannot use.
+        def fresh(self):
+            return self
 
     FakeClient.instances = []
     import passbook.web.api as api_mod

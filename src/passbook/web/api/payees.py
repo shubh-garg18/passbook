@@ -1,17 +1,25 @@
-"""Naming payees and choosing their categories."""
+"""Naming and categorising, and the credit-card split. SPEC §16.1, §103."""
+
+from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+
 from flask import current_app, jsonify, request, session
+
 from ... import service
-from ...service import is_namespaced
-from ...config import load_accounts, load_payee_aliases, load_settings
-from ...config import load_attribution
+from ...config import (
+    load_accounts,
+    load_attribution,
+    load_payee_aliases,
+    load_settings,
+)
 from ...configwrite import (
     earnings_categories,
     plan_earnings,
-    plan_keep,
     plan_settlement,
+    plan_keep,
     known_categories,
     plan_aliases,
     plan_categories,
@@ -21,10 +29,28 @@ from ...configwrite import (
 from ...firefly.bootstrap import bootstrap as bootstrap_rules
 from ...firefly.bootstrap import load_rules
 from ...firefly.client import FireflyError
+from ...service import is_namespaced
 from .. import auth as A
-from ._base import _client, _fail, _money, _payee_row, api, log
-from ._scope import _account_scope, _date_scope, _within
-from ._reconcile import _sync_now, _synced_summary
+
+from ._base import (
+    _client,
+    _fail,
+    _money,
+    _payee_row,
+    _pending_password,
+    api,
+    log,
+)
+from ._reconcile import (
+    _preview,
+    _sync_now,
+    _synced_summary,
+)
+from ._scope import (
+    _account_scope,
+    _date_scope,
+    _within,
+)
 
 
 # --- payees ---------------------------------------------------------------
@@ -39,32 +65,38 @@ def _all_transactions(scope=None):
     narrows first and dedupes inside.
     """
     archive: Path = current_app.config["ARCHIVE"]
-    statements = service.archived_statements(archive)
+    accounts = scope if scope is not None else load_accounts()
+
+    if not accounts:
+        # Pre-registry: one unnamed ledger, deduped as it always was. Not worth
+        # indexing — this path exists for an install that has never registered
+        # an account, which by definition has almost nothing in it.
+        seen: dict[str, object] = {}
+        for statement in service.archived_statements(archive):
+            for txn in statement.transactions:
+                seen.setdefault(txn.txn_id, txn)
+        out = list(seen.values())
+    else:
+        # §114. Out of the index rather than by loading every statement: this
+        # is the read that grew with the whole history to answer a question
+        # about one window. 6209ms -> 55ms at 800 statements.
+        out = list(service.archived_transactions(accounts, archive))
+
+    # The staged statement is NOT in the archive and must not be indexed — it
+    # has not been pushed, and the index is a view of what has. Parsed and
+    # appended here, which is where it always was.
     pending = session.get("pending")
     if pending and Path(pending).exists():
         try:
-            statements.append(service.parse_statement(Path(pending)))
+            staged = service.parse_statement(Path(pending), password=_pending_password())
+            known = {t.txn_id for t in out}
+            out.extend(t for t in staged.transactions if t.txn_id not in known)
         except Exception as exc:  # a bad staged file must not blank the page
             log.warning("skipping pending %s: %s", Path(pending).name, exc)
-
-    accounts = scope if scope is not None else load_accounts()
-    if not accounts:
-        # Pre-registry: one unnamed ledger, deduped as it always was.
-        seen: dict[str, object] = {}
-        for statement in statements:
-            for txn in statement.transactions:
-                seen.setdefault(txn.txn_id, txn)
-        return list(seen.values())
-
-    out: list[object] = []
-    for account in accounts:
-        mine = service.statements_for(account, statements)
-        seen = {}
-        for statement in mine:
-            for txn in statement.transactions:
-                seen.setdefault(txn.txn_id, txn)
-        out.extend(seen.values())
     return out
+
+
+# --- the credit-card split. SPEC §103 ----------------------------------------
 
 
 @api.get("/attribution")
@@ -319,11 +351,16 @@ def set_earnings():
 @A.login_required
 def payees():
     scope, selected = _account_scope()
-    transactions = _all_transactions(scope)
+    start, end, window = _date_scope()
+    everything = _all_transactions(scope)
+    # Narrowed AFTER the per-account dedup, never before: dedup keys on the
+    # bank's id and a window that cut a duplicate's first appearance would let
+    # the second one through as if it were a new row.
+    transactions = _within(everything, start, end)
     rows = service.payee_inventory(transactions)
 
     # Hour-of-day per row, for the Day Rail at aggregate scale. This is the
-    # analysis that split Morning Stall from Late Counter by hand in Phase 4;
+    # analysis that split Day Canteen from Night Canteen by hand in Phase 4;
     # it belongs in the page rather than in a one-off script.
     #
     # Keyed on (token, channel) to match how `payee_inventory` groups rows. On
@@ -359,6 +396,10 @@ def payees():
             "selected": selected,
             "total": len(transactions),
             "totalClocked": sum(clocked.values()),
+            "window": window,
+            # What the window is hiding. A filtered list that does not say it is
+            # filtered is how a token gets decided twice — or never.
+            "outsideWindow": len(everything) - len(transactions),
         }
     )
 
@@ -368,6 +409,47 @@ def payees():
 def categories():
     """Only categories that already have a rule. D10: the UI never invents one."""
     return jsonify({"categories": known_categories()})
+
+
+def _merged_aliases(current: dict[str, str], submitted: dict[str, str]) -> dict[str, str]:
+    """The alias map as it will read after the write. Clearing one **removes** it.
+
+    The removal is the point. `plan_aliases` deletes an entry whose new value is
+    blank, but the merged map used to be built with `if v.strip()`, so a cleared
+    alias survived here and nowhere else. `plan_categories` resolves a token to
+    its display name through this map, so clearing an alias and choosing a
+    category in the same submission filed the category under the alias that had
+    just been deleted — while the row would be pushed under its raw token. The
+    rule then matched nothing, silently, and the payee looked categorised on the
+    page that had just written it.
+    """
+    merged = dict(current)
+    for token, value in submitted.items():
+        alias = (value or "").strip()
+        if alias:
+            merged[token] = alias
+        else:
+            merged.pop(token, None)
+    return merged
+
+
+def _display_renames(current: dict[str, str], alias_changes: dict[str, str]) -> dict[str, str]:
+    """old display name -> new display name, for every token whose alias moved.
+
+    The display name is what `description` carries and therefore what every
+    rule matches on, so a rename has to be followed through `rules.yaml` or the
+    category is silently orphaned. See `plan_rule_renames`.
+
+    Renames onto themselves and empty names are dropped: a rule payee of `""`
+    would match every description in the ledger.
+    """
+    renames: dict[str, str] = {}
+    for token, value in alias_changes.items():
+        was = (current.get(token) or token).strip()
+        now = ((value or "").strip() or token).strip()
+        if was and now and was != now:
+            renames[was] = now
+    return renames
 
 
 @api.post("/categories")
@@ -455,8 +537,7 @@ def payees_diff():
     alias_changes = {
         t: v for t, v in aliases_in.items() if (current.get(t) or "") != v.strip()
     }
-    merged = dict(current)
-    merged.update({t: v.strip() for t, v in alias_changes.items() if v.strip()})
+    merged = _merged_aliases(current, alias_changes)
 
     existing = service.rule_categories()
     category_changes = {
@@ -465,8 +546,12 @@ def payees_diff():
         if existing.get((merged.get(t) or t)) != v and (v or existing.get(merged.get(t) or t))
     }
 
+    renames = _display_renames(current, alias_changes)
     try:
-        changes = [plan_aliases(alias_changes), plan_categories(category_changes, merged)]
+        changes = [
+            plan_aliases(alias_changes),
+            plan_categories(category_changes, merged, renames=renames),
+        ]
     except KeyError as exc:
         # D10 in force: an unknown category is refused with the known list,
         # never created on the operator's behalf.
@@ -479,25 +564,140 @@ def payees_diff():
             ],
             "aliasChanges": alias_changes,
             "categoryChanges": category_changes,
+            "ledger": _ledger_impact(merged, category_changes),
+            # Categories this submission would leave with no payees at all.
+            # They keep existing — in the dropdown, and in Firefly — and can
+            # never match anything again, so a report on one is permanently
+            # empty. That is what happened to Day Canteen (§33).
+            "emptied": _emptied_categories(merged, category_changes),
         }
     )
+
+
+def _emptied_categories(aliases: dict[str, str], category_changes: dict[str, str]) -> list[str]:
+    """Categories that would be left with no payees by this submission.
+
+    Computed against the prospective rules, the same overlay the ledger impact
+    uses, so the warning is about what the button will do rather than about
+    what the file says now.
+    """
+    if not category_changes:
+        return []
+    after = _rules_with(load_rules(), aliases, category_changes)
+    before = {
+        str(spec["category"])
+        for spec in (load_rules().get("rules") or [])
+        if spec.get("category") and (spec.get("payees") or [])
+    }
+    return sorted(
+        str(spec["category"])
+        for spec in (after.get("rules") or [])
+        if spec.get("category")
+        and not (spec.get("payees") or [])
+        and not spec.get("notes_contains")
+        and not spec.get("notes_starts")
+        and str(spec["category"]) in before
+    )
+
+
+def _ledger_impact(aliases: dict[str, str], category_changes: dict[str, str]) -> dict | None:
+    """What this *unwritten* config would do to the rows already in Firefly.
+
+    The count used to be knowable only after the write, so the page asked the
+    operator to approve a config diff and then told them the ledger consequence
+    afterwards. It is the same question and it can be answered first: the
+    preview takes the prospective aliases and rules as an overlay rather than
+    reading the two files off disk.
+
+    `None` when Firefly cannot be asked. That is not an error on this route —
+    writing config is what the operator requested, and it works whether or not
+    the ledger is reachable.
+    """
+    st = load_settings()
+    if not st.firefly_token or not st.passbook_asset_account:
+        return None
+
+    rules = load_rules()
+    if category_changes:
+        # Mirror what `plan_categories` will write, so the preview reflects the
+        # submission rather than the file it is about to replace.
+        rules = _rules_with(rules, aliases, category_changes)
+
+    try:
+        with _client(st.firefly_url, st.firefly_token) as client:
+            changes, considered = service.reapply_preview(
+                client, st, current_app.config["ARCHIVE"], aliases=aliases, rules=rules
+            )
+    except FireflyError as exc:
+        log.info("ledger impact unavailable: %s", exc)
+        return None
+    return _preview(changes, considered)
+
+
+def _rules_with(rules: dict, aliases: dict[str, str], category_changes: dict[str, str]) -> dict:
+    """`rules.yaml` as it will read once these category decisions are written.
+
+    Rules match on the DISPLAY name — the alias where one exists, the raw token
+    otherwise — because that is what `description` carries at push time. Same
+    resolution `plan_categories` uses; if the two ever disagree the preview is
+    lying, which is the whole failure this route exists to avoid.
+    """
+    import copy
+
+    out = copy.deepcopy(rules)
+    specs = out.get("rules") or []
+    by_category = {spec.get("category"): spec for spec in specs if spec.get("category")}
+
+    for token, raw in category_changes.items():
+        category = (raw or "").strip()
+        display = (aliases.get(token) or token).strip()
+
+        for spec in specs:
+            payees = spec.get("payees") or []
+            if display in payees and spec.get("category") != category:
+                spec["payees"] = [p for p in payees if p != display]
+
+        spec = by_category.get(category)
+        # No invented rule shape, exactly as `plan_categories` refuses to invent
+        # one (D10). An unknown category has already been rejected upstream with
+        # a 422; if one reached here, the honest preview is to ignore it rather
+        # than to show a consequence the write will refuse.
+        if not category or spec is None:
+            continue
+        if display not in (spec.get("payees") or []):
+            spec.setdefault("payees", []).append(display)
+    return out
 
 
 @api.post("/payees/apply")
 @A.login_required
 def payees_apply():
-    aliases_in, categories_in = _split_submission(request.get_json(silent=True) or {})
+    body = request.get_json(silent=True) or {}
+    aliases_in, categories_in = _split_submission(body)
     # Both read the map as it stands NOW — before `plan_aliases` rewrites it.
     current = load_payee_aliases()
     merged = _merged_aliases(current, aliases_in)
     renames = _display_renames(current, aliases_in)
+    # The two remedies the confirm screen offers for §33's failures. Both are
+    # opt-in and both are applied in the SAME plan as the categorisation, so the
+    # tag can never be lost in the window between two writes.
+    keep_tags = {str(k): str(v) for k, v in (body.get("keepTags") or {}).items()}
+    remove_emptied = [str(name) for name in (body.get("removeEmptied") or [])]
 
     try:
         plan_aliases(aliases_in).apply()
         # Renames first, in the same plan: a rule matches the display name, so
         # relabelling a payee without following it through `rules.yaml` silently
-        # de-categorises the payee (§24.4).
-        plan_categories(categories_in, merged, renames=renames).apply()
+        # de-categorises the payee (§23.4).
+        plan_categories(categories_in, merged, renames=renames, tags=keep_tags).apply()
+        for name in remove_emptied:
+            # After the categorisation, or the category would still hold the
+            # payees that are about to move out of it and the removal would
+            # refuse — correctly, and confusingly.
+            try:
+                plan_remove_category(name).apply()
+            except (KeyError, ValueError) as exc:
+                log.warning("could not remove emptied category %r: %s", name, exc)
     except KeyError as exc:
         return _fail(str(exc), "unknown_category", 422)
 
@@ -512,57 +712,18 @@ def payees_apply():
                     f"Config written. Rules: {len(res.created)} created, "
                     f"{len(res.updated)} updated, {len(res.existing)} unchanged."
                 )
+
                 # The second half of editing a payee, in the same request.
                 # Config alone reaches only FUTURE pushes; the rows already in
                 # Firefly are what the operator is looking at, and leaving them
                 # for a separate destructive step meant they were never moved
-                # at all. Rules first, then the rows.
+                # at all. Rules first, then the rows — same order as §15.2, and
+                # for the same reason.
                 if st.passbook_asset_account:
                     synced = _sync_now(client, st)
                     summary += _synced_summary(synced)
         except FireflyError as exc:
-            summary = f"Config written, but bootstrap failed: {exc}"
+            summary = f"Config written, but the ledger store did not answer: {exc}"
     return jsonify({"ok": True, "summary": summary, "synced": synced})
-
-
-def _merged_aliases(current: dict[str, str], submitted: dict[str, str]) -> dict[str, str]:
-    """The alias map as it will read after the write. Clearing one **removes** it.
-
-    The removal is the point. `plan_aliases` deletes an entry whose new value is
-    blank, but the merged map used to be built with `if v.strip()`, so a cleared
-    alias survived here and nowhere else. `plan_categories` resolves a token to
-    its display name through this map, so clearing an alias and choosing a
-    category in the same submission filed the category under the alias that had
-    just been deleted — while the row would be pushed under its raw token. The
-    rule then matched nothing, silently, and the payee looked categorised on the
-    page that had just written it.
-    """
-    merged = dict(current)
-    for token, value in submitted.items():
-        alias = (value or "").strip()
-        if alias:
-            merged[token] = alias
-        else:
-            merged.pop(token, None)
-    return merged
-
-def _display_renames(current: dict[str, str], alias_changes: dict[str, str]) -> dict[str, str]:
-    """old display name -> new display name, for every token whose alias moved.
-
-    The display name is what `description` carries and therefore what every
-    rule matches on, so a rename has to be followed through `rules.yaml` or the
-    category is silently orphaned. See `plan_rule_renames`.
-
-    Renames onto themselves and empty names are dropped: a rule payee of `""`
-    would match every description in the ledger.
-    """
-    renames: dict[str, str] = {}
-    for token, value in alias_changes.items():
-        was = (current.get(token) or token).strip()
-        now = ((value or "").strip() or token).strip()
-        if was and now and was != now:
-            renames[was] = now
-    return renames
-
 
 

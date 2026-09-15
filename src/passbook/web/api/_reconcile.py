@@ -1,12 +1,32 @@
-"""Comparing config against the ledger, and writing the difference."""
+"""Comparing this config against the ledger, and writing the difference.
+
+SPEC §107. These were spread across `ops`, `payees` and `reapply`, and the split
+that separated those three surfaced why that was wrong: every one of them
+imported from the other two. Verifying the ledger, taking the dump a rewrite
+needs, shaping a preview and applying an in-place sync are one concern, and it
+is not any of the three pages that use it.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
 
 from flask import current_app
+
 from ... import ops, service
+from ...config import (
+    load_accounts,
+)
 from ...firefly.client import FireflyError
-from ._base import _money, log
 
+from ._base import (
+    _client,
+    _money,
+    log,
+)
 
-# --- re-apply -------------------------------------------------------------
 
 
 def _change(c) -> dict:
@@ -77,6 +97,7 @@ def _dump_state() -> dict:
         "fresh": bool(dump and dump[1] <= ops.REAPPLY_DUMP_MAX_AGE_MINUTES),
     }
 
+
 def _sync_now(client, st) -> dict:
     """Compare, write, then **re-read**. SPEC §23.
 
@@ -109,6 +130,7 @@ def _sync_now(client, st) -> dict:
         "remaining": remaining,
     }
 
+
 def _synced_summary(synced: dict) -> str:
     """One sentence about the ledger, phrased on what is true after re-reading it."""
     if synced["considered"] == 0:
@@ -131,3 +153,63 @@ def _synced_summary(synced: dict) -> str:
         )
     return "".join(parts)
 
+
+def _ledger_verdict(st, scope=None) -> dict:
+    """The §20 integrity check, for the Ledger strip.
+
+    `trashed` is deliberately **not** supplied: Firefly's API cannot list
+    soft-deleted journals (verified against the pinned tag) and this container has
+    no database credentials by design (§15.1). The check therefore reports itself
+    unchecked, and the strip must not paint that green — "cannot see" and "fine"
+    are different, which is the whole lesson of §19.
+    """
+    accounts = scope if scope is not None else load_accounts()
+    if not st.firefly_token or not accounts:
+        return {"ok": None, "headline": "not configured", "checks": []}
+    checks: list[service.Check] = []
+    try:
+        with _client(st.firefly_url, st.firefly_token) as client:
+            intents = [p.name for p in ops.outstanding_purge_intents()]
+            for account in accounts:
+                # Per account (§21.6). One account's rows are missing from the
+                # other by definition, so a single combined verdict would be
+                # noise; the worst result across accounts is what the strip shows.
+                verdict = service.verify_ledger(
+                    client,
+                    account,
+                    current_app.config["ARCHIVE"],
+                    trashed=None,
+                    intents=intents,
+                )
+                prefix = f"{account.slug}: " if len(accounts) > 1 else ""
+                checks.extend(
+                    service.Check(f"{prefix}{c.name}", c.ok, c.detail) for c in verdict.checks
+                )
+    except FireflyError as exc:
+        return {"ok": None, "headline": f"could not check: {exc}", "checks": []}
+    combined = service.LedgerVerdict(checks)
+    return {
+        "ok": combined.ok,
+        "headline": combined.headline,
+        "failed": len(combined.failed),
+        "unchecked": len(combined.unchecked),
+        "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in combined.checks],
+    }
+
+
+def _run_config_backup() -> str:
+    """Copy the config this container can actually reach.
+
+    The database dump needs the Docker socket, which this container
+    deliberately does not have (§15.3), so `make backup` stays a host action.
+    """
+    import tarfile
+
+    backups = Path("backups")
+    backups.mkdir(parents=True, exist_ok=True)
+    target = backups / f"config-prereapply-{date.today():%Y-%m-%d}.tar.gz"
+    with tarfile.open(target, "w:gz") as tar:
+        for item in sorted(Path("config").glob("*")):
+            tar.add(item, arcname=f"config/{item.name}")
+    target.chmod(0o600)
+    return str(target)

@@ -1,51 +1,63 @@
-"""The blueprint, the constants, and the serialisers every module shares.
+"""The blueprint, the constants and the helpers every route module shares.
 
-**A package attribute is not a patch seam.** A route resolves a name in its
-own module's globals, so a test that wants a fake store client patches
-`_base.FireflyClient` — the one place a client is ever constructed, which is
-why there is exactly one name to know.
+Split out of one 3752-line `api.py` in §107. Nothing here answers a request;
+everything here is what answering one needs.
 """
 
-import logging
-from decimal import Decimal
-from flask import Blueprint, g, has_app_context, jsonify
-from contextlib import contextmanager
-# Re-exported so a caller outside this package reaches them by name without
-# knowing which module they live in.
-from ... import ops, service, webauth  # noqa: F401
-from ...firefly.client import (  # noqa: F401
-    FireflyClient,
-    FireflyError,
-    ValidationFailed,
-)
+from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
+from decimal import Decimal
+
+
+from flask import Blueprint, g, has_app_context, jsonify, session
+
+# `FireflyError` is re-exported by the package and `service` is reached
+# through it by tests and by `app.py`; neither is used *here*, which is why
+# autoflake would remove them.
+from ...firefly.client import FireflyClient, FireflyError  # noqa: F401
+from ... import service  # noqa: F401
 
 log = logging.getLogger(__name__)
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
-api = Blueprint("api", __name__, url_prefix="/api")
-
 # A Canara three-month export is ~30 KB. Ten megabytes is already absurd, and
 # refusing early keeps a mistake from becoming a disk problem.
-#: How long an account's own name may be. Long enough for "Canara joint —
-#: household", short enough that the switcher stays a strip rather than a wall.
-ACCOUNT_LABEL_MAX = 40
-
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-
-#: How many banded rows the "try it" preview hands back. Enough to see the
-#: header, a sentinel and several transactions; not the whole statement.
-BANDED_PREVIEW = 14
-
-#: How many lines the shareable shape dump covers. Enough to reach the
-#: transaction header past a details table, which is what needs looking at.
-SHAPE_LINES = 40
 
 # §6.2 dispatches on magic bytes, never on the extension.
 ACCEPTED_SNIFF = {"xls", "xlsx", "html_table", "delimited", "pdf"}
 
 MIN_PASSWORD_LENGTH = 12
+
+# --- serialisation --------------------------------------------------------
+
+
+def _money(value) -> str | None:
+    """Decimal -> exact decimal string. Never a float, never a JSON number."""
+    if value is None:
+        return None
+    return f"{Decimal(value):.2f}"
+
+
+def _txn(t) -> dict:
+    return {
+        "id": t.txn_id,
+        "date": t.txn_date.isoformat(),
+        # The Day Rail's whole input. None for the rows whose narration carries
+        # no clock — rendered as an explicit absence, never as midnight.
+        "time": t.txn_time.strftime("%H:%M:%S") if t.txn_time else None,
+        "channel": t.channel,
+        "payee": t.payee,
+        "alias": t.payee_alias,
+        "display": t.payee_alias or t.payee,
+        "debit": _money(t.debit),
+        "credit": _money(t.credit),
+        "balance": _money(t.balance),
+        "reversal": t.is_reversal,
+    }
 
 
 # --- one store client per request. SPEC §101 ---------------------------------
@@ -91,32 +103,27 @@ def _client(url: str, token: str):
     yield cache[key]
 
 
-# --- serialisation --------------------------------------------------------
+def close_clients(_exception=None) -> None:
+    """Registered as the app-context teardown by `create_app`."""
+    for client in (getattr(g, "_store_clients", None) or {}).values():
+        try:
+            client.close()
+        except Exception:  # a teardown that raises loses the real error
+            log.debug("closing a store client failed", exc_info=True)
 
 
-def _money(value) -> str | None:
-    """Decimal -> exact decimal string. Never a float, never a JSON number."""
-    if value is None:
-        return None
-    return f"{Decimal(value):.2f}"
+def _pending_password() -> str | None:
+    """The password for the staged file, for this session only. §30.
 
+    An encrypted PDF is decrypted at upload and then read again by the preview,
+    the confirm and the payee inventory. Without carrying the password those
+    later reads fail on a file the operator has already unlocked — which reads
+    as the upload having silently half-worked.
 
-def _txn(t) -> dict:
-    return {
-        "id": t.txn_id,
-        "date": t.txn_date.isoformat(),
-        # The Day Rail's whole input. None for the rows whose narration carries
-        # no clock — rendered as an explicit absence, never as midnight.
-        "time": t.txn_time.strftime("%H:%M:%S") if t.txn_time else None,
-        "channel": t.channel,
-        "payee": t.payee,
-        "alias": t.payee_alias,
-        "display": t.payee_alias or t.payee,
-        "debit": _money(t.debit),
-        "credit": _money(t.credit),
-        "balance": _money(t.balance),
-        "reversal": t.is_reversal,
-    }
+    Session-scoped and never written to disk. The cookie is signed and
+    httpOnly; signing out or discarding the file drops it.
+    """
+    return (session.get("pending_password") or "").strip() or None
 
 
 def _parsed(parsed, *, filename: str | None = None) -> dict:
@@ -179,10 +186,12 @@ def _sync(status) -> dict:
         "filename": status.filename,
         "headline": status.headline,
         "detail": status.detail,
+        # The masthead stamps this. It comes from the same `last_sync` call as
+        # `age`, so the date on the stamp and the days in the caption can never
+        # be counting from different files.
+        "date": status.date,
     }
 
 
 def _fail(message: str, code: str = "error", status: int = 400):
     return jsonify({"error": message, "code": code}), status
-
-

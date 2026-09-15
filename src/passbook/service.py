@@ -11,8 +11,8 @@ import calendar
 import logging
 import re
 import shutil
-from collections.abc import Iterable
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -31,6 +31,8 @@ from .config import (
     save_accounts,
 )
 from .firefly.bootstrap import load_rules
+from .firefly.client import FireflyClient, FireflyError
+from .firefly.push import PushResult, push_transactions
 from .identity import (  # noqa: F401  (re-exported, §119)
     _NAMESPACED,
     _TXN_ID_FORM,
@@ -40,8 +42,6 @@ from .identity import (  # noqa: F401  (re-exported, §119)
 )
 from . import index as index_mod
 from . import parsecache
-from .firefly.client import FireflyClient, FireflyError
-from .firefly.push import PushResult, push_transactions
 from .loaders import load as load_statement
 from .models import StatementMeta, Transaction
 from .validate import UnknownAccount, assert_account, check
@@ -92,6 +92,8 @@ def parse_statement(
     narration_mod.enrich(transactions, aliases if aliases is not None else load_payee_aliases())
     warnings = check(meta, transactions)
     return ParsedStatement(path=path, meta=meta, transactions=transactions, warnings=warnings)
+
+
 def account_matches(meta: StatementMeta, settings: Settings) -> None:
     """SPEC §6.7, single-account form. Raises AccountMismatch.
 
@@ -158,9 +160,7 @@ class SyncStatus:
     headline: str
     detail: str = ""
     # ISO, or None when nothing has ever been pushed. The masthead stamps it,
-    # so it travels with the age rather than being derived from a second field —
-    # otherwise the date on the stamp and the days in the caption can end up
-    # counting from different files.
+    # so it travels with the age rather than being derived from a second field.
     date: str | None = None
 
 
@@ -169,20 +169,103 @@ def _days(n: int) -> str:
     return f"{n} day" if n == 1 else f"{n} days"
 
 
-def sync_status() -> SyncStatus:
-    synced = last_sync()
+#: How bad each state is, worst first. `stale` outranks `never` because it is
+#: the one with a clock on it: rows that age out of the bank's download window
+#: are gone from every copy, and an account nobody has pushed to yet is a thing
+#: you can still do at leisure.
+_SYNC_SEVERITY = {"stale": 3, "never": 2, "warn": 1, "ok": 0}
+
+
+def _worst(statuses) -> "SyncStatus":
+    ordered = sorted(statuses, key=lambda s: -_SYNC_SEVERITY.get(s.state, 0))
+    return ordered[0] if ordered else SyncStatus("never", None, None, "no accounts")
+
+
+def scoped_paths(
+    accounts: "list[Account] | None", archive: Path = Path("archive")
+) -> set[Path] | None:
+    """The archived files belonging to these accounts. SPEC §104.
+
+    None for "every file", which is what an unscoped caller wants and what a
+    single-account install has always had.
+
+    **Decided by reading the statement, not by where it sits.** `archive/` is
+    per-account by directory (§21.6), so a path test would nearly always agree —
+    and it would be wrong twice: for the pre-registry layout, where files sit
+    directly under `archive/<month>/` with no slug in the path at all, and for a
+    file moved by hand into the wrong folder. `statements_for` already answers
+    this question by account number, and having one rule rather than two is the
+    whole point. It is cheap now: the archive parses once and is cached (§101).
+    """
+    if accounts is None:
+        return None
+    # §118. Out of the index. The attribution is the same one — decided by what
+    # the statement SAYS, at the moment it was indexed — but asking for it no
+    # longer costs a parse of the whole archive on every page load.
+    numbers = [a.account_number.strip() for a in accounts]
+    try:
+        with index_mod.connect() as conn:
+            index_mod.sync(archive, conn, parse_statement)
+            return index_mod.paths(conn, numbers)
+    except Exception as exc:
+        log.warning("index unavailable, reading the archive directly: %s", exc)
+        statements = archived_statements(archive)
+        keep: set[Path] = set()
+        for account in accounts:
+            keep.update(s.path for s in statements_for(account, statements))
+        return keep
+
+
+def sync_status(
+    accounts: "list[Account] | None" = None, archive: Path = Path("archive")
+) -> SyncStatus:
+    """How long since a statement last reached the ledger. SPEC §104.
+
+    Scoped to `accounts` when given. Unscoped it answered for the whole archive,
+    which on a two-account install put a Canara download warning on the Union
+    tab — *"this shouldnt be seen on ledger when union is selected"*. The
+    warning is about one bank's download window, so it belongs to that bank's
+    account and not to the page.
+
+    **Over several accounts it aggregates to the WORST, never the newest file.**
+    Taking the newest across a combined scope is how a three-week-old Canara gap
+    disappears behind a Union statement pushed this morning — one fresh account
+    silently answering for a stale one, which is the exact dilution §18 warned
+    about and which this function reintroduced the day it learned to scope.
+    """
+    if accounts is not None and len(accounts) > 1:
+        return _worst(sync_status([a], archive) for a in accounts)
+
+    synced = last_sync(archive, only=scoped_paths(accounts, archive))
     if synced is None:
+        # Named, when the question is about one account. "Nothing in archive/"
+        # on a two-account install reads as a broken page rather than as an
+        # account nobody has pushed to yet — which is a thing the operator can
+        # act on in one click, and the reason the sentence exists.
+        one = accounts[0] if accounts and len(accounts) == 1 else None
         return SyncStatus(
             state="never",
             age=None,
             filename=None,
-            headline="nothing in archive/ — no statement has been pushed yet",
+            headline=(
+                f"no statement has been pushed for {one.display} yet"
+                if one
+                else "nothing in archive/ — no statement has been pushed yet"
+            ),
+            detail=(
+                "Its rows are not in the ledger, so every figure on this page is "
+                "empty rather than zero. Upload a statement to fill it."
+                if one
+                else ""
+            ),
         )
 
     name, age, when = synced
     stamped = when.isoformat()
     if age <= SYNC_STALE_DAYS:
-        return SyncStatus("ok", age, name, f"last sync {_days(age)} ago ({name})", date=stamped)
+        return SyncStatus(
+            "ok", age, name, f"last sync {_days(age)} ago ({name})", date=stamped
+        )
 
     if age <= SYNC_URGENT_DAYS:
         return SyncStatus(
@@ -190,10 +273,10 @@ def sync_status() -> SyncStatus:
             age,
             name,
             f"last successful sync was {_days(age)} ago ({name})",
-            date=stamped,
-            detail="Canara only serves statements going back so far, so a gap is data loss "
+            "Canara only serves statements going back so far, so a gap is data loss "
             "rather than lateness — rows that age out of the download window are gone "
             "from every copy, including the backups. Download this week.",
+            date=stamped,
         )
 
     return SyncStatus(
@@ -201,12 +284,12 @@ def sync_status() -> SyncStatus:
         age,
         name,
         f"last successful sync was {_days(age)} ago ({name})",
-        date=stamped,
-        detail="Download today. Past three weeks the oldest missing transactions may already "
+        "Download today. Past three weeks the oldest missing transactions may already "
         "sit outside the range Canara will still hand over. Nothing in this project can "
         "bring those back — not `make restore`, not the off-site archives. They only "
         "ever existed at the bank, and only for a while. There is no cron to catch this "
         "for you (SPEC D7: WSL2 sleeps with Windows).",
+        date=stamped,
     )
 
 
@@ -240,6 +323,8 @@ def archive_statement(
     parsed: ParsedStatement,
     archive: Path = Path("archive"),
     account: Account | None = None,
+    *,
+    password: str | None = None,
 ) -> Path:
     """Move a pushed statement into the archive. Only after a successful push.
 
@@ -253,12 +338,84 @@ def archive_statement(
     DR drill are untouched. `archived_statements` rglobs, so both layouts are
     read, and `statements_for` attributes each file by what it SAYS rather than
     where it sits.
+
+    **An encrypted PDF is stored decrypted.** SPEC §105.1. Measured, on the
+    first non-Canara statement to reach the archive: the file went in still
+    locked and `archived_statements` skipped it with
+    `This PDF is encrypted and needs its password` — so the rows were in the
+    ledger and every figure derived from the *statement* was empty. The balance
+    chart, the Day Rail, the time-of-day column and the payee inventory all read
+    the archive, and `verify_ledger` compares against it, which means §20 could
+    not check the account at all and said so as a warning nobody would connect
+    to a password.
+
+    The alternative was storing the password, and a password kept for the life
+    of an archive is a credential with no expiry. The protection it offered was
+    for the file **in transit** — this one arrives by email — and it buys
+    nothing here: `archive/` already sits beside `config/accounts.yaml`, which
+    holds account numbers in full, and `backups/`, which holds the whole ledger.
+    Both are gitignored and neither is encrypted.
+
+    So the archive holds a readable copy and the operator's own download stays
+    exactly as the bank sent it. `passbook verify-ledger` re-reads what is
+    archived, which is the whole reason it has to be readable.
     """
     target = archive / (account.slug if account else "") / f"{parsed.meta.period_to:%Y-%m}"
     target.mkdir(parents=True, exist_ok=True)
     destination = target / parsed.path.name
-    shutil.move(str(parsed.path), str(destination))
+    if _unlock_into(parsed.path, destination, password):
+        parsed.path.unlink(missing_ok=True)
+    else:
+        shutil.move(str(parsed.path), str(destination))
     return destination
+
+
+def _unlock_into(source: Path, destination: Path, password: str | None) -> bool:
+    """Write `source` to `destination` without its password. SPEC §105.1.
+
+    False when there is nothing to unlock — not a PDF, or a PDF that was never
+    encrypted — and the caller moves the file as it always did.
+
+    Raises nothing it can avoid raising: a file this cannot rewrite is better
+    archived locked than not archived at all, because the push has already
+    happened and losing the statement is the worse outcome.
+    """
+    if source.suffix.lower() != ".pdf":
+        return False
+    try:
+        import pikepdf
+    except ImportError:  # pragma: no cover — pikepdf is a hard dependency
+        return False
+    try:
+        with pikepdf.open(source) as document:
+            if not document.is_encrypted:
+                return False
+    except pikepdf.PasswordError:
+        pass
+    except Exception as exc:
+        log.warning("could not inspect %s before archiving: %s", source.name, exc)
+        return False
+
+    from .loaders.pdf import _decrypt
+
+    try:
+        # The caller's password, because only the caller has it: it lives for
+        # one request and is never stored (§30). `_decrypt` falls back to the
+        # configured one when this is None, which is the Canara path.
+        buffer = _decrypt(source, password)
+    except Exception as exc:
+        log.warning(
+            "archiving %s still encrypted: %s. Every figure read from the "
+            "statement will be empty for this account until it is replaced with "
+            "a readable copy.",
+            source.name,
+            exc,
+        )
+        return False
+
+    destination.write_bytes(buffer.getvalue() if hasattr(buffer, "getvalue") else buffer.read())
+    log.info("archived %s with its password removed (§105.1)", source.name)
+    return True
 
 
 # --- payee inventory ---------------------------------------------------------
@@ -318,8 +475,8 @@ def predict_category(description: str, narration: str, rules: dict | None = None
     Inverting the `payees:` lists alone is not enough, and getting that wrong
     made the re-apply preview claim rows would *lose* their category:
 
-    * `description_starts` is a PREFIX match, so a rule listing `Canteen`
-      also catches `Canteen (via card)`.
+    * `description_starts` is a PREFIX match, so `Mother` also catches
+      `Mother (via friend)`.
     * Several rules match the raw narration instead — `Bank Charges` via
       `notes_contains: CHARGES`, `Interest Income` via `notes_starts: SBINT`,
       `Credit Card` via `notes_contains: **TCARD`. Those have no payee entry at
@@ -341,6 +498,21 @@ def predict_category(description: str, narration: str, rules: dict | None = None
         if matched:
             found = category
     return found
+
+
+# Tags a payee edit can move, and therefore the only tags an in-place sync is
+# allowed to write. SPEC §23.2.
+#
+# Deliberately NOT the whole tag vocabulary:
+#
+#   * `reversal` is set by the pusher from a parser-derived fact (§7.2). Config
+#     cannot change it, so a sync must never touch it.
+#   * `large-oneoff` is the rules engine's alone. push.py refuses to compute it
+#     client-side for a stated reason — the pusher cannot know the category a
+#     row will land in, so it tagged the two rows §8 exists to exclude. Guessing
+#     it here would repeat exactly that mistake.
+#
+# Everything outside this set is carried through a sync untouched.
 
 
 def managed_tags(rules: dict | None = None) -> set[str]:
@@ -393,6 +565,7 @@ def predict_tags(
             tags.add(str(not_earnings["tag"]))
 
     return tags
+
 
 def payee_inventory(
     transactions: list[Transaction],
@@ -521,6 +694,26 @@ def _live_splits(client: FireflyClient, account_id: str) -> dict[str, tuple[str,
                 live[str(split["external_id"])] = (str(group["id"]), split)
     return live
 
+
+def rows_in_ledger(client: FireflyClient, asset_account: str) -> int:
+    """How many rows Firefly holds against this asset account, by name.
+
+    Public because removing an account has to say how many rows it is about to
+    stop managing (§38), and a management screen reaching into `_live_splits`
+    to find that out would be the second caller of a private helper — which is
+    how a private helper stops being one without anybody deciding it should.
+
+    An asset account Firefly has never heard of is 0, not an error: the registry
+    can name one that was deleted in Firefly's own UI, and that is precisely a
+    state the operator is entitled to clean up from here.
+    """
+    match = next(
+        (a for a in client.asset_accounts() if a["attributes"]["name"] == asset_account),
+        None,
+    )
+    return len(_live_splits(client, str(match["id"]))) if match else 0
+
+
 def _match(
     live: dict[str, tuple[str, dict]], account: Account | None, txn_id: str
 ) -> tuple[str, str, dict] | None:
@@ -554,6 +747,7 @@ def _counterparty(split: dict) -> str:
     if (split.get("type") or "withdrawal") == "withdrawal":
         return str(split.get("destination_name") or "")
     return str(split.get("source_name") or "")
+
 
 def reapply_preview(
     client: FireflyClient,
@@ -657,6 +851,7 @@ def reapply_preview(
     changes.sort(key=lambda c: (c.date, c.external_id))
     return changes, considered
 
+
 @dataclass
 class SyncResult:
     """What an in-place sync actually did. SPEC §23."""
@@ -755,7 +950,7 @@ def sync_ledger(
 # Getting this wrong is not a rounding error. Measured on one real three-month
 # ledger, the naive by-type reading was **three times** the true spend and
 # **1.6 times** the true earnings. A chart drawn on the naive numbers is not
-# roughly right, and it looks entirely plausible.
+# roughly right, it is three times wrong, and it looks entirely plausible.
 
 # Deposits that are money coming back rather than money earned carry this tag,
 # applied by the one strict rule in §8.1. It can never land on a withdrawal:
@@ -895,8 +1090,6 @@ class Spread:
 
 
 # Below this a five-number summary is noise wearing a chart's clothes.
-MIN_FOR_SPREAD = 5
-
 MIN_FOR_SPREAD = 5
 
 
@@ -1146,6 +1339,7 @@ class Attribution:
             return day
         last = calendar.monthrange(day.year, day.month)[1]
         return day.replace(day=min(self.to_day, last))
+
 
 def ledger_analysis(
     splits: Iterable[dict],
@@ -1452,6 +1646,10 @@ def ledger_analysis(
 
 _BARE_TXN_ID = re.compile(r"^\d{14}$")
 
+# Identity lives in `identity.py` so that `firefly.push` can import it —
+# `service` imports the pusher, so the pusher cannot import `service`. The
+# names are re-exported here because every caller already spells them
+# `service.txn_id_of` (§21.1, §119).
 def route_statement(meta: StatementMeta, accounts: list[Account]) -> Account:
     """Which of my accounts is this statement for? SPEC §21.2.
 
@@ -1497,12 +1695,42 @@ def register_from_statement(
         bank=bank,
         account_number=meta.account_number.strip(),
         asset_account=asset_account.strip(),
-        label=meta.account_name.strip()[:40],
+        label=default_label(meta, bank),
     )
     accounts.append(account)
     save_accounts(accounts)
     log.warning("registered account %s (%s) -> %r", account.slug, account.masked, account.asset_account)
     return account
+
+
+def default_label(meta: StatementMeta, bank: str) -> str:
+    """The name to put on this account's tab. SPEC §100.
+
+    `account_name` is read off the statement's preamble, and it is the one
+    metadata field with no floor under it — the account number routes every row
+    and is refused when absent (§21.7), while this one only names a button. So
+    it is allowed to be wrong, and on two of three real banks it is:
+
+        Canara   a real name
+        Union    `Address :`
+        SBI      nothing at all
+
+    Union's preamble puts `Name` and `Address` in one line, so `_find_metadata`'s
+    prefix strategy takes the label as the value; SBI prints no name. Both gave
+    the operator a chip they could not read — one blank, one saying `Address :`.
+
+    **A trailing colon is the tell**, and it is deliberately not stripped in
+    `_find_metadata`: it is the evidence that a label was read where a value
+    should be, and losing it there would only make `Address` look like a name.
+
+    The fallback names the account the way the bank does, which is always true
+    and never mysterious. The operator can rename it from Accounts either way —
+    this is a default, not a decision.
+    """
+    name = meta.account_name.strip()
+    if name.endswith(":") or not any(character.isalpha() for character in name):
+        name = ""
+    return name[:40] or f"{bank.title()} ****{meta.account_number.strip()[-4:]}"
 
 
 def statements_for(
@@ -1722,7 +1950,7 @@ def verify_ledger(
             Check(
                 "trashed",
                 None,
-                "needs the database; Firefly's API cannot list soft-deleted "
+                "needs the database; the ledger store's API cannot list soft-deleted "
                 "journals and this process has no DB access (§15.1). Run "
                 "`passbook verify-ledger` on the host.",
             )
@@ -1744,7 +1972,7 @@ def verify_ledger(
                 # only removes what is ALREADY soft-deleted and cannot touch a
                 # live row, which is why it is the right tool.
                 else f"{trashed} soft-deleted journal(s) remain — a re-push of "
-                "identical rows will be refused as duplicates (§7.3). Firefly's "
+                "identical rows will be refused as duplicates (§7.3). The store's "
                 "own `DELETE /api/v1/data/purge` clears already-deleted records "
                 "and cannot touch a live row; `client.purge_trashed()` calls it. "
                 "Do NOT reach for `passbook purge`, which deletes every managed "
@@ -1801,7 +2029,7 @@ def verify_ledger(
             Check(
                 "opening balance",
                 False,
-                "MISSING — without it Firefly's balance cannot equal the bank's, "
+                "MISSING — without it the ledger balance cannot equal the bank's, "
                 "and every figure on the account is short by the opening amount",
             )
         )
@@ -1844,21 +2072,55 @@ _ARCHIVE_CACHE: dict[tuple, list["ParsedStatement"]] = {}
 #: almost always the current one, and the only other states worth holding are
 #: the ones either side of a sync.
 _ARCHIVE_CACHE_MAX = 4
+
+
+def _archive_key(paths: list[Path]) -> tuple:
+    out = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            # Vanished between the listing and the stat. Fold the miss into the
+            # key rather than raising: the next call will see the new listing.
+            out.append((str(path), -1, -1.0))
+            continue
+        out.append((str(path), stat.st_size, stat.st_mtime))
+    return tuple(out)
+
+
 def archived_statements(archive: Path = Path("archive")) -> list[ParsedStatement]:
     """Every archived statement, parsed. A bad file is skipped, never fatal.
 
     Statements overlap by design (a weekly download re-covers earlier weeks), so
     callers dedupe on `txn_id` — the bank's own key (§6.1).
+
+    Cached on the directory's own contents — see `_ARCHIVE_CACHE`. The returned
+    list is shared, so **callers must not mutate it**; every one of them either
+    reads it or builds something new from it, and `dedupe_transactions` already
+    copies (§57).
     """
     if not archive.is_dir():
         return []
+    paths = sorted(p for p in archive.rglob("*") if p.is_file() and not p.name.startswith("."))
+    key = (str(archive), _archive_key(paths))
+    hit = _ARCHIVE_CACHE.get(key)
+    if hit is not None:
+        return hit
+
     out = []
-    for path in sorted(p for p in archive.rglob("*") if p.is_file() and not p.name.startswith(".")):
+    for path in paths:
         try:
             out.append(parse_statement(path))
         except Exception as exc:  # one unreadable archive must not blank a page
             log.warning("skipping %s: %s", path.name, exc)
             continue
+
+    if len(_ARCHIVE_CACHE) >= _ARCHIVE_CACHE_MAX:
+        # Oldest first: dicts keep insertion order, so this is a plain FIFO and
+        # not an LRU. A cache of four does not need the bookkeeping.
+        del _ARCHIVE_CACHE[next(iter(_ARCHIVE_CACHE))]
+    _ARCHIVE_CACHE[key] = out
+    log.info("parsed %d archived statement(s) (%d cached states)", len(out), len(_ARCHIVE_CACHE))
     return out
 
 
@@ -1902,12 +2164,9 @@ def account_transactions(
     loss §21.1 exists to prevent: the two fixture statements share all 93 ids, so
     a naive merge keeps 93 of 186 rows and reports success.
     """
-    statements = statements_for(account, [*archived_statements(archive), *extra])
-    seen: dict[str, Transaction] = {}
-    for statement in statements:
-        for txn in statement.transactions:
-            seen.setdefault(txn.txn_id, txn)
-    return list(seen.values())
+    return dedupe_transactions(
+        statements_for(account, [*archived_statements(archive), *extra])
+    )
 
 
 def dedupe_transactions(statements: Iterable[ParsedStatement]) -> list[Transaction]:
@@ -1962,6 +2221,8 @@ def archived_transactions(
         for account in accounts:
             out.extend(dedupe_transactions(statements_for(account, statements)))
         return out
+
+
 def archived_coverage(
     accounts: "list[Account]", archive: Path = Path("archive")
 ) -> tuple[date, date] | None:
@@ -1988,11 +2249,25 @@ def archived_coverage(
         if not spans:
             return None
         return min(s[0] for s in spans), max(s[1] for s in spans)
-def sync_history(archive: Path = Path("archive"), limit: int = 10) -> list[dict]:
-    """Recently archived statements, newest first. Filenames only, no contents."""
+
+
+def sync_history(
+    archive: Path = Path("archive"),
+    limit: int = 10,
+    accounts: "list[Account] | None" = None,
+) -> list[dict]:
+    """Recently archived statements, newest first. Filenames only, no contents.
+
+    Scoped to `accounts` when given (§104): "Recently archived" listing another
+    account's downloads is the same mistake as the sync warning, one column
+    over.
+    """
     if not archive.is_dir():
         return []
     files = [p for p in archive.rglob("*") if p.is_file() and not p.name.startswith(".")]
+    only = scoped_paths(accounts, archive)
+    if only is not None:
+        files = [p for p in files if p in only]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return [
         {

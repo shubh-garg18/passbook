@@ -17,6 +17,7 @@
 
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { api } from '../lib/api'
 import { count } from '../lib/money'
@@ -254,9 +255,9 @@ export function AddBank() {
         {/* SPEC §55. "One bank out of the box" stopped being true when profiles
             started shipping, and the list is the first thing worth knowing on
             this page — most people arriving here do not need it. */}
-        <Known />{' '}
-        Any other bank needs a one-off description of where its columns are —
-        no code, and the file never leaves this machine.
+        <Known />
+        Any other bank needs a one-off description of
+        where its columns are — no code, and the file never leaves this machine.
       </p>
 
       <h2 className="section">1 — show it your statement</h2>
@@ -531,16 +532,17 @@ export function AddBank() {
             >
               {save.isPending ? 'Saving…' : attempt ? 'Save this bank' : 'Try it first'}
             </button>
+            <Link className="button" to="/accounts/add">
+              Add account
+            </Link>
           </div>
 
           <Notice>
             <p>
               Saving writes <code>config/banks/&lt;bank&gt;.yaml</code> and loads it back to
-              prove it parses. Then register the account:{' '}
-              <code>passbook accounts add &lt;statement&gt; --bank &lt;name&gt;</code>. The
-              account number is read from the file, never typed. If the balance chain
-              does not hold there, a column is mapped wrongly — fix it here, never the
-              check.
+              prove it parses. Then go to <strong>Add account</strong>, upload the same
+              statement and pick your bank. If the balance chain does not hold there, a
+              column is mapped wrongly — fix it here, never the check.
             </p>
           </Notice>
         </>
@@ -742,20 +744,16 @@ function ShareShape({ shapes }: { shapes: string[] }) {
  */
 function Known() {
   const { data } = useQuery({
-    queryKey: ['banks'],
-    queryFn: () => api.get<{ banks: string[] }>('/banks'),
+    queryKey: ['accounts', 'candidates'],
+    queryFn: () => api.get<{ banks: string[] }>('/accounts/candidates'),
     retry: false,
   })
   const banks = data?.banks ?? []
-  // No fallback list. Naming banks the server did not confirm would be the
-  // one thing this page cannot afford to be wrong about — somebody would read
-  // "passbook reads SBI", not do this, and find out at push time.
-  if (banks.length === 0) return <>passbook reads several banks out of the box.</>
+  if (banks.length === 0) return <>passbook reads a few banks out of the box.</>
   return (
     <>
-      passbook already reads <strong>{banks.join(', ')}</strong> — if yours is there you
-      do not need this page, just register the account:{' '}
-      <code>passbook accounts add &lt;statement&gt; --bank &lt;name&gt;</code>.
+      passbook already reads <strong>{banks.join(', ')}</strong> — if yours is there, you
+      do not need this page. Go straight to <Link to="/accounts/add">Add an account</Link>.
     </>
   )
 }

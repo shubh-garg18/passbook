@@ -4642,3 +4642,51 @@ after a backup, never something a check does.
 - [x] The `rows` check counts and names repeats.
 - [x] Identity extracted so the pusher can ask the question at all.
 
+---
+
+## 35. Where this repository is allowed to differ
+
+passbook is released from a private repository. The two had drifted — not in
+what they claimed, but in what they did — so the whole tree was diffed module by
+module rather than read for a sense of it.
+
+**Fourteen modules differed. Four were meant to.**
+
+### 35.1 What the diff found
+
+Divergence that looked cosmetic and was not:
+
+* **The payee grammars were a release behind.** Two UPI layouts — one that puts
+  the UTR before the direction, one hidden behind the bank's own words — were
+  missing. passbook ships a profile for the bank that writes them, so a user of
+  that bank got worse payee parsing than the code was capable of.
+* **`rows_in_ledger` did not exist**, and the account-removal route called it.
+  Removing an account raised `AttributeError` at request time. No test reached
+  it, because the tests that cover removal stub the store.
+* **`close_clients` was never registered.** The per-request store client was
+  ported without the teardown that closes it, so every request leaked one.
+* **`verify-ledger` named a remedy that did not exist.** It told the operator to
+  run `passbook dedupe` after finding duplicate rows; the command had not been
+  ported. A check that names a fix nobody can run is worse than one that says
+  nothing, because it reads as handled.
+
+All four are the same shape: **the behaviour was ported, the thing that makes it
+work was not.** None of them failed a test.
+
+### 35.2 What is allowed to differ, and why
+
+| | |
+|---|---|
+| `cli.py` | passbook has `upgrade` and a migration runner. People pull this repository; a migration nobody runs is a broken ledger. The private one has a single operator who is present for every change. |
+| The setup wizard, CI, `CONTRIBUTING.md` | release engineering. There is nobody to onboard in a repository of one. |
+| Brand and theme names | the private repository's own identity. A public one must not carry it — the same rule as the figures, one step out. |
+| `docs/`, `DECISIONS.md` | written for a stranger rather than for the person who already knows. |
+
+Everything else should match, and now does.
+
+### 35.3 The rule this sets
+
+**A port is not finished when the feature works.** It is finished when the
+module it came from and the module it landed in differ only where the difference
+was chosen. That is a diff, not a judgement — so it can be run again, and was.
+

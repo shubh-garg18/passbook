@@ -1,19 +1,40 @@
-"""Re-apply: the in-place update, and the destructive rebuild."""
+"""Writing the current config onto rows already pushed. SPEC §23."""
 
-from datetime import date
+from __future__ import annotations
+
 from pathlib import Path
+
+
 from flask import current_app, jsonify
+
 from ... import ops, service
-from ...config import load_settings
+from ...config import (
+    load_settings,
+)
 from ...firefly.bootstrap import bootstrap as bootstrap_rules
 from ...firefly.bootstrap import load_rules
 from ...firefly.client import FireflyError
 from ...firefly.purge import find_candidates
 from ...firefly.purge import purge as purge_transactions
 from .. import auth as A
-from ._base import _client, _fail, _money, api, log
-from ._reconcile import _dump_state, _preview, _sync_now
-from .ops import _ledger_verdict
+
+from ._base import (
+    _client,
+    _fail,
+    _money,
+    api,
+    log,
+)
+from ._reconcile import (
+    _dump_state,
+    _ledger_verdict,
+    _preview,
+    _run_config_backup,
+    _sync_now,
+)
+
+
+# --- re-apply -------------------------------------------------------------
 
 
 @api.get("/reapply")
@@ -28,9 +49,9 @@ def reapply_preview():
                 client, st, current_app.config["ARCHIVE"]
             )
     except FireflyError as exc:
-        return _fail(f"Firefly did not answer: {exc}", "firefly", 502)
+        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
 
-    return jsonify({**_preview(changes, considered), "dump": _dump_state()})
+    return jsonify(_preview(changes, considered))
 
 
 @api.post("/reapply/sync")
@@ -51,16 +72,18 @@ def reapply_sync():
 
     It cannot fix everything, and says so rather than implying otherwise. A row
     missing from Firefly, a wrong amount or a wrong date still need
-    `/reapply/run`.
+    `/reapply/run`; §20's verdict is returned alongside so the difference is
+    visible rather than assumed.
     """
     st = load_settings()
     if not st.firefly_token or not st.passbook_asset_account:
         return _fail("FIREFLY_TOKEN or PASSBOOK_ASSET_ACCOUNT is not set.", "unconfigured", 503)
+
     try:
         with _client(st.firefly_url, st.firefly_token) as client:
             synced = _sync_now(client, st)
     except FireflyError as exc:
-        return _fail(f"Firefly did not answer: {exc}", "firefly", 502)
+        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
 
     log.info(
         "in-place sync: %d updated, %d failed, %s still differ",
@@ -68,9 +91,15 @@ def reapply_sync():
         synced["failed"],
         "unknown" if synced["remaining"] is None else synced["remaining"],
     )
-    # `remaining is None` is unverified, not clean — it must not read as ok
-    # (non-negotiable 11).
-    return jsonify({"ok": synced["failed"] == 0 and synced["remaining"] == 0, **synced})
+    return jsonify(
+        {
+            # `remaining is None` is unverified, not clean — it must not read as
+            # ok (non-negotiable 11).
+            "ok": synced["failed"] == 0 and synced["remaining"] == 0,
+            **synced,
+            "ledger": _ledger_verdict(st),
+        }
+    )
 
 
 @api.post("/reapply/run")
@@ -173,15 +202,20 @@ def reapply_run():
         pushed = duplicates = failed = 0
         for path in statements:
             parsed = service.parse_statement(path)
-            service.account_matches(parsed.meta, st)
-            res = service.push_statement(parsed, st, client)
+            # Registry-aware (§21.2). The single-account form refused every
+            # statement belonging to a second account — in the middle of a
+            # rebuild, i.e. after the purge, which is the worst possible place
+            # to stop. `allow_register=False`: a rebuild re-pushes what it just
+            # deleted and must never invent an account while doing it.
+            target = service.resolve_account(parsed.meta, st, client=client, allow_register=False)
+            res = service.push_statement(parsed, st, client, account=target)
             pushed += res.pushed
-            duplicates += res.duplicates
+            duplicates += res.skipped
             failed += res.failed
         steps.append(
             {
                 "state": "ok" if not failed else "bad",
-                "message": f"re-pushed {pushed}, {duplicates} duplicate(s), {failed} failed",
+                "message": f"re-pushed {pushed}, {duplicates} already present, {failed} failed",
             }
         )
 
@@ -237,23 +271,3 @@ def reapply_run():
             "ledger": verdict,
         }
     )
-
-
-def _run_config_backup() -> str:
-    """Copy the config this container can actually reach.
-
-    The database dump needs the Docker socket, which this container
-    deliberately does not have (§15.3), so `make backup` stays a host action.
-    """
-    import tarfile
-
-    backups = Path("backups")
-    backups.mkdir(parents=True, exist_ok=True)
-    target = backups / f"config-prereapply-{date.today():%Y-%m-%d}.tar.gz"
-    with tarfile.open(target, "w:gz") as tar:
-        for item in sorted(Path("config").glob("*")):
-            tar.add(item, arcname=f"config/{item.name}")
-    target.chmod(0o600)
-    return str(target)
-
-

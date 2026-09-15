@@ -173,8 +173,29 @@ def check_password(username: str, password: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def check_second_factor(auth: WebAuth, code: str, backup_code: str) -> tuple[bool, str]:
-    """TOTP, or a single-use backup code. Mutates `auth` on success."""
+def check_second_factor(
+    auth: WebAuth, code: str, backup_code: str, recovery_code: str = ""
+) -> tuple[bool, str]:
+    """TOTP, a single-use backup code, or an emailed recovery code. SPEC §29.
+
+    **Order matters and TOTP is not first by accident.** The two alternatives are
+    recovery paths: each is checked only when its own field was filled in, so a
+    normal sign-in never touches them and a wrong TOTP code can never fall
+    through into consuming something else.
+    """
+    if recovery_code:
+        # Mutates on EVERY outcome — a wrong guess increments the attempt count
+        # and the fifth burns the challenge — so it is stored either way.
+        accepted = webauth.consume_recovery_code(auth, recovery_code)
+        store_auth(auth)
+        if accepted:
+            log.warning(
+                "sign-in by emailed recovery code (%s)",
+                webauth.mask_email(auth.recovery_email),
+            )
+            return True, "recovery code accepted"
+        return False, "bad or expired recovery code"
+
     if backup_code:
         if webauth.consume_backup_code(auth, backup_code):
             store_auth(auth)
@@ -268,6 +289,10 @@ def totp_status(auth: WebAuth) -> dict:
         "rememberedDevices": len(
             [d for d in auth.devices if _not_expired(d)]
         ),
+        # Masked, never the address itself (§11, §29). `null` means recovery by
+        # email is not available, which every surface must be able to say —
+        # offering a button that cannot work is worse than not offering it.
+        "recoveryEmail": webauth.mask_email(auth.recovery_email) or None,
     }
 
 

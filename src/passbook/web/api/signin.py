@@ -1,10 +1,21 @@
-"""Sign-in, the second factor and the password."""
+"""Signing in: session, second factor, recovery, password. SPEC §16.2."""
+
+from __future__ import annotations
 
 from datetime import datetime, timezone
+
+
 from flask import current_app, jsonify, request, session
+
 from ... import reminders, webauth
 from .. import auth as A
-from ._base import MIN_PASSWORD_LENGTH, _fail, api, log
+
+from ._base import (
+    MIN_PASSWORD_LENGTH,
+    _fail,
+    api,
+    log,
+)
 
 
 # --- session --------------------------------------------------------------
@@ -113,7 +124,10 @@ def login_totp():
     body = request.get_json(silent=True) or {}
     auth = A.current_auth()
     ok, reason = A.check_second_factor(
-        auth, str(body.get("code") or ""), str(body.get("backupCode") or "")
+        auth,
+        str(body.get("code") or ""),
+        str(body.get("backupCode") or ""),
+        str(body.get("recoveryCode") or ""),
     )
     if not ok:
         A.record_failure(username)
@@ -140,15 +154,6 @@ def login_totp():
             path="/",
         )
     return response
-
-
-@api.delete("/session")
-def logout():
-    session.clear()
-    return jsonify({"ok": True})
-
-
-# --- TOTP enrolment -------------------------------------------------------
 
 
 @api.post("/session/recover")
@@ -221,30 +226,13 @@ def session_recover():
     )
 
 
-@api.put("/recovery-email")
-@A.login_required
-def recovery_email():
-    """Set or clear the recovery address. SPEC §29.
+@api.delete("/session")
+def logout():
+    session.clear()
+    return jsonify({"ok": True})
 
-    Signed in only — changing where a sign-in code is delivered is itself a
-    sensitive act, and doing it from a half-authenticated session would turn
-    recovery into a way in.
-    """
-    raw = str((request.get_json(silent=True) or {}).get("email") or "").strip()
-    auth = A.current_auth()
-    if not raw:
-        auth.recovery_email = None
-        # An address that no longer receives must not leave a live challenge
-        # addressed to it.
-        auth.recovery = None
-    else:
-        try:
-            auth.recovery_email = webauth.normalise_email(raw)
-        except webauth.RecoveryError as exc:
-            return _fail(str(exc), "invalid", 422)
-    A.store_auth(auth)
-    log.warning("recovery address %s", "cleared" if not raw else "changed")
-    return jsonify({"ok": True, "recoveryEmail": webauth.mask_email(auth.recovery_email)})
+
+# --- TOTP enrolment -------------------------------------------------------
 
 
 @api.post("/totp/enroll/start")
@@ -292,6 +280,18 @@ def totp_enroll_confirm():
         log.warning("TOTP enrolment code rejected")
         return _fail("That code did not match. Check the clock on your phone.", "bad_code", 400)
 
+    # Collected here because enrolment is the one moment the operator is
+    # already thinking about being locked out. Asking later means asking never,
+    # and a recovery address added after the phone is lost is no use at all.
+    # Optional: backup codes are still issued, and a blank address just means
+    # this account has one recovery path instead of two.
+    raw_email = str(body.get("recoveryEmail") or "").strip()
+    if raw_email:
+        try:
+            auth.recovery_email = webauth.normalise_email(raw_email)
+        except webauth.RecoveryError as exc:
+            return _fail(str(exc), "invalid", 422)
+
     auth.totp_secret = candidate
     auth.totp_enrolled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     auth.totp_last_counter = probe.totp_last_counter
@@ -302,7 +302,39 @@ def totp_enroll_confirm():
     log.info("TOTP enrolled; %d backup codes issued", len(codes))
 
     # The only time these are ever readable. Stored as salted digests.
-    return jsonify({"stage": "done", "backupCodes": codes})
+    return jsonify(
+        {
+            "stage": "done",
+            "backupCodes": codes,
+            "recoveryEmail": webauth.mask_email(auth.recovery_email),
+        }
+    )
+
+
+@api.put("/recovery-email")
+@A.login_required
+def recovery_email():
+    """Set or clear the recovery address. SPEC §29.
+
+    Signed in only — changing where a sign-in code is delivered is itself a
+    sensitive act, and doing it from a half-authenticated session would turn
+    recovery into a way in.
+    """
+    raw = str((request.get_json(silent=True) or {}).get("email") or "").strip()
+    auth = A.current_auth()
+    if not raw:
+        auth.recovery_email = None
+        # An address that no longer receives must not leave a live challenge
+        # addressed to it.
+        auth.recovery = None
+    else:
+        try:
+            auth.recovery_email = webauth.normalise_email(raw)
+        except webauth.RecoveryError as exc:
+            return _fail(str(exc), "invalid", 422)
+    A.store_auth(auth)
+    log.warning("recovery address %s", "cleared" if not raw else "changed")
+    return jsonify({"ok": True, "recoveryEmail": webauth.mask_email(auth.recovery_email)})
 
 
 @api.post("/totp/backup-codes")
@@ -355,5 +387,3 @@ def change_password():
     log.info("web password changed")
     session.clear()
     return jsonify({"ok": True})
-
-

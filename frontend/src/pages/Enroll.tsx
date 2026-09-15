@@ -21,6 +21,10 @@ export function Enroll() {
   const queryClient = useQueryClient()
   const [enrolment, setEnrolment] = useState<EnrollStart | null>(null)
   const [code, setCode] = useState('')
+  // Asked here because enrolment is the one moment you are already thinking
+  // about being locked out. Asking later means asking never, and an address
+  // added after the phone is lost is no use at all.
+  const [email, setEmail] = useState('')
   const [codes, setCodes] = useState<string[] | null>(null)
   const [saved, setSaved] = useState(false)
 
@@ -32,7 +36,11 @@ export function Enroll() {
   })
 
   const confirm = useMutation({
-    mutationFn: () => api.post<{ backupCodes: string[] }>('/totp/enroll/confirm', { code }),
+    mutationFn: () =>
+      api.post<{ backupCodes: string[] }>('/totp/enroll/confirm', {
+        code,
+        recoveryEmail: email.trim(),
+      }),
     onSuccess: (data) => setCodes(data.backupCodes),
     onError: (error) => toast({ kind: 'bad', ...describe(error) }),
   })
@@ -122,6 +130,23 @@ export function Enroll() {
                 onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
               />
             </label>
+            <label htmlFor="recovery-email">
+              Recovery email <span className="muted">(optional)</span>
+              <input
+                id="recovery-email"
+                type="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </label>
+            <p className="muted">
+              A second way back if you lose the phone <em>and</em> the backup codes.
+              passbook can email you a one-time sign-in code — it never replaces the
+              authenticator, it only stands beside the backup codes. Needs a mail server on
+              the Reminder page; you can add both later.
+            </p>
             <button type="submit" className="primary" disabled={confirm.isPending || code.length < 6}>
               {confirm.isPending ? 'Checking…' : 'Confirm'}
             </button>

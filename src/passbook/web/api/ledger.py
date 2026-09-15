@@ -1,17 +1,36 @@
-"""The Ledger, the analysis, and every row."""
+"""The figures: overview, analysis, and the transaction browser."""
+
+from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+
 from flask import current_app, jsonify, request, session
+
 from ... import service
-from ...config import load_attribution, load_settings
+from ...config import (
+    load_attribution,
+    load_settings,
+)
 from ...firefly.client import FireflyError
 from .. import auth as A
-from ._base import _client, _fail, _money, _sync, api
-from ._scope import _account_scope, _as_amount, _as_date, _date_scope, _splits_within
 
-
-# --- overview -------------------------------------------------------------
+from ._base import (
+    _client,
+    _fail,
+    _money,
+    _sync,
+    api,
+    log,
+)
+from ._scope import (
+    _account_scope,
+    _as_date,
+    _date_scope,
+    _splits_within,
+)
 
 
 @api.get("/overview")
@@ -62,11 +81,54 @@ def overview():
             "parts": parts if len(parts) > 1 else [],
             # Staleness aggregates to the WORST, not the average: a warning must
             # not be diluted by a fresher account.
-            "sync": _sync(service.sync_status()),
-            "history": service.sync_history(current_app.config["ARCHIVE"]),
-            "pending": bool(session.get("pending")),
+            # Both scoped to the accounts on screen. §104 — a Canara download
+            # warning on the Union tab is a warning about somebody else's bank.
+            "sync": _sync(service.sync_status(scope, current_app.config["ARCHIVE"])),
+            "history": service.sync_history(current_app.config["ARCHIVE"], accounts=scope),
+            # **The file, not the session key.** SPEC §100.
+            #
+            # `pending` is a path held in the session, and the file it names
+            # lives in a temporary directory — a container restart, a tmp sweep
+            # or a discarded upload takes the file and leaves the key. The
+            # banner then showed on every load, for the life of the session,
+            # linking to a Preview that answered "Nothing pending — upload a
+            # statement first". `/statement/pending` has always checked the
+            # file exists; this one did not, so the two disagreed about whether
+            # there was anything to push.
+            #
+            # Cleared rather than merely hidden: a key naming a file that is
+            # gone is not state worth keeping, and leaving it would make every
+            # later read pay the same stat call to reach the same answer.
+            "pending": _has_pending(scope),
         }
     )
+
+
+def _has_pending(scope=None) -> bool:
+    """Whether there is a staged statement that still exists, for this scope.
+
+    `scope` is the accounts on screen. A staged statement belongs to exactly one
+    of them — it was routed by what the file says, at staging time (§21.9) — so
+    the banner shows on that account's page and nowhere else (§104). A statement
+    staged before any account was registered belongs to none of them and shows
+    on all, which is right: it is the thing standing between the operator and a
+    registered account.
+    """
+    pending = session.get("pending")
+    if not pending:
+        return False
+    if Path(pending).exists():
+        slug = session.get("pending_slug")
+        if slug and scope is not None:
+            return any(account.slug == slug for account in scope)
+        return True
+    # The same three keys `discard_pending` drops, for the same reason (§30): a
+    # password left behind is a credential kept for a file that no longer
+    # exists, and a stale `pending_encrypted` offers a retry for nothing.
+    for key in ("pending", "pending_password", "pending_encrypted", "pending_slug"):
+        session.pop(key, None)
+    log.info("staged statement is gone from disk; cleared the session keys")
+    return False
 
 
 def _slice(s) -> dict:
@@ -276,12 +338,6 @@ def analysis():
     )
 
 
-# -- every row, searchable ----------------------------------------------------
-# SPEC §27. The page passbook never had, and the last routine reason to open
-# Firefly. Deliberately NO running balance: a Balance column over a filtered,
-# reordered view asserts a continuity that is not there, and the balance chain
-# is the spine of this project.
-
 @api.get("/transactions")
 @A.login_required
 def transactions():
@@ -457,6 +513,19 @@ def transactions():
             "tags": sorted({t for r in rows for t in r["tags"]}),
         }
     )
+
+
+def _as_amount(raw: str | None) -> "Decimal | None":
+    """A money bound from the query string, or None. Decimal, never float."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        # A hand-edited URL should show the ledger, not an error page — the
+        # same call `_as_date` makes for a malformed window.
+        return None
 
 
 def _row_in_window(row: dict, start: date | None, end: date | None) -> bool:

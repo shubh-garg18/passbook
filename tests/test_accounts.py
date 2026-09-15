@@ -16,10 +16,12 @@ Every test here is about one of those two collisions not turning into silence.
 from __future__ import annotations
 
 import shutil
+from datetime import date
+from decimal import Decimal
 
 import pytest
 
-from conftest import FIXTURE_ACCOUNT, SECOND_FIXTURE, XLS_FIXTURE
+from conftest import FIXTURE_ACCOUNT, SECOND_FIXTURE, XLS_FIXTURE, StoreDouble
 from passbook import service
 from passbook.config import (
     Account,
@@ -31,10 +33,6 @@ from passbook.config import (
 )
 from passbook.loaders import xls
 from passbook.validate import UnknownAccount
-# A package attribute is not a patch seam: a route resolves the name in its
-# own module's globals, so the fake goes on `_base` — the one place a client
-# is ever constructed.
-from passbook.web.api import _base as _api_base
 
 SECOND_ACCOUNT = "888800001111"
 
@@ -299,7 +297,7 @@ def test_an_absent_registry_falls_back_to_the_two_env_vars(tmp_path, monkeypatch
     accounts = load_accounts(
         settings=Settings(
             passbook_account_number=FIXTURE_ACCOUNT,
-            passbook_asset_account="Canara savings",
+            passbook_asset_account="Canara Bank savings account",
         )
     )
     assert len(accounts) == 1
@@ -368,15 +366,17 @@ def two_account_app(tmp_path, monkeypatch):
 
 
 def _fake_firefly_two(monkeypatch, per_account):
-    """Firefly holding `per_account[asset_account] -> [splits]`."""
-    from passbook.web import api as api_module
+    """Firefly holding `per_account[asset_account] -> [splits]`.
 
-    class Fake:
-        def __enter__(self):
-            return self
+    Patched on `_base`, which since §107 is the one module a store client is
+    ever constructed in — the package attribute is not a seam, because a route
+    resolves the name in its own module's globals.
+    """
+    from passbook.web.api import _base as api_base
 
-        def __exit__(self, *exc):
-            return False
+    class Fake(StoreDouble):
+        def close(self):
+            pass
 
         def asset_accounts(self):
             return [
@@ -388,7 +388,7 @@ def _fake_firefly_two(monkeypatch, per_account):
             name = list(per_account)[int(account_id) - 1]
             return [{"attributes": {"transactions": per_account[name][1]}}]
 
-    monkeypatch.setattr(_api_base, "FireflyClient", lambda *a, **k: Fake())
+    monkeypatch.setattr(api_base, "FireflyClient", lambda *a, **k: Fake())
 
 
 def _split(external_id, amount="10", kind="withdrawal", category="Shopping"):
@@ -497,3 +497,58 @@ def test_all_is_not_a_scope_when_only_one_account_exists(one_account_client):
     switcher to have asked for it in the first place."""
     body = one_account_client.get("/api/accounts?account=all").get_json()
     assert body["selected"] == "canara-1111"
+
+
+# --- a second account at the SAME bank ---------------------------------------
+# SPEC §26.6. The two fixtures are two Canara accounts whose transaction ids
+# collide completely, which is the shape this is hardest for.
+
+
+def test_the_cli_account_check_asks_the_registry_first(two_accounts, monkeypatch, tmp_path):
+    """§6.7's question changed when accounts became plural: not "is this MY
+    account?" but "WHICH of my accounts is this?".
+
+    Checking only `PASSBOOK_ACCOUNT_NUMBER` refused every statement belonging to
+    the second account — exit 4 on a file the upload page accepts happily, which
+    is the two front ends disagreeing about the same file.
+    """
+    import passbook.cli as cli_module
+    from passbook.loaders import load as load_statement
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PASSBOOK_ACCOUNT_NUMBER", FIXTURE_ACCOUNT)
+    monkeypatch.setattr(cli_module, "load_accounts", lambda **k: two_accounts)
+
+    for path in (XLS_FIXTURE, SECOND_FIXTURE):
+        meta, _ = load_statement(path)
+        status = cli_module._check_account(meta)
+        assert "passes" in status, f"{path.name} was refused: {status}"
+        assert "routes to" in status
+
+
+def test_a_genuinely_foreign_account_is_still_refused(two_accounts, monkeypatch, tmp_path):
+    """The registry lookup widens what is accepted; it must not remove the
+    refusal. An account in neither the registry nor `.env` still stops."""
+    import typer
+
+    import passbook.cli as cli_module
+    from passbook.models import StatementMeta
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PASSBOOK_ACCOUNT_NUMBER", FIXTURE_ACCOUNT)
+    monkeypatch.setattr(cli_module, "load_accounts", lambda **k: two_accounts)
+
+    stranger = StatementMeta(
+        account_number="123456789012",
+        customer_id="",
+        account_name="Someone Else",
+        branch_code="",
+        ifsc="",
+        period_from=date(2026, 5, 1),
+        period_to=date(2026, 5, 31),
+        opening_balance=Decimal("0"),
+        closing_balance=Decimal("0"),
+    )
+    with pytest.raises(typer.Exit) as exit_info:
+        cli_module._check_account(stranger)
+    assert exit_info.value.exit_code == 4

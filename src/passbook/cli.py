@@ -25,9 +25,6 @@ from .config import (
     default_slug,
     load_accounts,
     save_accounts,
-    GENERATED_COLUMNS,
-    alias_drift,
-    parse_payees_table,
     load_payee_aliases,
     load_settings,
     token_expiry,
@@ -35,10 +32,11 @@ from .config import (
 from .firefly.bootstrap import RULES_FILE, load_bills, load_rules
 from .firefly.bootstrap import bootstrap as bootstrap_rules
 from .firefly.client import FireflyClient, FireflyError
-from .firefly.purge import find_candidates
+from .firefly.purge import find_candidates, find_duplicates
 from .firefly.purge import purge as purge_transactions
 from .firefly.push import build_payload, push_transactions
 from .loaders import load as load_statement
+from . import reminders
 from .loaders import read_grid
 from .loaders._table import ParseError
 from .models import Transaction, normalised
@@ -114,8 +112,23 @@ def _read(path: Path) -> tuple:
 
 
 def _check_account(meta) -> str:
-    """SPEC §6.7. Returns a status line; exits non-zero on a real mismatch."""
-    configured = load_settings().passbook_account_number
+    """SPEC §6.7, §21.2. Returns a status line; exits non-zero on a real mismatch.
+
+    **Asks the registry first.** §6.7's question changed when accounts became
+    plural: it is no longer "is this MY account?" but "WHICH of my accounts is
+    this?". Checking only `PASSBOOK_ACCOUNT_NUMBER` refused every statement
+    belonging to the second account — measured, exit 4 on a file the upload page
+    accepts happily, which is the two front ends disagreeing about the same file.
+
+    The refusal itself is unchanged: an account in neither the registry nor
+    `.env` still stops the command.
+    """
+    settings = load_settings()
+    for account in load_accounts(settings=settings):
+        if account.account_number.strip() == meta.account_number.strip():
+            return f"[green]passes[/green] (routes to {account.slug}, {meta.masked_account})"
+
+    configured = settings.passbook_account_number
     try:
         assert_account(meta, configured)
     except AccountMismatch as exc:
@@ -124,6 +137,10 @@ def _check_account(meta) -> str:
             # matters is on push, which is Phase 3.
             return f"[yellow]unverified[/yellow] ({exc})"
         err.print(f"[red]account assertion failed:[/red] {exc}")
+        err.print(
+            "[dim]If this is a second account of yours, register it first: "
+            "`passbook accounts add <statement>`, or Account -> Add an account.[/dim]"
+        )
         raise typer.Exit(4)
     return f"[green]passes[/green] (matches {meta.masked_account})"
 
@@ -312,10 +329,6 @@ def payees(
     markdown: bool = typer.Option(
         False, "--markdown", help="emit a markdown table instead of a box table"
     ),
-    out: Path = typer.Option(
-        None, "--out", help="write to this file; refuses to overwrite without --force"
-    ),
-    force: bool = typer.Option(False, "--force", help="allow --out to overwrite"),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
     """Rank observed payee tokens by count and value.
@@ -362,53 +375,18 @@ def payees(
         "token: two tokens sharing an alias stay on separate rows."
     )
 
-    if markdown or out:
-        # The Alias column is GENERATED from payee_aliases.yaml, which the UI
-        # writes. Treating it as hand-maintained made every UI edit look like
-        # drift; generating it makes drift impossible by construction.
-        # Anything the operator added beyond the generated columns is carried
-        # across, so annotating the file is still safe.
-        extra_headers: list[str] = []
-        extra_rows: dict[str, dict[str, str]] = {}
-        if out is not None and out.exists():
-            existing_header, existing_rows = parse_payees_table(out)
-            if existing_header:
-                extra_headers = [
-                    h for h in existing_header if h.lower() not in GENERATED_COLUMNS
-                ]
-                extra_rows = existing_rows
-            elif not force:
-                err.print(
-                    f"[red]{out} exists but is not a payees table[/red] — refusing to "
-                    "overwrite. Pass --force, or --out a different path."
-                )
-                raise typer.Exit(1)
-
-        all_headers = list(headers) + extra_headers
+    if markdown:
+        # §117. Prints; it does not write a file. `payees.md` is gone — the
+        # Payees page shows every token with its alias, category, counts and
+        # dates, and lets you change two of them, which is all the file was for
+        # plus the part it could not do. What is left here is a table you can
+        # read in a terminal during a recovery, and redirect if you want one.
         lines = [f"# payee tokens ({len(rows)} distinct)", "", note, ""]
-        if extra_headers:
-            lines.append(
-                f"Columns {', '.join(extra_headers)} are yours and are preserved; "
-                "the rest are regenerated from config/payee_aliases.yaml."
-            )
-            lines.append("")
-        lines.append("| " + " | ".join(all_headers) + " |")
-        lines.append("|" + "|".join("---" for _ in all_headers) + "|")
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("|" + "|".join("---" for _ in headers) + "|")
         for i, r in enumerate(rows[:top], 1):
-            generated = list(cells(i, r))
-            kept = [extra_rows.get(r[0], {}).get(h, "") for h in extra_headers]
-            lines.append("| " + " | ".join(c or "" for c in generated + kept) + " |")
-        text = "\n".join(lines) + "\n"
-
-        if out is None:
-            print(text, end="")
-            return
-        out.write_text(text, encoding="utf-8")
-        console.print(
-            f"wrote {out} ({len(rows)} tokens"
-            + (f", preserved {len(extra_headers)} of your column(s)" if extra_headers else "")
-            + ")"
-        )
+            lines.append("| " + " | ".join(c or "" for c in cells(i, r)) + " |")
+        print("\n".join(lines))
         return
 
     table = Table(header_style="bold", title=f"payee tokens ({len(rows)} distinct)")
@@ -705,18 +683,6 @@ def doctor(verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
                 ok(f"token valid for {days} more days (expires {when})")
 
     sync_staleness()
-
-    drift = alias_drift()
-    if drift:
-        warn(f"payees.md and payee_aliases.yaml disagree on {len(drift)} token(s):")
-        for line in drift[:10]:
-            console.print(f"          {line}")
-        console.print(
-            "        [dim]the yaml is what the code reads; payees.md is a note to "
-            "yourself. Nothing is synced automatically.[/dim]"
-        )
-    elif load_payee_aliases():
-        ok("payees.md agrees with payee_aliases.yaml")
 
     console.print("\n[bold]firefly[/bold]")
     if problems:
@@ -1307,6 +1273,219 @@ def resync(
         raise typer.Exit(7)
     if not result.ok:
         raise typer.Exit(7)
+
+
+#: How old the newest dump may be before `dedupe` refuses to delete. Six hours:
+#: long enough that taking one, reading the plan and confirming is a single
+#: sitting, short enough that the undo is of the ledger being changed rather
+#: than of last week's.
+BACKUP_MAX_AGE_MINUTES = 6 * 60
+
+
+@app.command()
+def reminder(
+    email: bool = typer.Option(False, "--email", help="mail the invite to your calendar"),
+    ics: Path = typer.Option(None, "--ics", help="write the calendar file here instead"),
+    verbose: bool = typer.Option(False, "-v", "--verbose"),
+) -> None:
+    """Show the statement reminder, mail it, or write it as a calendar file. SPEC §24.
+
+    passbook does not fire this and deliberately does not try. WSL2 stops when
+    Windows sleeps and there is no systemd here, so a reminder owned by this
+    machine is one that will not arrive. `--ics` writes an RFC 5545 file: import
+    it into Google Calendar and the calendar does the reminding, on a device
+    that is awake. Switch that event's notification to "Email" if you want it
+    mailed — the calendar sends it, so no SMTP credential lives here.
+
+    Edit the schedule on the Reminder page, or in `config/reminder.yaml`.
+    """
+    _setup_logging(verbose)
+    schedule = reminders.load()
+
+    state = "on" if schedule.enabled else "[yellow]off[/yellow]"
+    console.print(f"reminder {state} — [bold]{schedule.label}[/bold] ({reminders.TZID})")
+    console.print(f"  alert    {schedule.lead_minutes} minute(s) before")
+    console.print("  steps    " + "; ".join(reminders.STEPS))
+    console.print()
+    for moment in reminders.next_occurrences(schedule, datetime.now(), 5):
+        console.print(f"  [dim]{moment:%a %d %b %Y  %H:%M}[/dim]")
+
+    if email:
+        settings = load_settings()
+        try:
+            to = reminders.send_invite(schedule, settings)
+        except reminders.SendFailed as exc:
+            err.print(f"\n[red]{exc}[/red]")
+            raise typer.Exit(5) from exc
+        console.print(
+            f"\n[green]invite sent[/green] to {reminders._mask_email(to)} — accept it once "
+            "and your calendar handles every reminder after that."
+        )
+        return
+
+    if ics is None:
+        console.print(
+            "\nMail it straight to your calendar with `passbook reminder --email`, or "
+            "write the file with `passbook reminder --ics reminder.ics`."
+        )
+        return
+
+    ics.parent.mkdir(parents=True, exist_ok=True)
+    # newline="" so the CRLF pairs RFC 5545 requires survive the write; Python
+    # would otherwise translate them and some importers reject the result.
+    with ics.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(reminders.to_ics(schedule))
+    console.print(f"\n[green]wrote[/green] {ics} — import it into your calendar.")
+
+
+@app.command()
+def dedupe(
+    account: str = typer.Option(None, help="asset account; defaults to PASSBOOK_ASSET_ACCOUNT"),
+    confirm: bool = typer.Option(False, "--confirm", help="actually delete; omit for a dry run"),
+    yes: bool = typer.Option(False, "--yes", help="skip the interactive prompt"),
+    verbose: bool = typer.Option(False, "-v", "--verbose"),
+) -> None:
+    """Remove extra copies of a transaction that was posted more than once. §119.2.
+
+    Dry run unless --confirm. **One row of each identity always stays** — this
+    removes surplus, never a transaction. A namespaced `external_id` is kept in
+    preference to a bare one, and among equals the lowest group id, i.e. the
+    original rather than the copy.
+
+    This exists because `verify-ledger` must not repair anything it finds
+    (non-negotiable 12). It reports and names this command; running it is a
+    separate, deliberate act, and it refuses to run without a recent backup
+    (SPEC §19.5).
+
+    Nothing is re-pushed afterwards and no purge intent is recorded: the ledger
+    is being corrected, not emptied, and every remaining row is a row that was
+    already there.
+    """
+    _setup_logging(verbose)
+    settings = load_settings()
+    if not settings.firefly_token:
+        err.print("[red]FIREFLY_TOKEN is not set.[/red] Run `passbook doctor`.")
+        raise typer.Exit(5)
+
+    registry = load_accounts(settings=settings)
+    if account:
+        registry = [a for a in registry if a.slug == account or a.asset_account == account]
+    if not registry:
+        err.print("[red]no accounts registered.[/red] Run `passbook accounts list`.")
+        raise typer.Exit(5)
+
+    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
+        # Fresh, for the same reason the check is: deciding what to DELETE from
+        # a cached view of the ledger is worse than reporting from one.
+        with client.fresh() as fresh:
+            live = {a["attributes"]["name"]: a["id"] for a in fresh.asset_accounts()}
+            found: list[tuple[object, list]] = []
+            for entry in registry:
+                account_id = live.get(entry.asset_account)
+                if account_id is None:
+                    console.print(
+                        f"[yellow]skipped[/yellow] {entry.slug} — no asset account "
+                        f"named {entry.asset_account!r}"
+                    )
+                    continue
+                found.append((entry, find_duplicates(fresh, account_id)))
+
+        surplus = [
+            (entry, identity, rows)
+            for entry, dupes in found
+            for identity, rows in dupes
+        ]
+        if not surplus:
+            console.print("\n[green]no duplicates[/green] — every transaction appears once.")
+            return
+
+        extra = sum(len(rows) - 1 for _, _, rows in surplus)
+        console.print(
+            f"\n[bold]{len(surplus)} transaction(s) posted more than once[/bold] — "
+            f"{extra} surplus row(s) to remove.\n"
+        )
+        for entry, identity, rows in surplus:
+            keeper, *copies = rows
+            console.print(f"  {entry.slug}  {identity}  {keeper.date}  {keeper.description}")
+            console.print(
+                f"    [green]keep[/green]   group {keeper.group_id}  "
+                f"{keeper.external_id}  {keeper.amount}"
+            )
+            for copy in copies:
+                console.print(
+                    f"    [red]remove[/red] group {copy.group_id}  "
+                    f"{copy.external_id}  {copy.amount}"
+                )
+
+        if not confirm:
+            console.print(
+                f"\n[bold]dry run[/bold] — nothing deleted. {extra} row(s) would go, "
+                f"{len(surplus)} would stay.\nRe-run with --confirm."
+            )
+            return
+
+        # §19.5. A deletion whose undo does not exist yet is not a deletion
+        # worth doing, and the operator is the one who has to make it exist.
+        dump = ops.newest_dump()
+        if dump is None:
+            err.print(
+                "\n[red]no database backup in backups/.[/red] Run `make backup` first — "
+                "this deletes rows from a live ledger and the dump is the only undo "
+                "(SPEC §19.5)."
+            )
+            raise typer.Exit(5)
+        name, minutes = dump
+        if minutes > BACKUP_MAX_AGE_MINUTES:
+            err.print(
+                f"\n[red]the newest backup, {name}, is {minutes // 60}h old.[/red] "
+                "Run `make backup` first so the undo is of the ledger you are about "
+                "to change (SPEC §19.5)."
+            )
+            raise typer.Exit(5)
+        console.print(f"\nbackup            {name} ({minutes}m old)")
+
+        if not yes:
+            # Without a terminal there is nobody to answer, and `typer.confirm`
+            # aborts on EOF — printing "Aborted." and deleting nothing, which
+            # reads exactly like a command that ran and did its job. Found that
+            # way: run from a non-interactive shell, it looked like it had
+            # worked and the ledger was unchanged. Say which flag is missing
+            # rather than leaving the operator to infer it.
+            if not sys.stdin.isatty():
+                err.print(
+                    "\n[red]no terminal to confirm at[/red] — nothing was deleted. "
+                    "Re-run with --yes to delete without the prompt, or run it in "
+                    "an interactive shell."
+                )
+                raise typer.Exit(5)
+            typer.confirm(
+                f"Delete {extra} surplus row(s)? {len(surplus)} transaction(s) stay",
+                abort=True,
+            )
+
+        deleted = failed = 0
+        for _, _, rows in surplus:
+            for copy in rows[1:]:
+                try:
+                    client.delete_transaction(copy.group_id)
+                except FireflyError as exc:
+                    failed += 1
+                    err.print(f"  [red]fail[/red] group {copy.group_id}: {exc}")
+                else:
+                    deleted += 1
+        # Firefly soft-deletes, and its own duplicate check searches trashed
+        # rows — so without this the identity just removed could not be pushed
+        # back if it ever needed to be. Same reasoning as purge().
+        if deleted:
+            client.purge_trashed()
+
+    console.print(f"\nremoved           {deleted}\nfailed            {failed}")
+    console.print(
+        "\n[bold]Run `passbook verify-ledger`[/bold] — the balance and the row count "
+        "should now both agree with the statements."
+    )
+    if failed:
+        raise typer.Exit(6)
 
 
 @app.command()

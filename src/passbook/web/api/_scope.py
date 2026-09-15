@@ -1,9 +1,16 @@
-"""Which rows a request is about: the account scope and the date window."""
+"""Which accounts and which dates a request is about. SPEC §21.9."""
+
+from __future__ import annotations
 
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+
+
 from flask import request
-from ...config import load_accounts
+
+from ...config import (
+    load_accounts,
+)
+
 
 
 # --- account scope. SPEC §21.9 -----------------------------------------------
@@ -13,13 +20,36 @@ from ...config import load_accounts
 
 ALL_ACCOUNTS = "all"
 
+# Long enough for "Joint account — household", short enough that a tab strip of
+# four does not wrap on a phone.
+ACCOUNT_LABEL_MAX = 40
+
+#: How many banded rows the "try it" preview hands back. Enough to see the
+#: header, a sentinel and several transactions; not the whole statement.
+BANDED_PREVIEW = 14
+
+#: How many lines the shareable shape dump covers. Enough to reach the
+#: transaction header past a details table, which is what needs looking at.
+SHAPE_LINES = 40
+
 
 def _account_scope(default_to_first: bool = True):
     """Return `(accounts_in_scope, selected)` for this request.
 
-    `selected` is a slug, `"all"`, or None when nothing is registered. A slug the
-    registry does not know falls back to the first account rather than 404ing: a
-    stale selection in someone's browser must not break the page it is stored for.
+    `?account=` takes a slug, `all`, or **a comma-separated subset** —
+    `canara-1111,hdfc-9012`. The subset is the case that needed adding: with
+    four accounts, "these two together" is a real question and neither "one" nor
+    "all" answers it. §21.9 already established that every figure on these pages
+    is additive over transactions, so any subset combines the same way `all`
+    does; the only figure that does not is the balance, which is summed and
+    labelled as a sum with its parts.
+
+    `selected` echoes what was actually applied, in registry order, so the client
+    renders the scope the server used rather than the one it asked for.
+
+    Unknown slugs are dropped rather than 404'd, and a request naming only
+    unknown slugs falls back to the first account: a stale selection in
+    someone's browser must not break the page it is stored for.
     """
     registry = load_accounts()
     wanted = (request.args.get("account") or "").strip()
@@ -27,21 +57,34 @@ def _account_scope(default_to_first: bool = True):
         return [], None
     if wanted == ALL_ACCOUNTS and len(registry) > 1:
         return registry, ALL_ACCOUNTS
-    chosen = next((a for a in registry if a.slug == wanted), None)
-    if chosen is None:
-        chosen = registry[0] if default_to_first else None
-    return ([chosen] if chosen else []), (chosen.slug if chosen else None)
+
+    asked = {part.strip() for part in wanted.split(",") if part.strip()}
+    # Registry order, not request order: two URLs naming the same accounts must
+    # produce the same scope and the same cache key.
+    chosen = [a for a in registry if a.slug in asked]
+    if len(chosen) > 1:
+        # Naming every account is `all` by another route; say so, so the label
+        # and the switcher agree.
+        if len(chosen) == len(registry):
+            return registry, ALL_ACCOUNTS
+        return chosen, ",".join(a.slug for a in chosen)
+    if len(chosen) == 1:
+        return chosen, chosen[0].slug
+    fallback = registry[0] if default_to_first else None
+    return ([fallback] if fallback else []), (fallback.slug if fallback else None)
 
 
-# -- the window --------------------------------------------------------------
-# SPEC §26. Every figure on every page answers "over what period", and until
-# this existed the answer was always "everything ever archived" — which is the
-# one window nobody asks about. A named range or an explicit from/to, resolved
-# server-side and echoed back, so the client renders the scope the server used
-# rather than the one it asked for.
+# --- the date range -------------------------------------------------------
+# SPEC §25. Firefly has one and the operator reads the two side by side; more
+# to the point, a payee list is a per-period job. Deciding on the eleven tokens
+# that appeared last month is a task; scrolling the same 59 every week looking
+# for the new ones is not.
 
+# Named ranges, resolved on the server so the page and the API cannot disagree
+# about where a month starts.
 RANGES = ("month", "last-month", "3m", "6m", "year", "all")
 DEFAULT_RANGE = "all"
+
 
 def _range_bounds(name: str, today: date) -> tuple[date | None, date | None]:
     """`(from, to)` inclusive, or `(None, None)` for everything."""
@@ -59,6 +102,7 @@ def _range_bounds(name: str, today: date) -> tuple[date | None, date | None]:
         return today.replace(month=1, day=1), today
     return None, None
 
+
 def _months_back(first_of_month: date, months: int) -> date:
     """N whole months before this one, staying on the 1st.
 
@@ -71,6 +115,7 @@ def _months_back(first_of_month: date, months: int) -> date:
         month += 12
         year -= 1
     return date(year, month, 1)
+
 
 def _date_scope() -> tuple[date | None, date | None, dict]:
     """The requested window, plus what to echo back to the client.
@@ -97,14 +142,17 @@ def _date_scope() -> tuple[date | None, date | None, dict]:
     start, end = _range_bounds(name, date.today())
     return start, end, {"range": name, "from": _iso(start), "to": _iso(end)}
 
+
 def _as_date(text: str) -> date | None:
     try:
         return date.fromisoformat(text)
     except ValueError:
         return None
 
+
 def _iso(value: date | None) -> str | None:
     return value.isoformat() if value else None
+
 
 def _splits_within(splits: list[dict], start: date | None, end: date | None) -> list[dict]:
     """The same window, over Firefly splits rather than parsed transactions.
@@ -126,6 +174,7 @@ def _splits_within(splits: list[dict], start: date | None, end: date | None) -> 
             out.append(split)
     return out
 
+
 def _within(transactions, start: date | None, end: date | None):
     if start is None and end is None:
         return list(transactions)
@@ -135,27 +184,19 @@ def _within(transactions, start: date | None, end: date | None):
         if (start is None or t.txn_date >= start) and (end is None or t.txn_date <= end)
     ]
 
-def _as_amount(raw: str | None) -> "Decimal | None":
-    """A money bound from the query string, or None. Decimal, never float."""
-    text = (raw or "").strip()
-    if not text:
-        return None
-    try:
-        return Decimal(text)
-    except (InvalidOperation, ValueError):
-        # A hand-edited URL should show the ledger, not an error page — the
-        # same call `_as_date` makes for a malformed window.
-        return None
-
 
 def _account_summary(account, selected: str | None) -> dict:
     return {
         "slug": account.slug,
         "bank": account.bank,
+        "bankName": account.bank_name,
         "account": account.masked,
         "assetAccount": account.asset_account,
+        # What a person is shown: the operator's own name if they set one, else
+        # `Canara ****1111`. §40.
         "label": account.display,
+        # Whether that name is a decision or a default — the rename field needs
+        # to show the current name without pre-filling one nobody chose.
+        "renamed": bool(account.label),
         "selected": account.slug == selected,
     }
-
-

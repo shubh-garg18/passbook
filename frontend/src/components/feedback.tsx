@@ -90,18 +90,33 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
 export function describe(error: unknown): { title: string; detail: string } {
   if (error instanceof ApiError) {
     const next: Record<string, string> = {
-      rejected: 'Check you exported the .xls from Canara net banking, not a PDF or a print-to-file.',
-      invalid: 'The file parsed but did not add up. Re-download the statement rather than editing it.',
+      rejected:
+        'Upload the statement your bank gives you — a spreadsheet (.xls or .xlsx) or a PDF. '+
+        'A print-to-file or a screenshot will not parse.',
+      // NOT a fixed sentence. `invalid` covers a balance chain that does not
+      // close AND a form the server rejected, and the one hint served both:
+      // saving a bank profile with a bad column map answered "unknown field(s):
+      // [Balance, Chq, Date, …] The file parsed but did not add up. Re-download
+      // the statement rather than editing it." — advice about a file, printed
+      // under a complaint about a form. The server's own message already says
+      // what to fix in that case, so the hint only fires for the file case.
+      invalid: '',
+      balance_break:
+        'The file parsed but did not add up. Re-download the statement rather than editing it.',
       account_mismatch: 'This statement belongs to another account. Nothing was saved.',
       unconfigured: 'Set the missing value in .env on the host, then reload.',
-      firefly: 'Firefly did not answer. Check `make ps`, then try again.',
+      // §100. The store has no brand name in this app, and `make ps` is a
+      // terminal — the two reasons this sentence was rewritten. What it has
+      // to keep is somewhere to go, because "it did not answer" is not
+      // something anyone can act on.
+      firefly: 'The ledger store did not answer. Status says whether it is reachable.',
       csrf: 'Reload the page and repeat the action.',
       rate_limited: 'Wait for the lockout to pass, then try again.',
       no_pending: 'Upload a statement first.',
       unknown_category: 'Pick a category that already has a rule, or add the rule first.',
-      stale_backup: 'Run `make backup` on the host, then reload this page.',
+      stale_backup: 'Take a backup first — there is a button on Status, and on this page.',
       empty_archive: 'Nothing in archive/ to re-push — sync a statement first.',
-      too_large: 'A Canara three-month export is about 30 KB. This is not that file.',
+      too_large: 'A three-month statement is tens of kilobytes. This is not that file.',
     }
     return { title: 'That did not work', detail: `${error.message} ${next[error.code] ?? ''}`.trim() }
   }

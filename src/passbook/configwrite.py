@@ -1,7 +1,7 @@
 """Edit config/*.yaml in place, preserving comments. SPEC §14.
 
 `rules.yaml`'s comments carry knowledge that cost real money to acquire —
-`NYXN XWUBQ  # a KFC franchise, not a person`, and the other three tokens D10
+`SATBEER S  # a KFC franchise, not a person`, and the other three tokens D10
 records as misread. Plain PyYAML round-trips destroy every one of them, so
 this uses ruamel.yaml, which preserves comments, key order and formatting.
 
@@ -53,6 +53,12 @@ class ConfigChange:
         self.path.write_text(self.after, encoding="utf-8")
 
 
+#: How far a comment line may be indented and still count as its own block
+#: rather than the wrapped continuation of the line above. A sequence item sits
+#: at 4 and its inline comment far to the right; a section header sits at 0.
+_BLOCK_INDENT = 6
+
+
 def _split_trailing_comment(seq, index: int) -> None:
     """Move a comment *block* that follows item `index` to the end of `seq`.
 
@@ -73,12 +79,41 @@ def _split_trailing_comment(seq, index: int) -> None:
     token = ca.items[index][0]
     if token is None:
         return
-    head, sep, tail = token.value.partition("\n")
-    if not tail.strip():
-        return  # an inline comment only; it belongs where it is
-    token.value = head + sep
+
+    # **Split at the first line that is its own block, not at the first
+    # newline.** SPEC §112.1. ruamel hands over one token holding all of it:
+    #
+    #     # alias of PAYONEER INC OPGSP...; a payee of Salary, so   <- inline
+    #                 # excluding it contradicted its own …         <- a WRAP
+    #                                                               <- blank
+    #     # ── what is not spending ──                              <- a block
+    #
+    # Splitting on the first newline tore the annotation in half and gave the
+    # second line to the newly appended item — a comment pointing at the wrong
+    # entry, and here at one it contradicts. That is the exact failure this
+    # function exists to prevent, one level down, and it was found by using it.
+    #
+    # Indentation separates them: a wrap is aligned into the comment column of
+    # the line above, a block starts at the sequence's own indent or at 0.
+    lines = token.value.splitlines(keepends=True)
+    cut = None
+    for position, line in enumerate(lines[1:], 1):
+        if line.strip() and (len(line) - len(line.lstrip())) <= _BLOCK_INDENT:
+            cut = position
+            break
+    if cut is None:
+        return  # an inline comment and its wraps; all of it belongs where it is
+
+    # Take the blank lines before the block with it, so the spacing that
+    # separated it from the list is the spacing that separates it from the list.
+    while cut > 1 and not lines[cut - 1].strip():
+        cut -= 1
+
+    token.value = "".join(lines[:cut])
     moved = copy.copy(token)
-    moved.value = tail
+    # A leading newline, or ruamel renders the block as the new item's INLINE
+    # comment and a section header ends up on the same line as an entry.
+    moved.value = "\n" + "".join(lines[cut:])
     last = len(seq) - 1
     ca.items.setdefault(last, [None, None, None, None])[0] = moved
 
@@ -145,6 +180,7 @@ def plan_categories(
     path: Path | None = None,
     *,
     renames: dict[str, str] | None = None,
+    tags: dict[str, str] | None = None,
 ) -> ConfigChange:
     """Assign tokens to categories in rules.yaml, following any payee renames.
 
@@ -175,6 +211,19 @@ def plan_categories(
 
     if renames:
         _follow_renames(rules, renames)
+
+    # Give a category a roll-up tag. SPEC §33: moving three `food` categories
+    # into an untagged one dropped the tag from 29 rows and under-reported food
+    # spend, silently. This is how the operator says "and it is still
+    # food" in the same action, instead of discovering it weeks later.
+    for category, tag in (tags or {}).items():
+        spec = next((r for r in rules if str(r.get("category", "")) == category), None)
+        if spec is None:
+            raise KeyError(f"no rule in {path} has category {category!r}")
+        if tag:
+            spec["tag"] = tag
+        else:
+            spec.pop("tag", None)
 
     by_category = {spec.get("category"): spec for spec in rules if spec.get("category")}
 
@@ -235,6 +284,7 @@ def _follow_renames(rules, renames: dict[str, str]) -> None:
             # entry. Leave it; the loop below de-duplicates on assignment.
             if renamed and renamed not in payees:
                 payees[index] = renamed
+
 
 def plan_new_category(name: str, path: Path | None = None) -> ConfigChange:
     """Add an empty category rule to `rules.yaml`. SPEC §26.
@@ -333,65 +383,15 @@ def plan_remove_category(name: str, path: Path | None = None) -> ConfigChange:
     return ConfigChange(path=path, before=before, after=_dump(data))
 
 
-def _defaults(data) -> None:
-    """The two settings a shift needs, when the file is new. Never the policy."""
-    data.setdefault("before_day", 10)
-    data.setdefault("to_day", 22)
-    if "categories" not in data or data["categories"] is None:
-        data["categories"] = []
+def known_categories(path: Path | None = None) -> list[str]:
+    """Categories that already have a rule. The UI offers only these."""
+    data = _load(path or RULES_FILE)
+    return sorted(
+        {spec["category"] for spec in (data.get("rules") or []) if spec.get("category")}
+    )
 
 
-def plan_earnings(category: str, counts: bool, path: Path | None = None) -> ConfigChange:
-    """Whether money arriving under `category` is **earned**. SPEC §112.
-
-    > "Earning definition or any other definition is different for anyone so we
-    >  cant generalize instead give an option i guess"
-
-    They are right, and the shape of the existing rule is why it mattered.
-    `not_earnings` is an **allow-list**: `earnings_only` names what counts, and
-    everything else arriving is tagged `not-earnings`. That is safe against
-    over-counting and it means a freshly registered account — whose payees
-    nobody has classified — reports **₹0 earned** against real deposits.
-    Measured on one: six deposits arrived and all six were excluded.
-
-    An allow-list is the right mechanism and the wrong thing to bury in a YAML
-    file, because the list *is* the definition and the definition is personal. A
-    refund is not income for anyone; money from a parent is income for some
-    people and a transfer for others. So it is editable from the page where
-    payees are named, and nothing here decides it.
-
-    Adding is `append_to_seq`, never `.append()` — §14: the comments in this
-    file cost real money to acquire and a plain round-trip destroys them.
-    """
-    path = path or RULES_FILE
-    before = path.read_text(encoding="utf-8") if path.exists() else ""
-    data = _load(path)
-
-    block = data.get("not_earnings")
-    if block is None:
-        # The rule itself is missing. Creating it with an EMPTY allow-list would
-        # tag every deposit as not-earnings, which is the failure this function
-        # exists to fix — so a new block starts by counting the thing being
-        # asked about and nothing else.
-        data["not_earnings"] = block = {
-            "title": "Not earnings",
-            "tag": "not-earnings",
-            "earnings_only": [],
-        }
-    if block.get("earnings_only") is None:
-        block["earnings_only"] = []
-    listed = block["earnings_only"]
-
-    present = category in list(listed)
-    if counts and not present:
-        append_to_seq(listed, category)
-    elif present and not counts:
-        for index, name in enumerate(list(listed)):
-            if name == category:
-                del listed[index]
-                break
-
-    return ConfigChange(path=path, before=before, after=_dump(data))
+# --- the credit-card split. SPEC §103 ----------------------------------------
 
 
 def plan_keep(
@@ -447,6 +447,14 @@ def plan_keep(
     return ConfigChange(path=path, before=before, after=_dump(data))
 
 
+def _defaults(data) -> None:
+    """The two settings a shift needs, when the file is new. Never the policy."""
+    data.setdefault("before_day", 10)
+    data.setdefault("to_day", 22)
+    if "categories" not in data or data["categories"] is None:
+        data["categories"] = []
+
+
 def plan_settlement(category: str, on: bool, path: Path | None = None) -> ConfigChange:
     """Whether a category's payments settle the **previous** month. SPEC §103.3.
 
@@ -480,6 +488,59 @@ def plan_settlement(category: str, on: bool, path: Path | None = None) -> Config
 # --- what counts as earnings. SPEC §112 --------------------------------------
 
 
+def plan_earnings(category: str, counts: bool, path: Path | None = None) -> ConfigChange:
+    """Whether money arriving under `category` is **earned**. SPEC §112.
+
+    > "Earning definition or any other definition is different for anyone so we
+    >  cant generalize instead give an option i guess"
+
+    They are right, and the shape of the existing rule is why it mattered.
+    `not_earnings` is an **allow-list**: `earnings_only` names what counts, and
+    everything else arriving is tagged `not-earnings`. That is safe against
+    over-counting and it means a freshly registered account — whose payees
+    nobody has classified — reports **₹0 earned** against real deposits.
+    Measured on one: six deposits arrived and all six were excluded.
+
+    An allow-list is the right mechanism and the wrong thing to bury in a YAML
+    file, because the list *is* the definition and the definition is personal. A
+    refund is not income for anyone; money from a parent is income for some
+    people and a transfer for others. So it is editable from the page where
+    payees are named, and nothing here decides it.
+
+    Adding is `append_to_seq`, never `.append()` — §14: the comments in this
+    file cost real money to acquire and a plain round-trip destroys them.
+    """
+    path = path or RULES_FILE
+    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    data = _load(path)
+
+    block = data.get("not_earnings")
+    if block is None:
+        # The rule itself is missing. Creating it with an EMPTY allow-list would
+        # tag every deposit as not-earnings, which is the failure this function
+        # exists to fix — so a new block starts by counting the thing being
+        # asked about and nothing else.
+        data["not_earnings"] = block = {
+            "title": "Not earnings",
+            "tag": "not-earnings",
+            "earnings_only": [],
+        }
+    if block.get("earnings_only") is None:
+        block["earnings_only"] = []
+    listed = block["earnings_only"]
+
+    present = category in list(listed)
+    if counts and not present:
+        append_to_seq(listed, category)
+    elif present and not counts:
+        for index, name in enumerate(list(listed)):
+            if name == category:
+                del listed[index]
+                break
+
+    return ConfigChange(path=path, before=before, after=_dump(data))
+
+
 def earnings_categories(path: Path | None = None) -> list[str]:
     """The categories currently counted as earnings."""
     path = path or RULES_FILE
@@ -488,10 +549,3 @@ def earnings_categories(path: Path | None = None) -> list[str]:
     block = (_load(path) or {}).get("not_earnings") or {}
     return [str(c) for c in (block.get("earnings_only") or [])]
 
-
-def known_categories(path: Path | None = None) -> list[str]:
-    """Categories that already have a rule. The UI offers only these."""
-    data = _load(path or RULES_FILE)
-    return sorted(
-        {spec["category"] for spec in (data.get("rules") or []) if spec.get("category")}
-    )

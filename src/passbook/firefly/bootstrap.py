@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
-import yaml
+
+from ..yamlfile import read_yaml
 
 from .client import FireflyClient, ValidationFailed
 
@@ -49,7 +50,7 @@ def load_rules(path: Path | None = None) -> dict:
     path = path or RULES_FILE
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return read_yaml(path)
 
 
 def _payload(spec: dict, group_title: str) -> dict:
@@ -234,5 +235,5 @@ def load_bills(path: Path | None = None) -> list[dict]:
     path = path or BILLS_FILE
     if not path.exists():
         return []
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    loaded = read_yaml(path)
     return loaded.get("bills") or []

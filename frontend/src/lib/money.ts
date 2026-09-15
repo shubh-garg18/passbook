@@ -1,7 +1,7 @@
 /* Money formatting. SPEC §16.5.
  *
  * The API sends amounts as exact decimal STRINGS, never JSON numbers, because
- * a JSON number is an IEEE double the moment it is parsed and the project's
+ * a JSON number is an IEEE double the moment it is parsed and CLAUDE.md's
  * first non-negotiable — money is Decimal, never float — does not stop at the
  * process boundary. So these functions never call Number() on an amount.
  * Grouping is done on the digits themselves.
@@ -43,6 +43,28 @@ export function formatAmount(value: string | null | undefined): string {
   if (value === null || value === undefined || value === '') return ''
   const { sign, int, frac } = parts(value)
   return `${sign}${int}.${frac}`
+}
+
+/**
+ * An axis tick: short enough to sit beside a 96px plot without wrapping.
+ *
+ * Indian units, because the ledger is INR and the reader thinks in them — a
+ * lakh is not 100k here, it is a lakh. Rounded hard on purpose: an axis says
+ * roughly how tall a column is, and the exact figure is always one hover or
+ * one card away. Never used for a money figure.
+ */
+export function compactAmount(value: number): string {
+  const n = Math.round(value)
+  if (n === 0) return '0'
+  if (Math.abs(n) >= 100000) {
+    const lakh = n / 100000
+    return `${lakh % 1 === 0 ? lakh : lakh.toFixed(1)}L`
+  }
+  if (Math.abs(n) >= 1000) {
+    const k = n / 1000
+    return `${k % 1 === 0 ? k : k.toFixed(1)}k`
+  }
+  return String(n)
 }
 
 /** `09 May 2026` from an ISO date, without constructing a Date. */
@@ -92,26 +114,4 @@ export function hoursPastMidnight(time: string | null): number | null {
   const [h, m, s] = time.split(':').map(Number)
   if (h === undefined || Number.isNaN(h)) return null
   return h + (m ?? 0) / 60 + (s ?? 0) / 3600
-}
-
-/**
- * An axis tick: short enough to sit beside a 96px plot without wrapping.
- *
- * Indian units, because the ledger is INR and the reader thinks in them — a
- * lakh is not 100k here, it is a lakh. Rounded hard on purpose: an axis says
- * roughly how tall a column is, and the exact figure is always one hover or
- * one card away. Never used for a money figure.
- */
-export function compactAmount(value: number): string {
-  const n = Math.round(value)
-  if (n === 0) return '0'
-  if (Math.abs(n) >= 100000) {
-    const lakh = n / 100000
-    return `${lakh % 1 === 0 ? lakh : lakh.toFixed(1)}L`
-  }
-  if (Math.abs(n) >= 1000) {
-    const k = n / 1000
-    return `${k % 1 === 0 ? k : k.toFixed(1)}k`
-  }
-  return String(n)
 }

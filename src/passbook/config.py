@@ -4,14 +4,14 @@ import base64
 import binascii
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .yamlfile import read_yaml
-
 import yaml
+
+from .yamlfile import read_yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,27 +28,6 @@ class Settings(BaseSettings):
     # repr=False so a stray traceback cannot spill them. SPEC §11.
     passbook_account_number: str | None = Field(default=None, repr=False)
     firefly_token: str | None = Field(default=None, repr=False)
-
-    # Where the invite goes. Defaults to the SMTP user, which for Gmail is the
-    # address whose calendar it lands in.
-    passbook_reminder_email: str | None = None
-
-    # --- the reminder, delivered by email. SPEC §24.4 ------------------------
-    # Optional in every sense: absent, the Reminder page still writes a
-    # calendar file to download. Present, it can mail the invite straight to
-    # the address Google Calendar watches, which is one click instead of a
-    # download and an import.
-    #
-    # For Gmail this is an APP PASSWORD (Google account -> Security -> 2-Step
-    # Verification -> App passwords), never the account password. It is a
-    # credential: repr=False, never logged, never returned by the API.
-    passbook_smtp_host: str | None = None
-
-    passbook_smtp_password: str | None = Field(default=None, repr=False)
-
-    passbook_smtp_port: int = 587
-
-    passbook_smtp_user: str | None = None
 
     # Web UI (Phase 7). The password is stored only as a Werkzeug hash; the
     # plaintext never touches .env, the repo, or a log. SPEC §14.
@@ -80,6 +59,37 @@ class Settings(BaseSettings):
     # account number, not the Customer ID. Treated as a credential regardless —
     # never logged, never echoed, never rendered. SPEC §11, §6.8.
     canara_pdf_password: str | None = Field(default=None, repr=False)
+
+    # --- the reminder, delivered by email. SPEC §24.4 ------------------------
+    # Optional in every sense: absent, the Reminder page still writes a
+    # calendar file to download. Present, it can mail the invite straight to
+    # the address Google Calendar watches, which is one click instead of a
+    # download and an import.
+    #
+    # For Gmail this is an APP PASSWORD (Google account -> Security -> 2-Step
+    # Verification -> App passwords), never the account password. It is a
+    # credential: repr=False, never logged, never returned by the API.
+    passbook_smtp_host: str | None = None
+    passbook_smtp_port: int = 587
+    passbook_smtp_user: str | None = None
+    passbook_smtp_password: str | None = Field(default=None, repr=False)
+    # Where the invite goes. Defaults to the SMTP user, which for Gmail is the
+    # address whose calendar it lands in.
+    passbook_reminder_email: str | None = None
+
+    @property
+    def reminder_recipient(self) -> str | None:
+        return (self.passbook_reminder_email or self.passbook_smtp_user or "").strip() or None
+
+    @property
+    def smtp_ready(self) -> bool:
+        """Enough to send. Checked before a button is offered, not after."""
+        return bool(
+            self.passbook_smtp_host
+            and self.passbook_smtp_user
+            and self.passbook_smtp_password
+            and self.reminder_recipient
+        )
 
     firefly_url: str = "http://localhost:8080"
     # The Firefly asset account statements are posted into. Named rather than
@@ -197,7 +207,6 @@ def set_env_values(
     return path
 
 
-PAYEES_MD = Path("payees.md")
 ARCHIVE = Path("archive")
 
 # Canara's net banking will not serve a statement from arbitrarily far back, so
@@ -210,8 +219,15 @@ SYNC_STALE_DAYS = 10
 SYNC_URGENT_DAYS = 21
 
 
-def last_sync(archive: Path | None = None) -> tuple[str, int, date] | None:
-    """Newest archived statement, its age in days and its date, or None.
+def last_sync(
+    archive: Path | None = None, only: "set[Path] | None" = None
+) -> tuple[str, int, date] | None:
+    """Newest archived statement, its age in days, and the day it landed.
+
+    `only` narrows it to a set of paths — the files belonging to the accounts in
+    scope (§104). Passed in rather than derived here, because deciding which
+    account a statement belongs to means reading the statement, and that is
+    `service.statements_for`'s job and not this module's.
 
     Uses `archive/`, not `inbox/`: a file only lands there after a *successful*
     push, so it is a record of what actually reached the ledger rather than what
@@ -226,6 +242,8 @@ def last_sync(archive: Path | None = None) -> tuple[str, int, date] | None:
     if not archive.is_dir():
         return None
     files = [p for p in archive.rglob("*") if p.is_file() and not p.name.startswith(".")]
+    if only is not None:
+        files = [p for p in files if p in only]
     if not files:
         return None
     newest = max(files, key=lambda p: p.stat().st_mtime)
@@ -234,113 +252,21 @@ def last_sync(archive: Path | None = None) -> tuple[str, int, date] | None:
     return newest.name, age, when.date()
 
 
-# Columns `passbook payees` generates. Anything else in payees.md is the
-# operator's own and is carried across when the file is regenerated.
-GENERATED_COLUMNS = {
-    "#", "token", "len", "alias", "chan", "txns",
-    "withdrawn", "deposited", "total", "first", "last",
-}
-
-
-def parse_payees_table(path: Path | None = None) -> tuple[list[str], dict[str, dict[str, str]]]:
-    """Return (header, {token: {column: value}}) from payees.md.
-
-    Columns are located by header name rather than position, because the file
-    gains and loses columns as the operator annotates it.
-    """
-    path = path or PAYEES_MD
-    if not path.exists():
-        return [], {}
-
-    header: list[str] = []
-    rows: dict[str, dict[str, str]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip().startswith("|"):
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if not header:
-            if any(c.lower() == "token" for c in cells):
-                header = cells
-            continue
-        if set("".join(cells)) <= {"-", ":"}:
-            continue  # the |---|---| separator
-        row = dict(zip(header, cells))
-        token = next((v for k, v in row.items() if k.lower() == "token"), "")
-        if token and token != "(unparsed)":
-            rows[token] = row
-    return header, rows
-
-
-def parse_payees_markdown(path: Path | None = None) -> dict[str, str]:
-    """Token -> alias, out of payees.md. Used only to report drift."""
-    _, rows = parse_payees_table(path)
-    out: dict[str, str] = {}
-    for token, row in rows.items():
-        alias = next((v for k, v in row.items() if k.lower() == "alias"), "")
-        out[token] = alias
-    return out
-
-
-def alias_drift(
-    yaml_path: Path | None = None, md_path: Path | None = None
-) -> list[str]:
-    """Report only genuine disagreement — an edit that would be lost.
-
-    payees.md's Alias column is now *generated* from the yaml by
-    `passbook payees`, so the yaml being ahead of the file is ordinary
-    staleness, not drift: the next regeneration fixes it and nothing is at
-    risk. Reporting that fired every time the UI was used as intended, which
-    trains the warning to be ignored.
-
-    What still matters is the other direction: payees.md claiming an alias the
-    yaml does not have, or contradicting it. That is a hand-edit that the next
-    regeneration will silently discard, so it is worth a word before it goes.
-
-    **Detects, never syncs.** The yaml stays the source of truth; a markdown
-    typo must never be able to change ledger behaviour.
-    """
-    yaml_aliases = load_payee_aliases(yaml_path)
-    md_aliases = parse_payees_markdown(md_path)
-    if not md_aliases:
-        return []
-
-    problems = []
-    for token, md_alias in sorted(md_aliases.items()):
-        if not md_alias:
-            continue  # blank is fine — the yaml is authoritative
-        yaml_alias = yaml_aliases.get(token)
-        if not yaml_alias:
-            problems.append(
-                f"{token!r}: payees.md says {md_alias!r} but the yaml has no alias — "
-                f"a hand-edit that regenerating payees.md would discard"
-            )
-        elif md_alias != yaml_alias:
-            problems.append(
-                f"{token!r}: payees.md says {md_alias!r}, yaml says {yaml_alias!r} — "
-                f"the yaml wins; regenerate to sync"
-            )
-    return problems
-
-
 # --- the account registry. SPEC §21 ------------------------------------------
 # Replaces PASSBOOK_ACCOUNT_NUMBER and PASSBOOK_ASSET_ACCOUNT, which could only
 # ever describe one account. Gitignored like `rules.yaml` and
 # `payee_aliases.yaml`: it names real account numbers (§11).
 #
-# **`bank` is present from day one although only `canara` shipped first.** A
+# **`bank` is present from day one although only `canara` is supported.** A
 # second bank is the obvious next step, and the reshaping cost of adding the
 # field later is the whole registry plus every `external_id` in the ledger — the
-# migration §21.2 exists to do once.
+# migration this phase exists to do once.
 
 ACCOUNTS_FILE = Path("config/accounts.yaml")
 
-#: Optional. Absent means no reporting shift at all. SPEC §28.
-ATTRIBUTION_FILE = Path("config/attribution.yaml")
-
 # Loaders exist per bank (§6.2 dispatches on magic bytes, not on this), so a
 # statement can only be routed to an account whose bank has one.
-# Canara is built in; anything else comes from a profile — one shipped in
-# `src/passbook/banks/`, or one the user wrote in `config/banks/`.
+# Canara is built in; anything else comes from a profile in `config/banks/`.
 # The guard stays — the registry still refuses a bank nothing can read, so a
 # statement can never be parsed by the wrong loader — but adding to it is now
 # a YAML file rather than a code change. SPEC §27.
@@ -348,12 +274,6 @@ BUILTIN_BANKS = ("canara",)
 
 
 def supported_banks() -> tuple[str, ...]:
-    """Every bank something can read: Canara, plus every profile found.
-
-    Was a registry of Python modules (§22.5) until §27 made a bank a YAML file.
-    Imported lazily: `config` is imported by everything, and the profile loader
-    imports back into the parser.
-    """
     from .loaders.profiles import ProfileError, known_banks
 
     try:
@@ -366,7 +286,7 @@ def supported_banks() -> tuple[str, ...]:
 
 
 class _SupportedBanks(tuple):
-    """`SUPPORTED_BANKS` is read in a few places and used to be a constant.
+    """`SUPPORTED_BANKS` used to be a constant and is read in a few places.
 
     It stays subscriptable and iterable, but resolves through `supported_banks()`
     every time so a profile dropped into `config/banks/` is picked up without a
@@ -393,7 +313,6 @@ class _SupportedBanks(tuple):
 
 
 SUPPORTED_BANKS = _SupportedBanks()
-
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -425,7 +344,7 @@ class Account:
 
     @property
     def display(self) -> str:
-        """What a person is shown when this account has to be named. SPEC §25.
+        """What a person is shown when this account has to be named. SPEC §40.
 
         `Canara ****1111` unless the operator has renamed it, and the fallback
         matters more than it looks. It used to be the **Firefly asset account's
@@ -436,6 +355,12 @@ class Account:
         and never needs explaining.
         """
         return self.label or f"{self.bank_name} {self.masked}".strip()
+
+    def renamed(self, label: str) -> "Account":
+        """A copy under a new name. **`slug` is untouched** — it namespaces
+        `external_id`, so changing it would orphan every pushed row (§21.1).
+        A rename here is a display decision and nothing else."""
+        return replace(self, label=label.strip())
 
     def external_id(self, txn_id: str) -> str:
         """`canara-1111-20260509000001`. SPEC §21.1.
@@ -498,11 +423,10 @@ def parse_accounts(data: dict) -> list[Account]:
                 f"slug {slug!r} must be lowercase letters, digits and hyphens — "
                 "it is part of every external_id in the ledger"
             )
-        if bank not in supported_banks():
+        if bank not in SUPPORTED_BANKS:
             raise RegistryError(
                 f"accounts[{index}] bank {bank!r} is not supported; "
-                f"there is a profile for {', '.join(supported_banks())} only. "
-                "Add yours from the browser: Account menu -> Add a bank."
+                f"there is a loader for {', '.join(SUPPORTED_BANKS)} only"
             )
         accounts.append(
             Account(
@@ -544,7 +468,7 @@ def load_accounts(path: Path | None = None, settings: "Settings | None" = None) 
     path = path or ACCOUNTS_FILE
     if path.exists():
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            data = read_yaml(path)
         except yaml.YAMLError as exc:
             raise RegistryError(f"{path} is not readable YAML: {exc}") from exc
         accounts = parse_accounts(data)
@@ -599,45 +523,7 @@ def find_account(accounts: list[Account], slug: str) -> "Account | None":
     return next((a for a in accounts if a.slug == slug), None)
 
 
-def load_payee_aliases(path: Path | None = None) -> dict[str, str]:
-    """Truncated payee token -> canonical display name. SPEC §3, D10.
-
-    Missing or empty file is normal and yields {} — aliases are operator
-    knowledge, and there is nothing to infer from the statement alone.
-    """
-    path = path or PAYEE_ALIASES
-    if not path.exists():
-        return {}
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    mapping = loaded.get("aliases") if isinstance(loaded, dict) else None
-    if not mapping:
-        return {}
-    return {str(key): str(value) for key, value in mapping.items()}
-
-
-def token_expiry(token: str) -> datetime | None:
-    """Read the `exp` claim out of a JWT without verifying it or calling out.
-
-    A Firefly Personal Access Token is an RS256 JWT valid for 365 days, and
-    Firefly gives no warning before it lapses — the failure just looks like a
-    generic 401. We only need the expiry, so the signature is irrelevant here;
-    nothing is trusted on the basis of this value.
-
-    Returns None if the token is not a JWT or carries no usable `exp`.
-    """
-    parts = token.strip().split(".")
-    if len(parts) != 3:
-        return None
-    payload = parts[1]
-    payload += "=" * (-len(payload) % 4)  # restore base64url padding
-    try:
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-    except (ValueError, binascii.Error, UnicodeDecodeError):
-        return None
-    exp = claims.get("exp")
-    if not isinstance(exp, (int, float)):
-        return None
-    return datetime.fromtimestamp(exp, tz=timezone.utc)
+ATTRIBUTION_FILE = Path("config/attribution.yaml")
 
 
 def load_attribution(path: Path | None = None):
@@ -683,3 +569,44 @@ def load_attribution(path: Path | None = None):
         to_day=day("to_day", 22),
         keep=keep,
     )
+
+
+def load_payee_aliases(path: Path | None = None) -> dict[str, str]:
+    """Truncated payee token -> canonical display name. SPEC §3, D10.
+
+    Missing or empty file is normal and yields {} — aliases are operator
+    knowledge, and there is nothing to infer from the statement alone.
+    """
+    path = path or PAYEE_ALIASES
+    if not path.exists():
+        return {}
+    loaded = read_yaml(path)
+    mapping = loaded.get("aliases") if isinstance(loaded, dict) else None
+    if not mapping:
+        return {}
+    return {str(key): str(value) for key, value in mapping.items()}
+
+
+def token_expiry(token: str) -> datetime | None:
+    """Read the `exp` claim out of a JWT without verifying it or calling out.
+
+    A Firefly Personal Access Token is an RS256 JWT valid for 365 days, and
+    Firefly gives no warning before it lapses — the failure just looks like a
+    generic 401. We only need the expiry, so the signature is irrelevant here;
+    nothing is trusted on the basis of this value.
+
+    Returns None if the token is not a JWT or carries no usable `exp`.
+    """
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)  # restore base64url padding
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return None
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        return None
+    return datetime.fromtimestamp(exp, tz=timezone.utc)

@@ -19,19 +19,35 @@ UPI_DR = (
 )
 # --- 1b. UPI credit (14 rows in the reference statement; SPEC §6.5 omitted it)
 UPI_CR = (
-    "UPI/CR/412345678902/MURZAB QO/SBIN/**QOVEX@OKSBI/PAY//"
+    "UPI/CR/412345678902/MURZAB QO/SBIN/**NIRAJ@OKSBI/PAY//"
     "SBIA1234AAB98A12C3ED9AA66B8B5678/16/05/2026 19:05:41"
 )
 # --- 1c. UPI reference (1 row; also absent from SPEC §6.5) --------------------
 UPI_REF = (
-    "UPI/REF/412345678903/QILGRU ZA/AXIS/**ZEPKV@OKAXIS/PAY/"
+    "UPI/REF/412345678903/QILGRU ZA/AXIS/**HJAIN@OKAXIS/PAY/"
     "PTM1234B1FF567B8C97CA5CF9E/12/07/2026 18:11:42/998877"
+)
+# --- 1d. UPI, UTR first (§97) -------------------------------------------------
+# The same six facts as 1a in a different ORDER: the UTR at index 1 and the
+# direction at index 2, where the reference bank puts them at 2 and 1. Only the
+# prefix tells the two apart, which is why it is matched exactly.
+UPI_UTR_FIRST = "UPIAR/412345678904/DR/ZOKVEX QI/**12345@YBL"
+# --- 1e. UPI, behind the bank's own words (§99) -------------------------------
+# The reference bank's layout with the transaction type printed in front of it.
+# Seven segments, unanimous across a real 72-row statement.
+UPI_PREFIXED = (
+    "WDL TFR UPI/DR/512345678901/ZOKVEX QI/YESB/9990001111/"
+    "Sent 1234567890123 AT 04100 EXAMPLE NAGAR, PLACE"
+)
+UPI_PREFIXED_CR = (
+    "DEP TFR UPI/CR/512345678902/MURZAB QO/UTIB/murzab@okaxis/"
+    "Sent 1234567890124 AT 04100 EXAMPLE NAGAR, PLACE"
 )
 # --- 2. UPI reversal ----------------------------------------------------------
 UPI_REV = "UPI/412345678901/R01/06/08/2026"
 # --- 3. IMPS credit -----------------------------------------------------------
 IMPS_CR = (
-    "INET-IMPS-CR/JYX QORP F/ICICI BANK/123456789012/9876543210/"
+    "INET-IMPS-CR/M2I IMPS P/ICICI BANK/123456789012/9876543210/"
     "9876543210/12/05/2026 05:07:45/123456789012"
 )
 # --- 4. NEFT credit -----------------------------------------------------------
@@ -79,10 +95,143 @@ def test_upi_reversal_sets_flag_and_keeps_utr():
     assert got["utr"] == parse(UPI_DR)["utr"]
 
 
+def test_upi_with_the_utr_first_is_read_in_its_own_order(): 
+    """§97. Positional parsing cannot tell two orders apart from a token count,
+    so the prefix decides — `UPIAR` rather than a bare `UPI`. Reading it with
+    the reference bank's order would report the direction as the UTR."""
+    got = parse(UPI_UTR_FIRST)
+    assert got["channel"] == UPI
+    assert got["utr"] == "412345678904"
+    assert got["payee"] == "ZOKVEX QI"
+    assert got["counterparty_bank"] == "YBL"
+
+
+def test_upi_behind_the_banks_own_words():
+    """§99. One bank prints its transaction type before the channel, so the
+    narration starts `WDL TFR UPI/` and not `UPI/`. Measured: that rejected all
+    72 rows of a real statement and every payee came out unparsed."""
+    got = parse(UPI_PREFIXED)
+    assert got["channel"] == UPI
+    assert got["utr"] == "512345678901"
+    assert got["payee"] == "ZOKVEX QI"
+    # A four-letter token there is an IFSC's bank prefix.
+    assert got["counterparty_bank"] == "YESB"
+
+
+def test_upi_behind_the_banks_own_words_reads_a_credit_the_same_way():
+    got = parse(UPI_PREFIXED_CR)
+    assert got["channel"] == UPI
+    assert got["payee"] == "MURZAB QO"
+    assert got["counterparty_bank"] == "UTIB"
+
+
+def test_a_prefixed_upi_falls_back_to_the_vpa_handle_for_the_bank():
+    """Six rows of the measured file carry two words where the others carry a
+    bank code. Two words are a name that has run on, not a bank — so the handle
+    is used instead of printing half a payee as a counterparty."""
+    got = parse(
+        "WDL TFR UPI/DR/512345678903/QILGRU ZA/SOME NAME/**12345@OKHDFCBANK/Sent"
+    )
+    assert got["payee"] == "QILGRU ZA"
+    assert got["counterparty_bank"] == "OKHDFCBANK"
+
+
+def test_the_three_upi_orders_cannot_match_each_others_narrations():
+    """They are told apart by their FIRST segment and nothing else, so the one
+    thing that must hold is that each rejects the other two. A matcher that
+    accepted a neighbour's layout would read the direction as a UTR and file a
+    payee under a bank code — silently, and only for that bank."""
+    from passbook.narration import _upi_prefixed, _upi_transfer, _upi_utr_first
+
+    for matcher, mine in (
+        (_upi_transfer, UPI_DR),
+        (_upi_utr_first, UPI_UTR_FIRST),
+        (_upi_prefixed, UPI_PREFIXED),
+    ):
+        assert matcher(mine) is not None, matcher.__name__
+        for theirs in (UPI_DR, UPI_UTR_FIRST, UPI_PREFIXED):
+            if theirs is mine:
+                continue
+            assert matcher(theirs) is None, f"{matcher.__name__} claimed {theirs[:20]!r}"
+
+
+# --- §106 the grammars the second bank needed ---------------------------------
+
+INTEREST_PREFIXED = "999900001111:Int.Pd:01-01-2024 to 31-03-2024"
+MINBAL_CHGS = "SB MINBAL CHGS"
+LONE_REF = "AA4826270"
+SHORT_PHRASE = "NEW ACCOUNT OPEN 1"
+
+
+def test_interest_is_matched_by_its_marker_not_by_a_prefix():
+    """One bank writes `SBINT …` and another `<account>:Int.Pd:<range>`. The
+    second puts the account number in front, so a prefix test cannot see it."""
+    got = parse(INTEREST_PREFIXED)
+    assert got["channel"] == INT
+    assert got["payee"] == "Savings Interest"
+
+
+def test_interest_never_carries_the_account_number_into_the_payee():
+    """§11, and the same reasoning `_scheme` uses for the customer ID inside a
+    PMSBY line: a payee is a display string that reaches the ledger, a payee
+    report and a log line. Nothing is extracted from the body."""
+    got = parse(INTEREST_PREFIXED)
+    assert "999900001111" not in str(got["payee"])
+    assert all("999900001111" not in str(v) for v in got.values())
+
+
+def test_an_abbreviated_charge_is_still_a_charge():
+    got = parse(MINBAL_CHGS)
+    assert got["channel"] == CHG
+    assert got["payee"] == "Bank Charges"
+
+
+def test_chgs_matches_as_a_word_and_not_as_a_fragment():
+    """A boundary on both, so a token that merely contains the letters is not a
+    charge. This matcher runs last, but "last" is not "anything"."""
+    from passbook.narration import _charges
+
+    assert _charges("SB MINBAL CHGS") is not None
+    assert _charges("CHGSMITH ENTERPRISES") is None
+
+
+def test_a_narration_that_is_only_a_reference_becomes_that_reference():
+    """§106. Not a guess about what the code means — an observation that there
+    is nothing else in the line. It matters because `payee_inventory` collapses
+    every payee-less row into one `(unparsed)` heading, and a recurring debit in
+    there cannot be aliased or categorised at all."""
+    got = parse(LONE_REF)
+    assert got["payee"] == LONE_REF
+    assert got["channel"] == OTHER
+
+
+def test_a_short_phrase_with_no_separators_counts_too():
+    got = parse(SHORT_PHRASE)
+    assert got["payee"] == SHORT_PHRASE
+
+
+def test_the_lone_token_matcher_claims_nothing_a_grammar_could_have():
+    """It is last for a reason. Anything with a separator in it belongs to a
+    positional grammar, whether or not one matched — claiming it here would put
+    a whole UPI narration on the Payees page as a payee name."""
+    from passbook.narration import _lone_token
+
+    for raw in (UPI_DR, UPI_CR, UPI_REF, UPI_REV, IMPS_CR, NEFT_CR, UPI_PREFIXED):
+        assert _lone_token(raw) is None, raw[:30]
+
+
+def test_a_long_narration_is_not_a_payee():
+    """The flood guard. A per-row narration claimed this way would put one token
+    per transaction on the Payees page, which is the opposite of useful."""
+    from passbook.narration import _lone_token
+
+    assert _lone_token("A" * 41) is None
+
+
 def test_imps_credit():
     got = parse(IMPS_CR)
     assert got["channel"] == IMPS
-    assert got["payee"] == "JYX QORP F"
+    assert got["payee"] == "M2I IMPS P"
     assert got["counterparty_bank"] == "ICICI BANK"
 
 
@@ -152,7 +301,7 @@ def test_date_only_trailing_timestamp_also_stripped():
 
 
 def test_masked_vpa_yields_only_the_handle():
-    """`**15659@YBL` — the VPA is masked by the bank, so only the handle is
+    """`**39725@YBL` — the VPA is masked by the bank, so only the handle is
     usable. SPEC §6.5."""
     assert parse(UPI_DR)["counterparty_bank"] == "YBL"
 

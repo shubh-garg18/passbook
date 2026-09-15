@@ -34,7 +34,7 @@ export function ReapplyDone() {
       ) : (
         <Notice kind="bad">
           <p>
-            <strong>The balance does not reconcile.</strong> Firefly reports{' '}
+            <strong>The balance does not reconcile.</strong> The ledger reports{' '}
             <Money value={result.balance} />; the newest statement closes at{' '}
             <Money value={result.expected} />. Do not push anything else until this is
             understood. A backup was taken before the purge and every statement is still in{' '}

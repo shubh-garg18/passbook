@@ -11,6 +11,8 @@ export type TotpStatus = {
    *  the failure mode, and zero is too late to warn at. */
   backupCodesLow: boolean
   rememberedDevices: number
+  /** Masked, or `null` when emailed recovery is not available. SPEC §29. */
+  recoveryEmail: string | null
 }
 
 export type Session = {
@@ -31,6 +33,7 @@ export type SyncStatus = {
    *  recomputed from a second field that could disagree with it. */
   date: string | null
 }
+
 export type Overview = {
   /** The selected account's balance, or the SUM across accounts for `all` —
    *  which is a true figure but cannot be reconciled against any one
@@ -54,7 +57,7 @@ export type AccountSummary = {
   /** `****1111`. The full number never crosses this boundary (§11). */
   account: string
   assetAccount: string
-  /** The operator's own name if they set one, else `Canara ****1111`. §25. */
+  /** The operator's own name if they set one, else `Canara ****1111`. §40. */
   label: string
   /** Whether `label` is a decision or a default. */
   renamed: boolean
@@ -69,8 +72,21 @@ export type Accounts = {
   multiple: boolean
 }
 
+/** What removing an account would leave behind. SPEC §38. */
+export type Removal = {
+  account: AccountSummary
+  /** null when Firefly could not be asked; `countReason` then says why. */
+  ledgerRows: number | null
+  archiveFiles: number
+  countReason: string
+  last: boolean
+}
+
 /** One row of a breakdown. `amount` is a decimal string, like every amount. */
 export type Slice = { name: string; amount: string; count: number }
+
+/** A named total with the slices of another dimension inside it. SPEC §64. */
+export type Breakdown = { name: string; amount: string; count: number; parts: Slice[] }
 
 /**
  * The Ledger page's charts. SPEC §18.
@@ -149,6 +165,7 @@ export type Analysis = {
   accounts: string[]
   coverage: { from: string; to: string } | null
 }
+
 export type Txn = {
   id: string
   date: string
@@ -186,6 +203,9 @@ export type Parsed = {
 export type PushResult = {
   parsed: number
   pushed: number
+  /** Skipped because the ledger already holds that transaction, by id (§119). */
+  already: number
+  /** Refused by Firefly on its content hash — expected to be 0 since §119. */
   duplicates: number
   failed: number
   failures: { id: string; message: string }[]
@@ -224,34 +244,41 @@ export type Payees = {
 
 /** SPEC §20. `ok: null` means the check could not be run — rendered as
  *  unverified, never as a tick (non-negotiable 11). */
+export type LedgerVerdict = {
+  ok: boolean | null
+  headline: string
+  failed?: number
+  unchecked?: number
+  checks: { name: string; ok: boolean | null; detail: string }[]
+}
+
 export type DiffResponse = {
   changes: { path: string; diff: string }[]
   aliasChanges: Record<string, string>
   categoryChanges: Record<string, string>
-}
-
-/** What removing an account would leave behind. SPEC §25. */
-export type Removal = {
-  account: AccountSummary
-  /** null when Firefly could not be asked; `countReason` then says why. */
-  ledgerRows: number | null
-  archiveFiles: number
-  countReason: string
-  last: boolean
+  /** What this config would do to rows ALREADY in Firefly, computed before the
+   *  write from the submitted aliases and categories. `null` when Firefly is
+   *  unreachable or unconfigured — writing config works either way. §23. */
+  ledger: ReapplyPreview | null
+  /** Categories this change would leave with no payees. They keep existing and
+   *  can never match again, so a report on one is permanently empty. */
+  emptied: string[]
 }
 
 export type ReapplyChange = {
   externalId: string
-  /** The id `PUT /api/v1/transactions/{group}` needs. A change without one
-   *  never matched a live row and is refused rather than guessed at. §24. */
+  /** The Firefly transaction group. Empty means the row was never matched, and
+   *  an unmatched row is never updated — see `service.sync_ledger`. */
   groupId: string
   date: string
   amount: string
-  kind: string
+  kind: 'withdrawal' | 'deposit'
   oldDescription: string
   newDescription: string
   oldCategory: string
   newCategory: string
+  /** The expense or revenue account on the other side. An alias rename moves
+   *  this too, because the pusher uses one name for both. */
   oldCounterparty: string
   newCounterparty: string
   oldTags: string[]
@@ -263,17 +290,19 @@ export type ReapplyChange = {
 }
 
 export type ReapplyPreview = {
-  /** Rows actually compared. Zero is "nothing was checked", never "nothing
-   *  differs" — §24.1, and it gates the green tick. */
   considered: number
   renames: number
   recats: number
   counterparties: number
   retags: number
+  /** Tags this change would REMOVE, and from how many rows. A tag is what the
+   *  roll-ups are built on; losing one is a semantic loss a payee diff cannot
+   *  show. SPEC §33. */
   tagsLost: { tag: string; rows: number }[]
   changes: ReapplyChange[]
   /** The precondition, not a warning: a purge is refused without a recent dump.
-   *  This container cannot take one — it can only read `backups/`. §18.7. */
+   *  This container cannot take one — it can only read `backups/`. §18.7.
+   *  It does NOT gate the in-place sync, which deletes nothing. */
   dump: {
     name: string | null
     ageMinutes: number | null
@@ -282,6 +311,7 @@ export type ReapplyPreview = {
   }
 }
 
+/** The result of an in-place sync. SPEC §23. */
 export type SyncResult = {
   ok: boolean
   considered: number
@@ -294,6 +324,7 @@ export type SyncResult = {
    *  `null` means the re-read itself failed: unverified, which is a third
    *  state and must never render as a pass (non-negotiable 11). */
   remaining: number | null
+  ledger?: LedgerVerdict
 }
 
 export type ReapplyResult = {
@@ -322,14 +353,7 @@ export type Status = {
   /** SPEC §20. `ok: null` means the check could not be run here — the strip
    *  shows that as a warning, never as a tick. A green light for something never
    *  looked at is what let §19's incident sit for seven hours. */
-  ledger: {
-    ok: boolean | null
-    headline: string
-    failed?: number
-    unchecked?: number
-    checks: { name: string; ok: boolean | null; detail: string }[]
-  }
-  drift: string[]
+  ledger: LedgerVerdict
   backups: {
     local: Artefact[]
     ageDays: number | null
@@ -345,102 +369,6 @@ export type EnrollStart = {
   secretPretty: string
   uri: string
   qr: string
-}
-
-export type Transactions = {
-  rows: LedgerRow[]
-  /** Rows the filters kept. `total` is every row in scope before them. */
-  matched: number
-  total: number
-  outsideWindow: number
-  page: number
-  pages: number
-  window: { range: string; from: string | null; to: string | null }
-  selected: string | null
-  accounts: string[]
-  sort: string
-  /** Every tag in scope, so the tag filter is a dropdown rather than something
-   *  you have to already know the value of. */
-  tags: string[]
-}
-
-/** §103. The credit-card split: which settlements exist, and how much of each
- *  is the paying month's own spending rather than the previous month's. */
-
-/** A named total with the slices of another dimension inside it. SPEC §64. */
-export type Breakdown = { name: string; amount: string; count: number; parts: Slice[] }
-
-/**
- * The Ledger page's charts. SPEC §18.
- *
- * `spend`/`income` are the figures that respect §8 and §8.1; `grossSpend` and
- * `grossIncome` are what Firefly reports by transaction type, kept so the page
- * can show what was excluded rather than quietly differing from the statement.
- */
-
-/** One row of the ledger browser. SPEC §61.
- *
- * There is deliberately **no balance field**. §16.4 refuses a running balance
- * on any view that can be filtered or reordered, and this view is nothing but
- * filtering and reordering.
- */
-export type LedgerRow = {
-  id: string
-  group: string
-  account: string
-  accountLabel: string
-  date: string
-  time: string | null
-  description: string
-  category: string
-  counterparty: string
-  tags: string[]
-  kind: string
-  amount: string
-  /** The bank's raw narration. Searched, not rendered — a UTR is exactly what
-   *  you look for when the display name is no help. */
-  narration: string
-}
-
-export type AttributionData = {
-  categories: string[]
-  /** False means these rows are not being shifted yet; the first split turns it
-   *  on. Said out loud, because "no effect" and "no rows" look identical. */
-  configured: boolean
-  beforeDay: number
-  toDay: number
-  rows: Settlement[]
-  window: { range: string; from: string | null; to: string | null }
-  selected: string | null
-}
-
-/** §112. Which categories money arrives under, and which count as earned. */
-
-export type EarningsData = {
-  rows: EarningsRow[]
-  window: { range: string; from: string | null; to: string | null }
-  selected: string | null
-}
-
-/** §103. The credit-card split: which settlements exist, and how much of each
- *  is the paying month's own spending rather than the previous month's. */
-export type Settlement = {
-  externalId: string
-  account: string
-  date: string
-  amount: string
-  payee: string
-  category: string
-  /** null when nothing is kept — the absence of a rule, not a rule saying 0. */
-  keep: string | null
-}
-
-/** §112. Which categories money arrives under, and which count as earned. */
-export type EarningsRow = {
-  category: string
-  amount: string
-  count: number
-  counts: boolean
 }
 
 /** The statement reminder. SPEC §24.
@@ -481,3 +409,89 @@ export type Reminder = {
 }
 
 /** Taking a backup from the UI. SPEC §37. */
+export type BackupState = {
+  available: boolean
+  reason: string
+  dump: { name: string | null; ageMinutes: number | null; maxAgeMinutes: number; fresh: boolean }
+}
+
+/** One row of the ledger browser. SPEC §61.
+ *
+ * There is deliberately **no balance field**. §16.4 refuses a running balance
+ * on any view that can be filtered or reordered, and this view is nothing but
+ * filtering and reordering.
+ */
+export type LedgerRow = {
+  id: string
+  group: string
+  account: string
+  accountLabel: string
+  date: string
+  time: string | null
+  description: string
+  category: string
+  counterparty: string
+  tags: string[]
+  kind: string
+  amount: string
+  /** The bank's raw narration. Searched, not rendered — a UTR is exactly what
+   *  you look for when the display name is no help. */
+  narration: string
+}
+
+export type Transactions = {
+  rows: LedgerRow[]
+  /** Rows the filters kept. `total` is every row in scope before them. */
+  matched: number
+  total: number
+  outsideWindow: number
+  page: number
+  pages: number
+  window: { range: string; from: string | null; to: string | null }
+  selected: string | null
+  accounts: string[]
+  sort: string
+  /** Every tag in scope, so the tag filter is a dropdown rather than something
+   *  you have to already know the value of. */
+  tags: string[]
+}
+
+/** §103. The credit-card split: which settlements exist, and how much of each
+ *  is the paying month's own spending rather than the previous month's. */
+export type Settlement = {
+  externalId: string
+  account: string
+  date: string
+  amount: string
+  payee: string
+  category: string
+  /** null when nothing is kept — the absence of a rule, not a rule saying 0. */
+  keep: string | null
+}
+
+export type AttributionData = {
+  categories: string[]
+  /** False means these rows are not being shifted yet; the first split turns it
+   *  on. Said out loud, because "no effect" and "no rows" look identical. */
+  configured: boolean
+  beforeDay: number
+  toDay: number
+  rows: Settlement[]
+  window: { range: string; from: string | null; to: string | null }
+  selected: string | null
+}
+
+/** §112. Which categories money arrives under, and which count as earned. */
+export type EarningsRow = {
+  category: string
+  amount: string
+  count: number
+  counts: boolean
+}
+
+export type EarningsData = {
+  rows: EarningsRow[]
+  window: { range: string; from: string | null; to: string | null }
+  selected: string | null
+}
+

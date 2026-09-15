@@ -17,7 +17,8 @@ import type { Parsed, PushResult } from '../lib/types'
 import { Ledger } from '../components/Ledger'
 import { Card, Money, Notice, Tick, Token } from '../components/ui'
 import { Progress, Skeleton, Why, describe, useToast } from '../components/feedback'
-import { count, formatDate } from '../lib/money'
+import { formatDate } from '../lib/money'
+import { invalidateLedger } from '../lib/ledger'
 
 export function Preview() {
   const navigate = useNavigate()
@@ -33,13 +34,12 @@ export function Preview() {
     mutationFn: () => api.post<PushResult>('/statement/confirm'),
     onSuccess: (result) => {
       queryClient.setQueryData(['result'], result)
-      queryClient.invalidateQueries({ queryKey: ['overview'] })
-      queryClient.invalidateQueries({ queryKey: ['payees'] })
+      invalidateLedger(queryClient)
       toast({
         kind: result.failed ? 'warn' : 'ok',
         title: 'Pushed',
         detail:
-          `${result.pushed} added, ${count(result.duplicates, 'duplicate')} skipped` +
+          `${result.pushed} added, ${(result.already ?? 0) + result.duplicates} already there` +
           (result.failed ? `, ${result.failed} failed` : '.'),
       })
       navigate('/result')
@@ -51,6 +51,9 @@ export function Preview() {
     mutationFn: () => api.del('/statement/pending'),
     onSuccess: () => {
       queryClient.removeQueries({ queryKey: ['pending'] })
+      // The staged rows were counted on Payees, the Ledger and Analysis while
+      // the file existed. Removing it has to un-count them.
+      invalidateLedger(queryClient)
       toast({ kind: 'ok', title: 'Discarded', detail: 'The staged file was deleted.' })
       navigate('/upload')
     },
@@ -173,13 +176,13 @@ export function Preview() {
           onClick={() => push.mutate()}
           disabled={push.isPending}
         >
-          {push.isPending ? 'Pushing…' : 'Push to Firefly'}
+          {push.isPending ? 'Pushing…' : 'Push to the ledger'}
         </button>
         <button type="button" onClick={() => discard.mutate()} disabled={discard.isPending}>
           Discard
         </button>
       </div>
-      {push.isPending && <Progress label={`Pushing ${data.count} transactions to Firefly`} />}
+      {push.isPending && <Progress label={`Pushing ${data.count} transactions to the ledger`} />}
 
       <Why label="What happens on push">
         <p>

@@ -50,6 +50,24 @@ DEVICE_REMEMBER_DAYS = 30
 _CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 _CODE_LEN = 10
 
+# --- emailed recovery codes. SPEC §29 ---------------------------------------
+# A RECOVERY path, never the primary factor. TOTP stays first because an emailed
+# code is only as strong as the mailbox it lands in — put it in front and the
+# two factors collapse into one, since that mailbox can also reset most things.
+# As a recovery option it is strictly better than what it sits beside: backup
+# codes only help the operator who still has the piece of paper.
+#
+# 8 characters from the same unambiguous alphabet is ~40 bits, which with a
+# ten-minute life, five attempts and the existing per-username throttle is far
+# beyond guessable. Shorter numeric codes are the convention and the convention
+# is weaker than it needs to be here — this is typed once, from an email that is
+# already open.
+RECOVERY_CODE_LEN = 8
+RECOVERY_TTL_SECONDS = 600
+# The code is burnt after this many wrong tries, so an attacker who can watch
+# the throttle reset cannot grind one live code.
+RECOVERY_MAX_ATTEMPTS = 5
+
 
 def hash_password(password: str) -> str:
     """Werkzeug's default (scrypt)."""
@@ -69,6 +87,13 @@ class WebAuth:
     salt: str | None = None
     backup_codes: list[str] = field(default_factory=list)
     devices: list[dict] = field(default_factory=list)
+    # Where a recovery code is sent. Collected at enrolment (§29) and editable
+    # afterwards. Never the identity — `username` is that; this is only an
+    # address, and it is masked everywhere it is rendered or logged (§11).
+    recovery_email: str | None = None
+    # The live recovery challenge, if one is outstanding: digest, expiry, tries.
+    # Never the code itself.
+    recovery: dict | None = None
 
     @property
     def configured(self) -> bool:
@@ -93,6 +118,8 @@ class WebAuth:
                 "salt": self.salt,
                 "backup_codes": self.backup_codes,
                 "devices": self.devices,
+                "recovery_email": self.recovery_email,
+                "recovery": self.recovery,
             },
             indent=2,
         ) + "\n"
@@ -119,6 +146,8 @@ def load(path: Path | None = None) -> WebAuth:
         salt=(data.get("salt") or "").strip() or None,
         backup_codes=[c for c in (data.get("backup_codes") or []) if isinstance(c, str)],
         devices=[d for d in (data.get("devices") or []) if isinstance(d, dict)],
+        recovery_email=(data.get("recovery_email") or "").strip() or None,
+        recovery=data.get("recovery") if isinstance(data.get("recovery"), dict) else None,
     )
 
 
@@ -316,6 +345,113 @@ def consume_backup_code(auth: WebAuth, code: str) -> bool:
             del auth.backup_codes[index]
             return True
     return False
+
+
+# --- emailed recovery. SPEC §29 ---------------------------------------------
+
+
+class RecoveryError(RuntimeError):
+    """Recovery cannot proceed. The message is safe to show."""
+
+
+def mask_email(address: str | None) -> str:
+    """`s***@gmail.com`. An address is personal data and this reaches a page."""
+    name, _, domain = (address or "").partition("@")
+    if not domain:
+        return ""
+    return f"{name[:1]}***@{domain}"
+
+
+def issue_recovery_code(auth: WebAuth, *, now: datetime | None = None) -> str:
+    """Mint a one-time code, store only its digest, return the plaintext once.
+
+    Mutates `auth`; the caller saves it. Issuing **replaces** any outstanding
+    challenge rather than adding to it, so two requests never leave two live
+    codes — which would double an attacker's chances for no operator benefit.
+    """
+    if not auth.recovery_email:
+        raise RecoveryError("No recovery address is set for this account.")
+    if not auth.salt:
+        auth.salt = secrets.token_hex(16)
+
+    now = now or datetime.now(timezone.utc)
+    code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(RECOVERY_CODE_LEN))
+    auth.recovery = {
+        "digest": _digest(auth.salt, code),
+        "expires": (now + timedelta(seconds=RECOVERY_TTL_SECONDS)).isoformat(timespec="seconds"),
+        "attempts": 0,
+    }
+    return code
+
+
+def consume_recovery_code(auth: WebAuth, code: str, *, now: datetime | None = None) -> bool:
+    """Single use, time-limited, attempt-limited. Mutates `auth`; save it.
+
+    Every failure path **burns or counts**, and the challenge is cleared on
+    success, on expiry, and on the fifth wrong try. A code that survives a wrong
+    guess indefinitely is a code an attacker can grind at whatever rate the
+    throttle allows.
+    """
+    challenge = auth.recovery
+    if not challenge or not auth.salt:
+        return False
+
+    now = now or datetime.now(timezone.utc)
+    try:
+        expires = datetime.fromisoformat(str(challenge.get("expires")))
+    except ValueError:
+        auth.recovery = None
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if now > expires:
+        auth.recovery = None
+        return False
+
+    normalised = (code or "").strip().upper().replace("-", "").replace(" ", "")
+    if not normalised:
+        return False
+
+    if hmac.compare_digest(str(challenge.get("digest") or ""), _digest(auth.salt, normalised)):
+        auth.recovery = None
+        return True
+
+    attempts = int(challenge.get("attempts") or 0) + 1
+    if attempts >= RECOVERY_MAX_ATTEMPTS:
+        auth.recovery = None
+    else:
+        challenge["attempts"] = attempts
+    return False
+
+
+def recovery_pending(auth: WebAuth, *, now: datetime | None = None) -> bool:
+    """Whether a live challenge is outstanding, so the page can say so."""
+    challenge = auth.recovery
+    if not challenge:
+        return False
+    try:
+        expires = datetime.fromisoformat(str(challenge.get("expires")))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) <= expires
+
+
+def normalise_email(address: str) -> str:
+    """Trim and lowercase the domain. Refuses something that is not an address.
+
+    Deliberately not an RFC 5322 validator: the useful check is that a human
+    typing their own address into a recovery field cannot leave a value that
+    silently never receives anything.
+    """
+    text = " ".join(str(address or "").split())
+    if not text:
+        return ""
+    name, at, domain = text.partition("@")
+    if not at or not name or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        raise RecoveryError(f"{text!r} does not look like an email address.")
+    return f"{name}@{domain.lower()}"
 
 
 # --- remembered devices ---------------------------------------------------
