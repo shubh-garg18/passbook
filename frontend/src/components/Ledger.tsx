@@ -7,7 +7,7 @@
  * distrust the check that matters most.
  *
  * There is deliberately **no category column here.** Rules are applied by
- * Firefly at push time, so at preview no category exists yet. Showing one
+ * when the row is written, so at preview no category exists yet. Showing one
  * would be either a guess (D10) or a lie.
  */
 

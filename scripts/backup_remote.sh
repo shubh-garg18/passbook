@@ -137,7 +137,7 @@ echo
 echo "== take a fresh backup =="
 make --no-print-directory backup | sed 's/^/  /'
 stamp="$(date +%F)"
-dump="$BACKUPS/firefly-$stamp.sql.gz"
+dump="$BACKUPS/ledger-$stamp.sql.gz"
 cfg="$BACKUPS/config-$stamp.tar.gz"
 [ -f "$dump" ] || die "expected $dump"
 

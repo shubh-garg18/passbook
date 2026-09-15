@@ -11,7 +11,7 @@ SHELL       := /bin/bash
 
 COMPOSE  := docker compose
 ENV_FILE := .env
-URL      := http://localhost:8080
+URL      := http://localhost:8081
 
 .PHONY: help setup preflight env check up down logs ps backup verify-backup \
         verify-ledger upgrade audit-docs dr-drill backup-remote backup-passphrase \
@@ -24,7 +24,7 @@ URL      := http://localhost:8080
 PY := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
 
 help:
-	@echo "passbook — bank statements -> Firefly III"
+	@echo "passbook — bank statements -> a ledger you can read"
 	@echo
 	@echo "  make setup    FIRST RUN: check prerequisites, start the stack, get a token"
 	@echo "  make preflight  what is missing, and where to get it"
@@ -75,29 +75,26 @@ preflight:
 env:
 	@if [ -e "$(ENV_FILE)" ]; then
 		echo "refusing to overwrite an existing $(ENV_FILE)."
-		echo "APP_KEY is in there; replacing it makes Firefly's encrypted fields unreadable."
+		echo "DB_PASSWORD is in there; replacing it locks you out of your own ledger."
 		exit 1
 	fi
 	# Bounded read: `tr -dc < /dev/urandom | head -c 32` makes head close the
 	# pipe while tr is still draining, and pipefail turns that SIGPIPE into a
 	# build failure. Feeding tr a fixed 1 KiB lets it finish and exit 0.
 	# Secrets are generated before the copy so a failure leaves no partial .env.
-	key=$$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 32)
 	pw=$$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 40)
-	[ $${#key} -eq 32 ] && [ $${#pw} -eq 40 ] || { echo "secret generation failed"; exit 1; }
+	[ $${#pw} -eq 40 ] || { echo "secret generation failed"; exit 1; }
 	cp .env.example "$(ENV_FILE)"
 	chmod 600 "$(ENV_FILE)"
-	sed -i "s|^APP_KEY=.*|APP_KEY=$$key|"        "$(ENV_FILE)"
 	sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=$$pw|" "$(ENV_FILE)"
 	secret=$$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 48)
 	sed -i "s|^PASSBOOK_WEB_SECRET=.*|PASSBOOK_WEB_SECRET=$$secret|" "$(ENV_FILE)"
-	echo "wrote $(ENV_FILE) (mode 600) with a fresh APP_KEY and DB_PASSWORD."
-	echo "FIREFLY_TOKEN and PASSBOOK_ACCOUNT_NUMBER stay blank until Phase 0 steps 4-6."
+	echo "wrote $(ENV_FILE) (mode 600) with a fresh DB_PASSWORD."
+	echo "PASSBOOK_ACCOUNT_NUMBER stays blank until you have a statement to hand."
 
 # ── prerequisite checks ──────────────────────────────────────────────────────
-# SPEC §4: this gates the other targets. Phase 0 items that need a running
-# Firefly (token, INR currency) are checked by `passbook doctor` in Phase 3,
-# not here — there is nothing to ask yet.
+# This gates the other targets. Anything that needs the ledger running is
+# checked by `passbook doctor` instead — there is nothing to ask of it yet.
 
 check:
 	@fail=0
@@ -135,26 +132,19 @@ check:
 			echo "warn  $(ENV_FILE) is mode $$(stat -c '%a' $(ENV_FILE)); 600 is safer (chmod 600 $(ENV_FILE))"
 		fi
 		set -a; . ./$(ENV_FILE); set +a
-		for v in APP_KEY DB_DATABASE DB_USERNAME DB_PASSWORD TZ APP_URL; do
+		for v in DB_DATABASE DB_USERNAME DB_PASSWORD TZ; do
 			if [ -z "$${!v:-}" ]; then
 				echo "FAIL  $(ENV_FILE): $$v is empty"
 				fail=1
 			fi
 		done
-		if [ -n "$${APP_KEY:-}" ] && [ $${#APP_KEY} -ne 32 ]; then
-			echo "FAIL  APP_KEY is $${#APP_KEY} chars; Firefly requires exactly 32"
-			fail=1
-		fi
-		for v in APP_KEY DB_PASSWORD; do
+		for v in DB_PASSWORD; do
 			case "$${!v:-}" in
 				*'$$'*|*'#'*|*'"'*|*"'"*)
 					echo "FAIL  $$v contains a character that breaks compose interpolation (\$$ # \" ')"
 					fail=1 ;;
 			esac
 		done
-		if [ "$${SITE_OWNER:-}" = "you@example.com" ]; then
-			echo "warn  SITE_OWNER is still the .env.example placeholder"
-		fi
 		# Web UI credentials live in config/web-auth.json since §15.5, and carry
 		# the second factor since §16. Checked here because a mangled file
 		# otherwise surfaces only as "sign-in failed" on a page that cannot say why.
@@ -207,56 +197,15 @@ check:
 			echo "warn  PASSBOOK_WEB_* still in $(ENV_FILE); dead since §15.5 — safe to delete"
 		fi
 
-		if [ -n "$${FIREFLY_TOKEN:-}" ] && [ "$$(printf %s "$$FIREFLY_TOKEN" | tr -cd . | wc -c)" != "2" ]; then
-			echo "warn  FIREFLY_TOKEN is not shaped like a JWT (expect ~1000 chars, 'eyJ', 2 dots)"
-			echo "      the 'Command line token' is a different credential and will not work"
+		if [ -n "$${FIREFLY_TOKEN:-}$${APP_KEY:-}" ]; then
+			echo "warn  FIREFLY_* / APP_KEY still in $(ENV_FILE); dead since the ledger"
+			echo "      moved in-house — safe to delete, and nothing reads them"
 		fi
 		[ $$fail -eq 0 ] && echo "ok    $(ENV_FILE) looks sane" || true
 	fi
 
 	mkdir -p inbox archive backups
 	echo "ok    inbox/ archive/ backups/ present"
-
-	# ── the one irreversible mistake in a recovery ───────────────────────────
-	# A recovered APP_KEY sitting on disk that disagrees with .env means the
-	# tarball has been extracted but step 5 has not been finished. Starting
-	# Firefly now is NOT a harmless experiment: on first boot it cannot decrypt
-	# the stored Passport keypair, so restoreKeysFromDB catches the
-	# DecryptException, DELETES both key settings and regenerates them. The
-	# original keypair is then gone from the database and putting the right
-	# APP_KEY back afterwards has nothing left to decrypt — the API token is
-	# dead permanently.
-	#
-	# This is a guard, not a warning, because the moment you most want to type
-	# `make up` to see whether it worked is exactly the moment it is unsafe.
-	for keyfile in recovery/app-key.env config/recovery/app-key.env; do
-		[ -f "$$keyfile" ] || continue
-		recovered=$$(grep -m1 '^APP_KEY=' "$$keyfile" | cut -d= -f2-)
-		current=$$(grep -m1 '^APP_KEY=' "$(ENV_FILE)" 2>/dev/null | cut -d= -f2-)
-		if [ -n "$$recovered" ] && [ "$$recovered" != "$$current" ]; then
-			echo "FAIL  $$keyfile holds a DIFFERENT APP_KEY than $(ENV_FILE)."
-			echo
-			echo "      You are mid-recovery: the config tarball is extracted but the"
-			echo "      recovered APP_KEY has not been copied into $(ENV_FILE) yet."
-			echo
-			echo "      Do NOT start the stack first to see if it works. Firefly cannot"
-			echo "      decrypt the stored Passport keypair with the wrong key, so it"
-			echo "      deletes and regenerates it on the very first boot. That is"
-			echo "      irreversible: restoring the right APP_KEY afterwards leaves"
-			echo "      nothing to decrypt, and your API token is dead for good."
-			echo
-			echo "      Copy it across first:"
-			echo "        sed -i \"s|^APP_KEY=.*|$$(cat $$keyfile)|\" $(ENV_FILE)"
-			echo
-			echo "      Then re-run: make check"
-			echo
-			echo "      If you have deliberately started fresh and do not want the old"
-			echo "      key, delete the recovered copy instead:  rm $$keyfile"
-			fail=1
-		else
-			echo "ok    recovered APP_KEY in $$keyfile matches $(ENV_FILE)"
-		fi
-	done
 
 	if [ $$fail -ne 0 ]; then
 		echo
@@ -268,47 +217,22 @@ check:
 
 # ── stack ────────────────────────────────────────────────────────────────────
 
-# Two stages, and the reason is not cosmetic. docker-compose.yml declares
-# `FIREFLY_TOKEN: ${FIREFLY_TOKEN:?…}` on the web service, so compose refuses to
-# start ANYTHING until a token exists — and the token can only be created from
-# inside a running Firefly. A single `up` on a fresh install therefore fails
-# with an interpolation error about a variable the user has never heard of.
-# So: database and Firefly first, then the rest once there is a token.
 up: check
-	@set -a; . ./$(ENV_FILE); set +a
-	if [ -z "$${FIREFLY_TOKEN:-}" ]; then
-		$(COMPOSE) up -d --wait db app
-		echo
-		echo "Firefly III is up at $(URL) — but the web UI is NOT started yet."
-		echo "It needs an API token, and a token can only be made from inside Firefly."
-		echo
-		echo "Run 'make setup' to be walked through it, or do it by hand:"
-		echo "  1. register at $(URL) (the first account becomes the admin)"
-		echo "  2. Options -> Preferences -> set the currency to INR"
-		echo "  3. Options -> Remote access and tokens -> Personal Access Tokens"
-		echo "     (NOT the 'Command line token' on the Profile page — different credential)"
-		echo "  4. put it in .env as FIREFLY_TOKEN, then run 'make up' again"
-		exit 0
-	fi
-	$(COMPOSE) up -d --wait
+	@$(COMPOSE) up -d --wait
 	echo
 	$(COMPOSE) ps --format 'table {{.Service}}\t{{.Status}}'
-	echo
 	echo
 	# The weekly download depends on the operator remembering (D7: no cron), so
 	# the reminder has to appear somewhere they already go. `|| true` keeps a
 	# fresh clone that has not run `uv sync` yet from failing `make up`.
 	uv run passbook sync-age 2>/dev/null || true
 	echo
-	echo "Firefly III is up at $(URL)"
-	echo "Web UI is up at        http://localhost:8081"
-	echo "First run: register an account there, set currency to INR (Options -> Preferences),"
-	echo "then create a Personal Access Token under Options -> Remote access and tokens."
-	echo "(NOT the 'Command line token' on the Profile page - different credential.)"
+	echo "passbook is up at $(URL) — or http://passbook.localhost"
+	echo "First run: upload a statement and it creates the account for you."
 
 down:
 	@$(COMPOSE) down
-	echo "containers removed; pgdata and fireflyupload volumes kept."
+	echo "containers removed; the pgdata volume is kept — your ledger is in it."
 
 logs:
 	@$(COMPOSE) logs -f --tail=100
@@ -316,12 +240,12 @@ logs:
 ps:
 	@$(COMPOSE) ps
 
-# ── parser and push (Phases 2-3) ─────────────────────────────────────────────
-# parse/payees/test are read-only and never touch the network.
-# doctor/sync talk to Firefly; sync writes.
+# ── parser and write ─────────────────────────────────────────────────────────
+# parse/payees/test are read-only and never touch the ledger.
+# doctor/sync do; sync writes.
 
-# SPEC §20. The check §19's incident showed was missing: everything else can pass
-# while Firefly holds a third of the ledger.
+# The check one incident showed was missing: everything else can pass while the
+# ledger holds a third of the rows.
 verify-ledger:
 	@uv run passbook verify-ledger
 
@@ -417,16 +341,16 @@ fixtures: _needs_file
 # SPEC §11. These dumps are plaintext financial history and live only on this
 # laptop. backups/ is gitignored; keep it that way.
 
-# Two artefacts, because they hold different things. Firefly's rules live in the
-# database and come back with the dump. config/*.yaml does NOT — aliases are
-# applied at push time, never stored server-side, so that file is the only copy
-# of the token->name mapping. It is gitignored (it names real counterparties),
-# which leaves it the one piece of state with no other backup at all.
+# Two artefacts, because they hold different things. The rows come back with
+# the dump. config/*.yaml does NOT — aliases and rules are applied when a row
+# is written, never stored beside it, so that file is the only copy of the
+# token->name mapping. It is gitignored (it names real counterparties), which
+# leaves it the one piece of state with no other backup at all.
 backup:
 	@set -a; . ./$(ENV_FILE); set +a
 	mkdir -p backups
 	stamp="$$(date +%F)"
-	out="backups/firefly-$$stamp.sql.gz"
+	out="backups/ledger-$$stamp.sql.gz"
 	cfg="backups/config-$$stamp.tar.gz"
 
 	# ── source, as a git bundle ──────────────────────────────────────────────
@@ -490,25 +414,19 @@ backup:
 	fi
 
 	# --no-owner --no-privileges makes the dump portable. Without them pg_dump
-	# emits `ALTER ... OWNER TO firefly` and `GRANT ... TO firefly`, so the
-	# restore fails with `role "firefly" does not exist` on any machine where
-	# DB_USERNAME differs. The DR drill caught exactly that.
+	# emits `ALTER ... OWNER TO <user>` and `GRANT ... TO <user>`, so the
+	# restore fails with `role does not exist` on any machine where DB_USERNAME
+	# differs. The DR drill caught exactly that.
 	$(COMPOSE) exec -T -e PGPASSWORD="$$DB_PASSWORD" db \
 		pg_dump -U "$$DB_USERNAME" -d "$$DB_DATABASE" \
 		--clean --if-exists --no-owner --no-privileges \
 		| gzip > "$$out"
 	chmod 600 "$$out"
 	echo "wrote $$out ($$(du -h "$$out" | cut -f1))"
-	# APP_KEY rides along. The DR drill measured what it is worth: the ledger
-	# restores perfectly without it (nothing in the data is encrypted), but the
-	# Passport keypair in the `configuration` table IS Crypt::encrypt'd with it,
-	# so a different key means every existing API token is rejected and has to
-	# be re-issued by hand. The tarball is already encrypted, so carrying the
-	# key costs nothing and removes a manual step from recovery.
-	# Only APP_KEY: DB_PASSWORD is replaced on a rebuild anyway, and
-	# FIREFLY_TOKEN is a credential with no recovery value.
-	printf 'APP_KEY=%s\n' "$$APP_KEY" > "$$stage/recovery/app-key.env"
-	chmod 600 "$$stage/recovery/app-key.env"
+	# Nothing in the dump is encrypted, so there is no key to carry alongside
+	# it. There used to be: the previous ledger stored an encrypted keypair, and
+	# restoring with a different key silently killed every API token. That whole
+	# class of recovery failure went with it.
 	# config/*.yaml only — config/web-auth.json is EXCLUDED ON PURPOSE.
 	#
 	# The yaml files are backed up because they are irreplaceable: aliases and
@@ -541,7 +459,7 @@ backup:
 	chmod 600 "$$cfg"
 	bundle_size=$$(tar tzvf "$$cfg" | awk '/source\.bundle/{printf "%.1fM", $$3/1048576}')
 	echo "wrote $$cfg ($$(du -h "$$cfg" | cut -f1); $$(tar tzf "$$cfg" | grep -c . ) entries)"
-	echo "      APP_KEY yes | source bundle $${bundle_size:-ABSENT} | web credentials no"
+	echo "      source bundle $${bundle_size:-ABSENT} | web credentials no"
 
 # A dump that has never been restored is not a backup. This proves it, without
 # touching the live database. SPEC §11.
@@ -566,11 +484,11 @@ backup-passphrase:
 
 restore:
 	@if [ -z "$(FILE)" ] || [ ! -f "$(FILE)" ]; then
-		echo "usage: make restore FILE=backups/firefly-YYYY-MM-DD.sql.gz CONFIRM=yes"
+		echo "usage: make restore FILE=backups/ledger-YYYY-MM-DD.sql.gz CONFIRM=yes"
 		exit 1
 	fi
 	if [ "$(CONFIRM)" != "yes" ]; then
-		echo "This REPLACES the current Firefly database with $(FILE)."
+		echo "This REPLACES the current ledger database with $(FILE)."
 		echo "Re-run with CONFIRM=yes if that is what you want."
 		exit 1
 	fi
@@ -581,7 +499,7 @@ restore:
 
 	# The matching config tarball, if it was taken. Named by the same date as
 	# the dump, so the pair stays together.
-	cfg="$$(echo "$(FILE)" | sed 's|/firefly-|/config-|; s|\.sql\.gz$$|.tar.gz|')"
+	cfg="$$(echo "$(FILE)" | sed 's|/ledger-|/config-|; s|/firefly-|/config-|; s|\.sql\.gz$$|.tar.gz|')"
 	if [ -f "$$cfg" ]; then
 		# Never silently clobber the live mapping — the current one may be
 		# newer than the dump being restored.
@@ -595,6 +513,5 @@ restore:
 		echo "restored $$cfg -> config/"
 	else
 		echo "warn  no $$cfg alongside the dump; config/*.yaml left as-is."
-		echo "      Firefly's rules came back with the database, but aliases did not."
+		echo "      The rows came back with the database, but aliases and rules did not."
 	fi
-	echo "note: APP_KEY in $(ENV_FILE) must be the one that was in use when this dump was taken."

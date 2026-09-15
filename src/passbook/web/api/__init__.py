@@ -14,7 +14,7 @@ Three constraints shape every response:
   account is refused at upload, before anything can be pushed, and the staged
   file is deleted rather than left where `make sync` would find it.
 * **§11 — no secrets cross this boundary.** Account numbers are masked to last
-  4 by `StatementMeta.masked_account`. The Firefly token, the DB password, the
+  4 by `StatementMeta.masked_account`. The database password, the DB password, the
   customer ID and the TOTP secret never appear in a response body or a log
   line. The one exception is the TOTP secret at the moment of enrolment, which
   is the entire point of that request and is returned exactly once.
@@ -43,11 +43,11 @@ from . import (  # noqa: F401,E402
 
 # Re-exported so a caller outside this package can reach them by name without
 # knowing which module they live in.
-from ._base import FireflyClient, FireflyError, service  # noqa: F401,E402
+from ._base import LedgerError, open_ledger, service  # noqa: F401,E402
 from ._scope import ALL_ACCOUNTS, _account_scope  # noqa: F401,E402
 
 # **A package attribute is not a patch seam.** `monkeypatch.setattr` here cannot
 # reach the submodule global a route actually resolves, so a test that wants a
-# fake store client patches `_base.FireflyClient` — which is the only place one
-# is ever constructed (§101), and is the reason there is a single place to name.
+# fake ledger patches `_base.open_ledger` — which is the only place a store is
+# ever opened, and is the reason there is a single place to name.
 __all__ = ["api", "MAX_UPLOAD_BYTES", "close_clients"]

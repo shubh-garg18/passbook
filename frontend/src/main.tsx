@@ -46,7 +46,7 @@ const queryClient = new QueryClient({
       // returning to the window shows the current state.
       staleTime: 15_000,
       // Whatever page is open re-reads itself every minute, so a push made in
-      // Firefly's own UI — or by `make sync` in a terminal — shows up here
+      // another window — or by `make sync` in a terminal — shows up here
       // without a reload. 60s rather than 10s deliberately: `/analysis`
       // re-parses the whole archive, and six of those a minute per open tab is
       // real work on a container serving one person.

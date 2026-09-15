@@ -1,11 +1,11 @@
 /* Reports — the drill-downs. SPEC §64.
  *
- * Firefly ships Category, Double (expense/revenue account) and Tag as three
+ * Most tools ship Category, payee and Tag as three
  * separate report screens with a controller each. They are **one question
  * asked three ways**: inside one thing, what were the others? So they are one
  * component here, switched by a tab, and all three come out of
  * `ledger_analysis` — which means they carry §8/§8.1's exclusions, and
- * Firefly's own versions do not.
+ * A screen-per-report does not.
  *
  * Budget is not here and will not be until there are budgets: 0 budgets, 0
  * bills, 0 piggy banks, measured. A report screen that can only ever render

@@ -100,43 +100,31 @@ def test_caddy_routes_the_one_host_over_plain_http():
 
 
 def test_there_is_only_one_door():
-    """§100. `khata.localhost` served the ledger store's own UI beside this one,
-    and the operator ran both because passbook had no charts, no reports and no
-    transaction browser. It has all three, and the instruction was explicit:
-    *"I want only one localhost and it have all required features"*.
+    """A second hostname once served a separate ledger application's UI beside
+    this one, and the operator ran both because passbook had no charts, no
+    reports and no transaction browser. It has all three, and the instruction
+    was explicit: *"I want only one localhost and it have all required
+    features"*. That application is gone entirely now, so the block it was
+    commented out as is gone too.
 
-    Asserted on the ROUTE, not on the absence of the word: the block is
-    commented out rather than deleted, so grepping for `khata` still finds it
-    and would pass a test that only looked for that.
+    Asserted on the whole file, uncommented or not: there is nothing left to
+    bring back for a debugging session.
     """
     text = CADDYFILE.read_text()
-    uncommented = "\n".join(
-        line for line in text.splitlines() if not line.lstrip().startswith("#")
-    )
-    assert "khata.localhost" not in uncommented
-    assert "app:8080" not in uncommented, "the store is a service, not a page"
-
-
-def test_the_commented_route_still_carries_the_headers_it_would_need():
-    """A route you can bring back for one debugging session is only useful if it
-    works when you do. The store builds absolute URLs from APP_URL and reads
-    these when TRUSTED_PROXIES is set; without them a login redirect bounces the
-    browser back to :8080 and off the clean hostname."""
-    text = CADDYFILE.read_text()
-    for header in ("X-Forwarded-Host", "X-Forwarded-Proto"):
-        assert header in text, f"{header} is gone from the route that can be restored"
+    assert "khata.localhost" not in text
+    assert "app:8080" not in text, "there is no second application to proxy to"
 
 
 def test_the_numbered_ports_are_still_published():
-    """8080 and 8081 are what the runbook, the DR drill and every healthcheck
-    use, and they run when Caddy may not be up.
+    """8081 is what the runbook, the DR drill and every healthcheck use, and
+    they run when Caddy may not be up.
 
-    Firefly's *host* port is settable — a Windows service on 8080 makes the bind
-    fail outright under WSL mirrored networking — so what is pinned is the
+    The database's *host* port is settable — a Postgres already installed on
+    this machine makes the bind fail outright — so what is pinned there is the
     default and the container port, not a literal. 8081 and 80 stay literal
     because nothing has needed to move them."""
     compose = (ROOT / "docker-compose.yml").read_text()
-    assert '"127.0.0.1:${FIREFLY_HOST_PORT:-8080}:8080"' in compose
+    assert '"127.0.0.1:${PASSBOOK_DB_PORT:-5433}:5432"' in compose
     assert '"127.0.0.1:8081:8081"' in compose
     assert '"127.0.0.1:80:80"' in compose
 

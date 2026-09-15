@@ -18,12 +18,10 @@ cp docs/shots/demo/<the ones you want>.png docs/screenshots/
 uv run python scripts/demo_ledger.py --down     # remove the scratch stack
 ```
 
-One command. It stands up a scratch Firefly on its own docker network, registers
-a throwaway account, pushes the 93 fixture rows, photographs **both** interfaces
-— passbook's pages and Firefly's own — and hands back the PNGs. The token is
-never printed, and `shoot.py` runs from a temporary directory whose only
-archived statement is the fixture, so it cannot read a real `archive/` even on a
-working install.
+One command. It stands up a scratch database on its own docker network, writes
+the 93 fixture rows into it, photographs every page, and hands back the PNGs.
+`shoot.py` runs from a temporary directory whose only archived statement is the
+fixture, so it cannot read a real `archive/` even on a working install.
 
 The demo's **categories are invented** and assigned round-robin over the payee
 tokens. They are not a claim about what any token means — D10 forbids inferring

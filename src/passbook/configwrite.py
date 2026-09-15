@@ -19,7 +19,7 @@ from pathlib import Path
 from ruamel.yaml import YAML
 
 from .config import ATTRIBUTION_FILE, PAYEE_ALIASES
-from .firefly.bootstrap import RULES_FILE
+from .rules import RULES_FILE
 
 _yaml = YAML()
 _yaml.preserve_quotes = True
@@ -315,7 +315,7 @@ def plan_new_category(name: str, path: Path | None = None) -> ConfigChange:
         raise ValueError(f"{path} has no `rules:` list to add to")
 
     existing = {str(spec.get("category")) for spec in rules if spec.get("category")}
-    # Case-insensitively, because Firefly matches its category names exactly and
+    # Case-insensitively, because the ledger matches its category names exactly and
     # `Groceries` next to `groceries` is two categories and one confused chart.
     clash = next((c for c in existing if c.lower() == name.lower()), None)
     if clash:

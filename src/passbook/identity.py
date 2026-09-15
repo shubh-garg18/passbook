@@ -1,6 +1,6 @@
 """What a transaction's identity is, and how to read it back. SPEC §21.1.
 
-This lives below `service` so that `firefly.push` can reach it: the pusher must
+This lives below `service` so that `push` can reach it: the pusher must
 be able to ask "is this row already in the ledger?" before posting, and asking
 means comparing identities. `service` re-exports every name here, so
 `service.txn_id_of` remains the public spelling.

@@ -2,7 +2,7 @@
 
 Covers the paths that can do damage: upload validation, the §6.7 account
 assertion, the config-write diff, and every branch of authentication. No
-network — Firefly is mocked wherever a route reaches for it.
+network — the ledger is mocked wherever a route reaches for it.
 
 **All statement data comes from `tests/fixtures/statement.xls`**, which
 `scripts/redact.py` produced from a real export (§11). Nothing here is a
@@ -20,6 +20,7 @@ from pathlib import Path
 import pyotp
 import pytest
 
+from datetime import date
 from decimal import Decimal
 
 from conftest import CSV_FIXTURE, FIXTURE_ACCOUNT, FIXTURE_TXN_COUNT, XLS_FIXTURE, StoreDouble
@@ -470,7 +471,7 @@ def test_preview_masks_the_account_number(signed_in):
 
 
 def test_preview_carries_no_category(signed_in):
-    """Rules are applied by Firefly at store time, so at preview no category
+    """Rules are applied by the ledger at store time, so at preview no category
     exists. Showing one would be a guess (D10) or a lie."""
     body = signed_in.upload(XLS_FIXTURE.read_bytes()).get_json()
     assert "category" not in json.dumps(body["transactions"][0])
@@ -619,7 +620,7 @@ def test_clearing_an_alias_files_the_category_under_the_raw_token(signed_in, con
     )
     assert r.status_code == 200
 
-    from passbook.firefly.bootstrap import load_rules
+    from passbook.rules import load_rules
 
     aliases = (config_files / "payee_aliases.yaml").read_text()
     rules = (config_files / "rules.yaml").read_text()
@@ -640,7 +641,7 @@ def test_renaming_an_alias_keeps_the_category_it_already_had(signed_in, config_f
     nothing would ever be pushed under. Measured before the fix:
     `predict_category('Mess (UPI)')` returned `''`.
     """
-    from passbook.firefly.bootstrap import load_rules
+    from passbook.rules import load_rules
 
     r = signed_in.post(
         "/payees/apply", {"aliases": {"ZEPKV JYX": "Mess"}, "categories": {}}
@@ -670,7 +671,7 @@ def test_a_rename_shows_up_in_the_diff_before_it_is_written(signed_in, config_fi
 
 def test_a_category_chosen_in_the_same_submission_beats_the_rename(signed_in, config_files):
     """Renames are followed first so an explicit choice overwrites, not races."""
-    from passbook.firefly.bootstrap import load_rules
+    from passbook.rules import load_rules
 
     (config_files / "rules.yaml").write_text(
         "rule_group:\n  title: passbook\n"
@@ -686,7 +687,7 @@ def test_a_category_chosen_in_the_same_submission_beats_the_rename(signed_in, co
     assert service.predict_category("Mess hall (UPI)", "", rules) == "Mess"
 
 
-def test_the_diff_says_what_would_change_in_firefly_before_the_write(
+def test_the_diff_says_what_would_change_in_the_ledger_before_the_write(
     signed_in, app, monkeypatch, config_files
 ):
     """SPEC §23.1. The ledger consequence is knowable first, so it is shown first."""
@@ -708,7 +709,7 @@ def test_the_diff_says_what_would_change_in_firefly_before_the_write(
 
     monkeypatch.setattr(api_module.service, "reapply_preview", preview)
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     body = signed_in.post(
         "/payees/diff", {"aliases": {"NYXQ RVEXM": "Mother"}, "categories": {}}
@@ -720,7 +721,7 @@ def test_the_diff_says_what_would_change_in_firefly_before_the_write(
     assert seen["aliases"]["NYXQ RVEXM"] == "Mother"
 
 
-def test_the_diff_still_works_when_firefly_cannot_be_reached(
+def test_the_diff_still_works_when_the_ledger_cannot_be_reached(
     signed_in, app, monkeypatch, config_files
 ):
     """Writing config is what was asked for; it does not depend on the ledger."""
@@ -735,10 +736,10 @@ def test_the_diff_still_works_when_firefly_cannot_be_reached(
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
 
     def boom(*a, **k):
-        raise api_module.FireflyError("cannot reach Firefly")
+        raise api_module.LedgerError("cannot reach the ledger")
 
     monkeypatch.setattr(
-        api_base, "FireflyClient", boom)
+        api_base, "open_ledger", boom)
     body = signed_in.post(
         "/payees/diff", {"aliases": {"NYXQ RVEXM": "Mother"}, "categories": {}}
     ).get_json()
@@ -747,7 +748,7 @@ def test_the_diff_still_works_when_firefly_cannot_be_reached(
     assert body["changes"], "the config diff is unaffected"
 
 
-def test_applying_a_payee_edit_updates_the_rows_already_in_firefly(
+def test_applying_a_payee_edit_updates_the_rows_already_in_the_ledger(
     signed_in, app, monkeypatch, config_files
 ):
     """SPEC §23. The flaw this closes: config was written, the ledger was not.
@@ -766,7 +767,6 @@ def test_applying_a_payee_edit_updates_the_rows_already_in_firefly(
     )
 
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
-    monkeypatch.setattr(api_payees, "bootstrap_rules", lambda *a, **k: _Boot())
 
     change = service.ReapplyChange(
         external_id="canara-1111-20260509000001",
@@ -775,8 +775,7 @@ def test_applying_a_payee_edit_updates_the_rows_already_in_firefly(
         old_description="OLD (UPI)",
         new_description="Mother (UPI)",
         old_category="",
-        new_category="Eating out",
-        group_id="42",
+        new_category="Eating out"
     )
     previews = iter([([change], 93), ([], 93)])
     monkeypatch.setattr(
@@ -791,7 +790,7 @@ def test_applying_a_payee_edit_updates_the_rows_already_in_firefly(
         or service.SyncResult(updated=len(changes)),
     )
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     body = signed_in.post(
         "/payees/apply", {"aliases": {"NYXQ RVEXM": "Mother"}, "categories": {}}
@@ -818,11 +817,10 @@ def test_rows_an_update_could_not_fix_are_reported_not_swallowed(
     )
 
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
-    monkeypatch.setattr(api_payees, "bootstrap_rules", lambda *a, **k: _Boot())
     stale = service.ReapplyChange(
         external_id="x", date="2026-05-09", amount=Decimal("1"),
         old_description="a", new_description="b",
-        old_category="", new_category="", group_id="1",
+        old_category="", new_category=""
     )
     previews = iter([([stale], 93), ([stale], 93)])
     monkeypatch.setattr(
@@ -832,7 +830,7 @@ def test_rows_an_update_could_not_fix_are_reported_not_swallowed(
         api_module.service, "sync_ledger", lambda *a: service.SyncResult(updated=1)
     )
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     body = signed_in.post("/payees/apply", {"aliases": {}, "categories": {}}).get_json()
     assert body["synced"]["remaining"] == 1
@@ -860,7 +858,7 @@ def test_a_failed_verification_reads_as_unverified_not_as_clean(
     stale = service.ReapplyChange(
         external_id="x", date="2026-05-09", amount=Decimal("1"),
         old_description="a", new_description="b",
-        old_category="", new_category="", group_id="1",
+        old_category="", new_category=""
     )
     calls = {"n": 0}
 
@@ -868,7 +866,7 @@ def test_a_failed_verification_reads_as_unverified_not_as_clean(
         calls["n"] += 1
         if calls["n"] == 1:
             return [stale], 93
-        raise api_module.FireflyError("cannot reach Firefly")
+        raise api_module.LedgerError("cannot reach the ledger")
 
     monkeypatch.setattr(api_module.service, "reapply_preview", preview)
     monkeypatch.setattr(
@@ -876,7 +874,7 @@ def test_a_failed_verification_reads_as_unverified_not_as_clean(
     )
     monkeypatch.setattr(api_reconcile, "_ledger_verdict", lambda *a, **k: {"ok": None})
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     body = signed_in.post("/reapply/sync").get_json()
     assert body["updated"] == 1, "the write is still reported"
@@ -902,18 +900,11 @@ def test_the_in_place_sync_needs_no_database_dump(signed_in, app, monkeypatch, c
     )
     monkeypatch.setattr(api_reconcile, "_ledger_verdict", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     r = signed_in.post("/reapply/sync")
     assert r.status_code == 200, "no dump exists in backups/ and that is fine here"
     assert r.get_json()["considered"] == 93
-
-
-class _Boot:
-    created: list = []
-    updated: list = []
-    existing: list = []
-    ok = True
 
 
 # --- encrypted PDFs, prompted for rather than converted online ---------------
@@ -1206,7 +1197,7 @@ def test_the_window_is_applied_after_dedup_not_before(signed_in, app, config_fil
     assert body["total"] == 93, "the same statement twice is still 93 rows"
 
 
-# --- registering makes the Firefly account too. SPEC §56.1 -------------------
+# --- registering makes the ledger account too. SPEC §56.1 -------------------
 
 
 def _second_account(tmp_path):
@@ -1214,7 +1205,7 @@ def _second_account(tmp_path):
 
     Not an empty one: with nothing registered, the **upload** self-registers
     (§21.3, so a single-account operator never meets the feature) and
-    `/accounts` then takes the idempotent path without reaching Firefly at all.
+    `/accounts` then takes the idempotent path without reaching the ledger at all.
     Add-an-account exists for the second account, and that is what these
     exercise.
     """
@@ -1247,19 +1238,19 @@ def _register(signed_in, app, monkeypatch, *, existing="Cash wallet", body=None)
         payees as api_payees,
     )
 
-    fake = FakeFirefly([], account=existing)
+    fake = FakeLedger([], account=existing)
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: fake)
+        api_base, "open_ledger", lambda *a, **k: fake)
     staged = signed_in.upload_to("/accounts/inspect", XLS_FIXTURE.read_bytes(), "s.xls")
     assert staged.status_code == 200, staged.get_json()
     return fake, signed_in.post("/accounts", body if body is not None else {})
 
 
-def test_registering_creates_the_firefly_account_when_it_does_not_exist(
+def test_registering_creates_the_ledger_account_when_it_does_not_exist(
     signed_in, app, monkeypatch, tmp_path
 ):
-    """*"I dont want to create manually in Firefly again as I upload the
+    """*"I dont want to create manually in the ledger again as I upload the
     statement in UI."* Registering an account and giving it somewhere to post
     are one intention; splitting them sent the operator off to do half by hand."""
     _second_account(tmp_path)
@@ -1270,12 +1261,10 @@ def test_registering_creates_the_firefly_account_when_it_does_not_exist(
     assert body["assetCreated"] is True
 
     assert len(fake.stored) == 1, "exactly one asset account, made once"
-    made = fake.stored[0]
-    assert made["type"] == "asset"
-    # required_if:type,asset on the pinned tag — an asset account with no role
-    # is rejected by the validator.
-    assert made["account_role"] == "defaultAsset"
-    assert made["currency_code"] == "INR"
+    name, opening, on, currency = fake.stored[0]
+    assert name
+    assert currency == "INR"
+    assert opening is not None and on is not None, "the opening balance and its date"
 
 
 def test_the_default_name_is_the_bank_and_the_masked_number(
@@ -1287,10 +1276,10 @@ def test_the_default_name_is_the_bank_and_the_masked_number(
     _second_account(tmp_path)
     fake, response = _register(signed_in, app, monkeypatch)
     assert response.status_code == 200, response.get_json()
-    assert fake.stored[0]["name"] == f"Canara {FIXTURE_ACCOUNT[-4:].rjust(8, '*')}"
+    assert fake.stored[0][0] == f"Canara {FIXTURE_ACCOUNT[-4:].rjust(8, '*')}"
 
 
-def test_naming_an_account_firefly_already_has_attaches_rather_than_duplicating(
+def test_naming_an_account_the_ledger_already_has_attaches_rather_than_duplicating(
     signed_in, app, monkeypatch, tmp_path
 ):
     """The operator pointing at something they made on purpose. Inventing a
@@ -1306,12 +1295,12 @@ def test_naming_an_account_firefly_already_has_attaches_rather_than_duplicating(
     assert fake.stored == [], "it made one anyway"
 
 
-def test_firefly_being_down_stops_before_the_registry_is_touched(
+def test_the_ledger_being_down_stops_before_the_registry_is_touched(
     signed_in, app, monkeypatch, tmp_path
 ):
     """Half a registration is worse than none: an account in the registry with
     nowhere to post refuses every future upload for a reason nobody can see."""
-    from passbook.firefly.client import FireflyError
+    from passbook.store import LedgerError
     from passbook.web import api as api_module
     from passbook.web.api import (
         _base as api_base,
@@ -1332,25 +1321,25 @@ def test_firefly_being_down_stops_before_the_registry_is_touched(
             pass
 
         def asset_accounts(self):
-            raise FireflyError("connection refused")
+            raise LedgerError("connection refused")
 
-    # Stage with a working client, then let Firefly fall over between staging
+    # Stage with a working client, then let the ledger fall over between staging
     # and registering — which is the moment that matters.
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
     staged = signed_in.upload_to("/accounts/inspect", XLS_FIXTURE.read_bytes(), "s.xls")
     assert staged.status_code == 200, staged.get_json()
 
     monkeypatch.setattr(
-        api_base, "FireflyClient", Dead)
+        api_base, "open_ledger", Dead)
     response = signed_in.post("/accounts", {})
 
     assert response.status_code == 502
     from passbook.config import load_accounts
 
     assert [a.slug for a in load_accounts()] == ["other-2222"], (
-        "the new account reached the registry despite Firefly failing"
+        "the new account reached the registry despite the ledger failing"
     )
 
 
@@ -1467,7 +1456,7 @@ def test_try_refuses_an_empty_mapping_rather_than_guessing(signed_in, app):
 
 
 def test_an_unnamed_account_is_shown_as_bank_plus_last_four(signed_in, three_accounts):
-    """Not the Firefly asset account's name, which is a string chosen in another
+    """Not the asset account's name, which is a string chosen in another
     app: it can be anything and it can be the same for two accounts."""
     labels = [a["label"] for a in signed_in.get("/accounts").get_json()["accounts"]]
     assert labels == ["Canara ****1111", "Canara ****2222", "Canara ****3333"]
@@ -1530,10 +1519,10 @@ def test_renaming_an_unknown_account_is_404(signed_in, three_accounts):
 def test_a_rename_leaves_the_ledger_alone(signed_in, three_accounts):
     """§23.4 in reverse. A *payee* rename moves the row out from under its own
     categorisation rule because rules match the display name. An *account* name
-    is matched by nothing — it is never pushed and Firefly never sees it."""
+    is matched by nothing — it is never pushed and the ledger never sees it."""
     import json
 
-    from passbook.firefly.bootstrap import load_rules
+    from passbook.rules import load_rules
 
     before = json.dumps(load_rules(), sort_keys=True)
     signed_in.patch("/accounts/a-1", {"label": "Salary"})
@@ -1625,10 +1614,10 @@ def test_a_browser_still_scoped_to_a_removed_account_falls_back(
     assert selected == "a-1"
 
 
-def test_removal_survives_firefly_being_asleep(signed_in, three_accounts, monkeypatch):
+def test_removal_survives_the_ledger_being_asleep(signed_in, three_accounts, monkeypatch):
     """Refusing to show the screen because the stack is down would make this the
-    one management action that needs Firefly up to undo a Firefly mistake."""
-    from passbook.firefly.client import FireflyError
+    one management action that needs the stack up to undo a ledger mistake."""
+    from passbook.store import LedgerError
 
     monkeypatch.setenv("FIREFLY_TOKEN", "tok")
 
@@ -1648,12 +1637,15 @@ def test_removal_survives_firefly_being_asleep(signed_in, three_accounts, monkey
             pass
 
         def asset_accounts(self):
-            raise FireflyError("connection refused")
+            raise LedgerError("connection refused")
 
-        def account_transactions(self, _id):
-            raise FireflyError("connection refused")
+        def account_transactions(self, _account):
+            raise LedgerError("connection refused")
 
-    monkeypatch.setattr("passbook.web.api._base.FireflyClient", Dead)
+        def identities(self, _account):
+            raise LedgerError("connection refused")
+
+    monkeypatch.setattr("passbook.web.api._base.open_ledger", Dead)
     body = signed_in.get("/accounts/a-1/removal").get_json()
     assert body["ledgerRows"] is None
     assert "connection refused" in body["countReason"]
@@ -1895,7 +1887,7 @@ def test_a_reminder_edit_bumps_the_sequence_so_a_re_import_is_not_ignored(
 
 def test_the_diff_warns_when_a_change_empties_a_category(signed_in, config_files):
     """SPEC §33. Moving a payee out of its last category leaves a rule that can
-    never match again — it still exists in the dropdown and in Firefly, so a
+    never match again — it still exists in the dropdown and in the ledger, so a
     report on it is permanently empty. A YAML diff of payee lists does not show
     that, which is why it went unnoticed for weeks."""
     (config_files / "rules.yaml").write_text(
@@ -1928,11 +1920,11 @@ def test_the_diff_warns_when_a_change_would_drop_a_tag(signed_in, app, monkeypat
         external_id="x", date="2026-08-01", amount=Decimal("40"),
         old_description="Day Canteen (UPI)", new_description="Day Canteen (UPI)",
         old_category="Day Canteen", new_category="College Expense",
-        old_tags=("food",), new_tags=(), group_id="1",
+        old_tags=("food",), new_tags=()
     )
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([change], 93))
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     body = signed_in.post(
         "/payees/diff", {"aliases": {}, "categories": {"ZEPKV JYX": "Eating out"}}
@@ -1951,7 +1943,7 @@ def test_apply_can_carry_the_tag_across_in_the_same_write(signed_in, config_file
     """SPEC §33.3. The remedy, not just the warning — and in the SAME plan as
     the categorisation, so the tag cannot be lost in the window between two
     writes."""
-    from passbook.firefly.bootstrap import load_rules
+    from passbook.rules import load_rules
 
     (config_files / "rules.yaml").write_text(
         "rules:\n"
@@ -2000,7 +1992,7 @@ def test_apply_can_remove_the_category_it_empties(signed_in, config_files):
 def test_neither_remedy_happens_unless_asked(signed_in, config_files):
     """They are defaults in the UI, not behaviour in the server. A write that
     does not mention them changes neither."""
-    from passbook.firefly.bootstrap import load_rules
+    from passbook.rules import load_rules
 
     (config_files / "rules.yaml").write_text(
         "rules:\n"
@@ -2153,12 +2145,15 @@ def test_the_session_endpoint_never_returns_the_totp_secret(signed_in):
     assert SECRET not in body
 
 
-def test_status_never_returns_the_firefly_token(signed_in, monkeypatch):
-    token = "eyJ0eXAiOiJKV1QifQ.eyJleHAiOjk5OTk5OTk5OTl9.sig"
-    monkeypatch.setenv("FIREFLY_TOKEN", token)
+def test_status_never_returns_a_credential(signed_in, monkeypatch):
+    """There is no API token any more, and the database password must not take
+    its place: `/status` reports whether the ledger *answers*, never how it is
+    reached."""
+    secret = "super-secret-database-password"
+    monkeypatch.setenv("PASSBOOK_DATABASE_URL", f"postgresql://u:{secret}@db:5432/x")
     body = signed_in.get("/status").data.decode()
-    assert token not in body
-    assert "sig" not in json.loads(body)["token"]
+    assert secret not in body
+    assert set(json.loads(body)["store"]) == {"accounts", "error"}
 
 
 # --- the bundle -------------------------------------------------------------
@@ -2385,70 +2380,68 @@ def test_histograms_are_keyed_per_row_not_per_token(signed_in, app, config_files
 
 # --- /analysis: the charts, and what they must never show --------------------
 # SPEC §18. The figures on the Ledger page are the ones §8 and §8.1 define, not
-# Firefly's by-type totals. On the real ledger those differ by a factor of three
+# The ledger's by-type totals. On the real ledger those differ by a factor of three
 # in both directions, so a chart drawn on the wrong one is not approximately
 # right — and it looks fine.
 
 
-class FakeFirefly(StoreDouble):
-    """Just enough Firefly to answer /analysis. No network (§10)."""
+class FakeLedger(StoreDouble):
+    """Just enough ledger to answer /analysis. No network."""
 
     def __init__(self, splits, *, account="Test Account"):
         self.splits = splits
         self.account = account
-        self.stored: list[dict] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
+        self.stored: list[tuple] = []
 
     def asset_accounts(self):
-        return [{"id": "7", "attributes": {"name": self.account, "current_balance": "1.00"}}]
+        return [
+            {
+                "name": self.account,
+                "current_balance": "1.00",
+                "opening_balance": "12612.64",
+                "opening_on": date(2026, 5, 6),
+                "currency": "INR",
+            }
+        ]
 
-    def account_transactions(self, account_id):
-        assert account_id == "7"
-        # A real group carries an `id` and callers use it — `_live_splits` keys
-        # on it and §61's browser returns it so a row can be addressed later.
-        # The double omitted it, which is a gap in the double rather than
-        # defensive coding the endpoint owes it.
-        return [{"id": "1", "attributes": {"transactions": self.splits}}]
+    def account_transactions(self, account):
+        assert account == self.account
+        return self.splits
 
-    def close(self):
-        """The upload path closes its client explicitly, outside the context
-        manager. A double without it fails in `finally`, which reads as a
-        product bug and is not one."""
+    def identities(self, account):
+        return {s["external_id"] for s in self.splits if s.get("external_id")}
 
-    def store_account(self, body):
-        """Records what was asked for, so a test can assert the shape. §56.1."""
-        self.stored.append(body)
-        return {"data": {"attributes": {"name": body["name"]}}}
+    def store_transaction(self, split):
+        self.splits.append(split)
+
+    def update_transaction(self, external_id, fields):
+        for split in self.splits:
+            if split.get("external_id") == external_id:
+                split.update(fields)
+
+    def store_account(self, name, opening, on, currency):
+        """Records what was asked for, so a test can assert the shape."""
+        self.stored.append((name, opening, on, currency))
 
 
-def _fake_firefly(monkeypatch, splits, **kwargs):
-    from passbook.web import api as api_module
-    from passbook.web.api import (
-        _base as api_base,
-        _reconcile as api_reconcile,
-        ops as api_ops,
-        payees as api_payees,
-    )
+def _fake_ledger(monkeypatch, splits, **kwargs):
+    from passbook.web.api import _base as api_base
 
-    monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly(splits, **kwargs)
+        api_base, "open_ledger", lambda *a, **k: FakeLedger(splits, **kwargs)
     )
 
 
 def _split(kind, amount, *, category=None, tags=(), when="2026-06-10", external_id=None):
     return {
-        "type": kind,
-        "amount": f"{amount}.000000000000",
-        "category_name": category,
+        "kind": kind,
+        "amount": Decimal(str(amount)),
+        "category": category,
         "tags": list(tags),
         "external_id": external_id,
-        "date": f"{when}T00:00:00+05:30",
+        "txn_date": date.fromisoformat(when),
+        "description": "",
+        "counterparty": "",
     }
 
 
@@ -2460,7 +2453,7 @@ def test_analysis_excludes_movement_from_spend_and_returns_both_figures(
         "  - title: Eating\n    category: Eating out\n    tag: food\n"
         "not_spend: [Investments]\n"
     )
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split("withdrawal", "100", category="Eating out", tags=("food",)),
@@ -2484,7 +2477,7 @@ def test_every_amount_in_the_analysis_is_a_string_never_a_json_number(
     signed_in, monkeypatch, config_files
 ):
     """§16.1. A JSON number is an IEEE double the moment `JSON.parse` sees it."""
-    _fake_firefly(monkeypatch, [_split("withdrawal", "65", category="Shopping")])
+    _fake_ledger(monkeypatch, [_split("withdrawal", "65", category="Shopping")])
     raw = json.loads(signed_in.get("/analysis").data)
 
     for key in ("spend", "grossSpend", "income", "grossIncome", "excludedSpendTotal"):
@@ -2500,14 +2493,14 @@ def test_every_amount_in_the_analysis_is_a_string_never_a_json_number(
 def test_analysis_joins_the_clock_from_the_archive(
     signed_in, app, monkeypatch, config_files
 ):
-    """The clock exists only in the statement (§6.5) — Firefly is never told it.
+    """The clock exists only in the statement (§6.5) — the ledger is never told it.
     So the hours come from the archive, joined on the bank's transaction id."""
     shutil.copy(XLS_FIXTURE, app.config["ARCHIVE"] / "statement.xls")
     from passbook import service
 
     transactions = service.archived_statements(app.config["ARCHIVE"])[0].transactions
     clocked = [t for t in transactions if t.txn_time][:3]
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split(
@@ -2528,7 +2521,7 @@ def test_analysis_says_which_months_are_partial(signed_in, app, monkeypatch, con
     """The fixture covers 07-May to 07-Aug, so May and August are stubs. This is
     what the page shows instead of drawing a trend line through four points."""
     shutil.copy(XLS_FIXTURE, app.config["ARCHIVE"] / "statement.xls")
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split("withdrawal", "10", category="Shopping", when="2026-05-20"),
@@ -2544,17 +2537,22 @@ def test_analysis_says_which_months_are_partial(signed_in, app, monkeypatch, con
     ]
 
 
-def test_analysis_needs_a_configured_firefly_and_says_so(signed_in, monkeypatch):
-    monkeypatch.delenv("FIREFLY_TOKEN", raising=False)
+def test_analysis_with_no_registered_account_says_so(signed_in, monkeypatch):
+    """It used to be gated on a credential being present in `.env`, which said
+    whether a string existed rather than whether anything answered. What is
+    left to be unconfigured is the registry."""
+    from passbook.web.api import _scope as api_scope
+
+    monkeypatch.setattr(api_scope, "load_accounts", lambda *a, **k: [])
     r = signed_in.get("/analysis")
     assert r.status_code == 503
     assert r.get_json()["code"] == "unconfigured"
 
 
-def test_an_unreachable_firefly_is_a_502_not_a_500(signed_in, monkeypatch):
-    """The charts are drawn from the ledger, so an unreachable Firefly means no
-    charts — and the client shows that instead of an empty page."""
-    from passbook.firefly.client import FireflyError
+def test_an_unreachable_ledger_is_a_502_not_a_500(signed_in, monkeypatch):
+    """The charts are drawn from the ledger, so one that cannot be reached
+    means no charts — and the client shows that instead of an empty page."""
+    from passbook.store import LedgerError
     from passbook.web import api as api_module
     from passbook.web.api import (
         _base as api_base,
@@ -2566,13 +2564,13 @@ def test_an_unreachable_firefly_is_a_502_not_a_500(signed_in, monkeypatch):
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
 
     def explode(*a, **k):
-        raise FireflyError("connection refused")
+        raise LedgerError("connection refused")
 
     monkeypatch.setattr(
-        api_base, "FireflyClient", explode)
+        api_base, "open_ledger", explode)
     r = signed_in.get("/analysis")
     assert r.status_code == 502
-    assert r.get_json()["code"] == "firefly"
+    assert r.get_json()["code"] == "ledger"
 
 
 def test_analysis_never_leaks_the_account_number_or_the_token(
@@ -2580,7 +2578,7 @@ def test_analysis_never_leaks_the_account_number_or_the_token(
 ):
     """§11. The charts are aggregates; nothing here needs an account number."""
     shutil.copy(XLS_FIXTURE, app.config["ARCHIVE"] / "statement.xls")
-    _fake_firefly(monkeypatch, [_split("withdrawal", "65", category="Shopping")])
+    _fake_ledger(monkeypatch, [_split("withdrawal", "65", category="Shopping")])
     body = signed_in.get("/analysis").data.decode()
 
     assert FIXTURE_ACCOUNT not in body
@@ -2740,7 +2738,7 @@ def _dump(tmp_path, minutes_old: int) -> Path:
 
     backups = tmp_path / "backups"
     backups.mkdir(exist_ok=True)
-    dump = backups / "firefly-2026-08-11.sql.gz"
+    dump = backups / "the ledger-2026-08-11.sql.gz"
     dump.write_bytes(b"not a real dump")
     when = time.time() - minutes_old * 60
     os.utime(dump, (when, when))
@@ -2759,7 +2757,7 @@ def test_reapply_reports_whether_a_recent_dump_exists(signed_in, tmp_path, monke
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([], 0))
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     body = signed_in.get("/reapply").get_json()
     assert body["dump"]["fresh"] is False
@@ -2769,7 +2767,7 @@ def test_reapply_reports_whether_a_recent_dump_exists(signed_in, tmp_path, monke
     body = signed_in.get("/reapply").get_json()
     assert body["dump"]["fresh"] is True
     assert body["dump"]["ageMinutes"] == 5
-    assert body["dump"]["name"] == "firefly-2026-08-11.sql.gz"
+    assert body["dump"]["name"] == "the ledger-2026-08-11.sql.gz"
 
 
 def test_a_purge_is_refused_without_a_recent_dump(signed_in, tmp_path, monkeypatch):
@@ -2808,7 +2806,7 @@ def test_the_refusal_happens_before_anything_is_copied_or_deleted(
         api_reconcile, "_run_config_backup", lambda: called.append("config") or "x"
     )
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: called.append("firefly") or FakeFirefly([])
+        api_base, "open_ledger", lambda *a, **k: called.append("the ledger") or FakeLedger([])
     )
 
     assert signed_in.post("/reapply/run").status_code == 409
@@ -2828,7 +2826,7 @@ def test_a_dump_that_is_exactly_at_the_limit_still_counts(signed_in, tmp_path, m
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(api_module.service, "reapply_preview", lambda *a, **k: ([], 0))
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: FakeFirefly([]))
+        api_base, "open_ledger", lambda *a, **k: FakeLedger([]))
 
     _dump(tmp_path, minutes_old=ops.REAPPLY_DUMP_MAX_AGE_MINUTES)
     assert signed_in.get("/reapply").get_json()["dump"]["fresh"] is True
@@ -2916,7 +2914,7 @@ def test_make_check_counts_codes_out_of_the_array(tmp_path):
 
 def test_transactions_lists_the_ledger_newest_first(signed_in, app, monkeypatch, config_files):
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split("withdrawal", "100", category="Eating out", when="2026-06-01"),
@@ -2934,37 +2932,46 @@ def test_transactions_never_returns_a_running_balance(signed_in, app, monkeypatc
     continuity that is not there, and §6.6 is the spine of this project. The
     statement sheet keeps its balance; this must never grow one."""
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(monkeypatch, [_split("withdrawal", "100", category="Eating out")])
+    _fake_ledger(monkeypatch, [_split("withdrawal", "100", category="Eating out")])
     row = signed_in.get("/transactions?range=all").get_json()["rows"][0]
     assert "balance" not in row
 
 
-def test_transactions_skips_rows_that_are_not_transactions(
+def test_an_opening_balance_cannot_appear_as_a_row(
     signed_in, app, monkeypatch, config_files
 ):
-    """An opening balance is an account fact: no payee, no external_id, no Out
-    or In value. Listing it made the page count one more than `verify-ledger`
-    does, which reads as a phantom row."""
+    """It is a column on the account now, and it used to be a row.
+
+    As a row it had no payee, no external_id and no Out or In value, so the
+    page listed it as a blank line and counted one more than `verify-ledger`
+    did — which reads as a phantom transaction. The ledger cannot hold one:
+    `kind` is `withdrawal` or `deposit`, checked by the database.
+    """
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(
-        monkeypatch,
-        [
-            _split("withdrawal", "100", category="Eating out"),
-            _split("opening balance", "12612"),
-        ],
-    )
+    _fake_ledger(monkeypatch, [_split("withdrawal", "100", category="Eating out")])
     body = signed_in.get("/transactions?range=all").get_json()
     assert body["matched"] == 1
     assert [r["kind"] for r in body["rows"]] == ["withdrawal"]
+
+    from passbook.store import LedgerError
+    from passbook.store.memory import MemoryLedger
+
+    store = MemoryLedger()
+    store.store_account("Test Account", Decimal("12612.64"), date(2026, 5, 6), "INR")
+    with pytest.raises(LedgerError):
+        store.store_transaction(
+            {**_split("opening balance", "12612", external_id="x"),
+             "account": "Test Account", "notes": ""}
+        )
 
 
 def test_transactions_search_matches_the_raw_narration_too(
     signed_in, app, monkeypatch, config_files
 ):
     """The display name is no help when you are looking for a UTR, and that is
-    the case this page exists to replace Firefly's search for."""
+    the case this page exists to replace the ledger's search for."""
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(monkeypatch, [_split("withdrawal", "100", category="Eating out")])
+    _fake_ledger(monkeypatch, [_split("withdrawal", "100", category="Eating out")])
     hit = signed_in.get("/transactions?range=all&q=eating").get_json()
     assert hit["matched"] == 1
     miss = signed_in.get("/transactions?range=all&q=zzzznothing").get_json()
@@ -2977,7 +2984,7 @@ def test_transactions_filters_by_category_and_direction(
     signed_in, app, monkeypatch, config_files
 ):
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split("withdrawal", "100", category="Eating out"),
@@ -2997,7 +3004,7 @@ def test_transactions_filters_by_amount_band(signed_in, app, monkeypatch, config
     """§83. The commonest analyst question the page could not express:
     "everything over ten thousand"."""
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split("withdrawal", "50", category="Eating out"),
@@ -3020,7 +3027,7 @@ def test_transactions_sorts_amounts_as_numbers_not_strings(
     """`"9.00"` sorts above `"10000.00"` lexically, which is the kind of wrong
     that looks fine until the biggest row is missing from the top."""
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split("withdrawal", "9", category="Eating out", when="2026-06-01"),
@@ -3041,7 +3048,7 @@ def test_transactions_offers_the_tags_that_are_actually_present(
 ):
     """A tag filter you have to already know the value of is not a filter."""
     (config_files / "rules.yaml").write_text("rules: []\nnot_spend: []\n")
-    _fake_firefly(
+    _fake_ledger(
         monkeypatch,
         [
             _split("withdrawal", "50", category="Eating out", tags=("food",)),
@@ -3055,7 +3062,7 @@ def test_transactions_offers_the_tags_that_are_actually_present(
 def test_registering_an_account_sets_its_opening_balance(
     signed_in, app, monkeypatch, tmp_path
 ):
-    """§95. Without it Firefly starts the account at zero and every figure on
+    """§95. Without it the ledger starts the account at zero and every figure on
     it is short by the opening amount forever — the account balances against
     nothing, and §20's balance check fails on a ledger that is otherwise
     perfectly correct.
@@ -3073,13 +3080,13 @@ def test_registering_an_account_sets_its_opening_balance(
     )
 
     # Seed another account, or the UPLOAD self-registers (§21.3) and /accounts
-    # takes the idempotent path without ever reaching Firefly.
+    # takes the idempotent path without ever reaching the ledger.
     _second_account(tmp_path)
 
-    fake = FakeFirefly([], account="Other")
+    fake = FakeLedger([], account="Other")
     monkeypatch.setenv("FIREFLY_TOKEN", "a.b.c")
     monkeypatch.setattr(
-        api_base, "FireflyClient", lambda *a, **k: fake)
+        api_base, "open_ledger", lambda *a, **k: fake)
 
     # Stage via /accounts/inspect: /statement refuses an unregistered account
     # and deletes the file (§21.7), which is right there and wrong here.
@@ -3088,16 +3095,15 @@ def test_registering_an_account_sets_its_opening_balance(
     response = signed_in.post("/accounts", {"name": "Brand New"})
     assert response.status_code == 200, response.get_json()
 
-    stored = [b for b in fake.stored if b.get("type") == "asset"]
-    assert stored, "no asset account was created"
-    body = stored[-1]
-    assert body["opening_balance"] == "10000.00", body
-    # `opening_balance` and `opening_balance_date` are `required_with` each
-    # other on the pinned tag — both or neither, never one.
-    assert "opening_balance_date" in body
+    assert fake.stored, "no asset account was created"
+    # The last one is the registration's: `/accounts` names it, and the upload
+    # that staged the statement may have registered its own first.
+    name, opening, on, currency = fake.stored[-1]
+    assert opening == Decimal("10000.00"), name
     # The day BEFORE the period starts: dated on the first day it would sit
     # alongside that day's transactions and be ordered arbitrarily among them.
-    assert body["opening_balance_date"] == "2026-05-06"
+    assert on == date(2026, 5, 6)
+    assert currency == "INR"
 
 
 # --- the banner for a statement that is gone. SPEC §100.4 ---------------------

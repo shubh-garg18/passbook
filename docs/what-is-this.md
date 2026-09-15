@@ -116,16 +116,20 @@ and after that it remembers.
 
 ## Where the record actually lives
 
-passbook does the reading and sorting. The record itself is kept by a separate,
-well-established program called **Firefly III**, which installs alongside it.
-You do not have to learn it — but it is there if you ever want to search, edit a
-single entry, or take your data elsewhere:
+In a database on your own computer, in a handful of plain tables passbook owns.
+You never have to look at it — everything is on the pages — but it is worth
+knowing two things about it.
 
-![The same transactions inside Firefly III](screenshots/firefly.png)
+**A transaction can only be in there once.** Its identity, the number your bank
+gives it, is the key the table is built on. Not a check that something could
+skip: the database physically cannot hold it twice. That is there because of a
+real incident, on a version that kept the record somewhere else.
 
-Two programs rather than one, for a plain reason: keeping accounts properly is a
-solved problem, and reinventing it badly would be the easiest way to get your
-numbers wrong.
+**The money is stored as exact decimals.** Not as the kind of number computers
+round. Your balance is your balance.
+
+Taking your data elsewhere is a button: **Backups** writes a full dump you can
+read with any standard database tool.
 
 ## Where your information lives
 

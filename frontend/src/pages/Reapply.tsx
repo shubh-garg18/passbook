@@ -1,7 +1,7 @@
 /* Re-apply config to existing transactions. SPEC §15.2, §18.
  *
  * Aliases and rules apply at PUSH time, so editing config leaves rows already
- * in Firefly untouched. Reconciling means deleting them and pushing again
+ * in the ledger untouched. Reconciling means deleting them and pushing again
  * through the same path `make sync` uses — safe and repeatable, but a delete,
  * so it asks first.
  *

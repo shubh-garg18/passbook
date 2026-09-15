@@ -10,8 +10,7 @@ What runs, what it assumes about your threat model, and how to run the tests.
 
 | Service | Image | Exposure |
 |---|---|---|
-| `app` | `fireflyiii/core:version-6.6.6` | `127.0.0.1:8080`, settable via `FIREFLY_HOST_PORT` |
-| `db` | `postgres:16-alpine` | none — not published to the host |
+| `db` | `postgres:16-alpine` | `127.0.0.1:5433`, settable via `PASSBOOK_DB_PORT` — the CLI runs on the host |
 | `web` | built from this repository | `127.0.0.1:8081` |
 | `caddy` | `caddy:2.8-alpine` | `127.0.0.1:80` — `passbook.localhost`, and nothing else |
 
@@ -19,7 +18,7 @@ What runs, what it assumes about your threat model, and how to run the tests.
 make up | down | logs | ps | check
 ```
 
-Two named volumes hold everything, and `make down` leaves both intact — which is
+One named volume holds the ledger, and `make down` leaves it intact — which is
 why `make down && make up` keeps your data.
 
 > **`docker compose down -v` deletes the ledger.** The `-v` removes the volumes.
@@ -58,8 +57,8 @@ Built for one person on one machine. It assumes that.
 
 - **No HTTPS, no auth beyond the UI's own.** Everything binds `127.0.0.1`. Do
   not expose it without a reverse proxy in front.
-- **Anyone with a shell here has already won.** `.env` holds the Firefly token
-  and database password; `backups/` holds plaintext financial history. A stated
+- **Anyone with a shell here has already won.** `.env` holds the database
+  password; `backups/` holds plaintext financial history. A stated
   design point, not an oversight — but it means a lost machine is a lost ledger
   unless you have run `make backup-remote` ([backups.md](backups.md)).
 - **`.env`, `inbox/`, `archive/`, `backups/` and your real `config/*.yaml` are
@@ -68,8 +67,6 @@ Built for one person on one machine. It assumes that.
   number, customer ID, postal address, IFSC, counterparty phone and account
   numbers, and your whole balance history. This is the one prohibition here with
   no exceptions.
-- **Do not change `APP_KEY` after first login.** Firefly encrypts its API keypair
-  with it; a new key invalidates every existing token permanently.
 
 The web container runs unprivileged with **no Docker socket** — asserted at AST
 level, not by grep. It reports backup health; the host runs backups. Otherwise a
@@ -130,12 +127,11 @@ and prints the computed animation values.
 | Symptom | Cause |
 |---|---|
 | `make check`: docker daemon not reachable | Docker Desktop is not started, or on Linux you are not in the `docker` group yet. |
-| `make up` hangs on `Waiting` | First-boot migrations. Watch with `make logs`. |
-| `failed to bind 127.0.0.1:8080`, but nothing is listening | On WSL with mirrored networking a **Windows** process holds it and the distro cannot see it. `netstat.exe -ano \| grep :8080` names it. Set `FIREFLY_HOST_PORT` and match `APP_URL` / `FIREFLY_URL`. |
-| Firefly shows "page expired" on login | `APP_URL` does not match the URL you are visiting. |
+| `make up` hangs on `Waiting` | The database is initialising. Watch with `make logs`. |
+| `failed to bind 127.0.0.1:5433`, but nothing is listening | On WSL with mirrored networking a **Windows** process holds it and the distro cannot see it. `netstat.exe -ano \| grep :5433` names it. Set `PASSBOOK_DB_PORT`; nothing else changes. |
 | A container is `Up` but cannot resolve `db` | Its network attach failed. `docker compose down && up`, not a restart. |
 | Postgres will not start | On WSL2, the repo is on `/mnt/c/`. Move it under `~/`. |
-| Everything lands in "(no category)" | `bootstrap` has not run, or a rule matches a merchant name — see [usage.md](usage.md). |
+| Everything lands in "(no category)" | `config/rules.yaml` is empty, or a rule matches a merchant name a bank truncates — see [usage.md](usage.md). |
 | A figure looks short | `uv run passbook verify-ledger`. A self-consistent balance proves nothing. |
 | `make audit-docs` fails on a number you wrote | You cited a live ledger. Use a fixture value, or state a ratio. |
 

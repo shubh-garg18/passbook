@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Disaster-recovery drill. SPEC §11.
+# Disaster-recovery drill.
 #
 # Everything verify_backup.sh proves is proved by the machine that still holds
 # the originals. This proves the harder thing: recovery from ONLY what survives
 # that machine dying — the two encrypted archives and the passphrase.
 #
 # Nothing here touches the live stack. It builds a parallel universe on its own
-# docker network: a scratch Postgres, and a FRESH Firefly container with a
-# BRAND-NEW APP_KEY, which is the specific question. If APP_KEY is load-bearing
-# for the ledger, this is where it shows.
+# docker network: a scratch Postgres loaded from the encrypted dump, and a
+# passbook container that has never seen this machine\'s .env or config.
+#
+# **It used to have a fourth step this one does not need.** The ledger was a
+# separate application that encrypted part of its own configuration with a key
+# in .env, so recovery had a question attached to it — is that key load-bearing
+# — and the answer was yes: restoring with a different one silently destroyed
+# every API token. Nothing in these tables is encrypted, so that whole leg of
+# the drill, and the failure it was drilling for, are gone.
 #
 #   make dr-drill
 
@@ -17,29 +23,22 @@ cd "$(dirname "$0")/.."
 
 NET=passbook_dr_net
 PG=passbook_dr_db
-FF=passbook_dr_app
 WEB=passbook_dr_web
-PORT=8099
 WEBPORT=8098
 PGIMAGE=postgres:16-alpine
-# Same tag the live stack pins, so the drill tests the version we actually run.
-FFIMAGE=$(grep -oE 'fireflyiii/core:[^ ]+' docker-compose.yml | head -1)
 # The web image is ours, so the drill uses whatever `docker compose build web`
 # last produced. Steps 6-8 skip loudly rather than silently if it is absent.
 WEBIMAGE=$(grep -oE 'passbook/web:[^ ]+' docker-compose.yml | head -1)
 
-DR_DB=firefly
+# Deliberately NOT the live database name or user: the dump carries no
+# credentials, and a recovery onto different ones is the realistic case.
+DR_DB=passbook_dr
 DR_USER=dr_recovery
 DR_PASS="dr-$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 24)"
-# The whole point: by default, a key this data has never seen. Set DR_APP_KEY to
-# the original to test the other half of the question — whether preserving it
-# buys anything.
-NEW_APP_KEY="${DR_APP_KEY:-$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 32)}"
-KEY_MODE=$([ -n "${DR_APP_KEY:-}" ] && echo "ORIGINAL APP_KEY" || echo "NEW APP_KEY")
 
 tmp="$(mktemp -d)"
 cleanup() {
-    docker rm -f "$WEB" "$FF" "$PG" >/dev/null 2>&1 || true
+    docker rm -f "$WEB" "$PG" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     rm -rf "$tmp"
 }
@@ -68,7 +67,6 @@ say() { echo "  $*"; }
 fail() { echo "  FAIL  $*"; failures=$((failures+1)); }
 ok()   { echo "  ok    $*"; }
 failures=0
-tok=""
 
 # ── what the restored ledger must look like ──────────────────────────────────
 # Derived from archive/ and .env, never hardcoded. An earlier version of this
@@ -106,7 +104,7 @@ echo "== 0. simulate the only surviving inputs =="
 pass="$tmp/passphrase"
 head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 40 > "$pass"
 chmod 600 "$pass"
-dump_plain="$(ls -1t backups/firefly-*.sql.gz 2>/dev/null | grep -v '\.gpg$' | head -1)"
+dump_plain="$(ls -1t backups/ledger-*.sql.gz backups/firefly-*.sql.gz 2>/dev/null | grep -v '\.gpg$' | head -1)"
 cfg_plain="$(ls -1t backups/config-*.tar.gz 2>/dev/null | grep -v '\.gpg$' | grep -v 'config-replaced-' | head -1)"
 [ -n "$dump_plain" ] || { echo "  FAIL  no backup to drill with; run make backup"; exit 1; }
 for f in "$dump_plain" "$cfg_plain"; do
@@ -124,108 +122,49 @@ for g in "$tmp"/*.gpg; do
         -o "${g%.gpg}" "$g"
     ok "decrypted $(basename "${g%.gpg}")"
 done
-dump="$(ls -1 "$tmp"/firefly-*.sql.gz)"
+dump="$(ls -1 "$tmp"/ledger-*.sql.gz "$tmp"/firefly-*.sql.gz 2>/dev/null | head -1)"
 cfg="$(ls -1 "$tmp"/config-*.tar.gz 2>/dev/null || true)"
 
 echo
-echo "== 2. stand up a clean stack (new network, new credentials, NEW APP_KEY) =="
+echo "== 2. stand up a scratch database and load the dump =="
 docker network create "$NET" >/dev/null 2>&1 || true
 docker run -d --name "$PG" --network "$NET" \
     -e POSTGRES_USER="$DR_USER" -e POSTGRES_PASSWORD="$DR_PASS" -e POSTGRES_DB="$DR_DB" \
     "$PGIMAGE" >/dev/null
 wait_for_pg "$PG" "$DR_USER" "$DR_DB" || { echo "  FAIL  scratch postgres never became ready"; exit 1; }
-ok "scratch postgres up (credentials differ from live — the dump carries no secrets)"
+ok "scratch postgres up (different name, user and password from live — the dump"
+say "      carries no credentials, and a recovery onto different ones is the real case)"
 
 gunzip -c "$dump" | docker exec -i "$PG" psql -q -v ON_ERROR_STOP=1 -U "$DR_USER" -d "$DR_DB" >/dev/null
 ok "dump loaded"
 
-docker run -d --name "$FF" --network "$NET" -p "127.0.0.1:$PORT:8080" \
-    -e APP_KEY="$NEW_APP_KEY" \
-    -e APP_ENV=production -e APP_DEBUG=false \
-    -e APP_URL="http://localhost:$PORT" \
-    -e SITE_OWNER=dr@example.com -e DEFAULT_LANGUAGE=en_US -e TZ=Asia/Kolkata \
-    -e TRUSTED_PROXIES='**' -e LOG_CHANNEL=stack -e APP_LOG_LEVEL=info \
-    -e HEALTHCHECK_PATH=/health \
-    -e DB_CONNECTION=pgsql -e DB_HOST="$PG" -e DB_PORT=5432 \
-    -e DB_DATABASE="$DR_DB" -e DB_USERNAME="$DR_USER" -e DB_PASSWORD="$DR_PASS" \
-    "$FFIMAGE" >/dev/null
-say "fresh Firefly ($FFIMAGE) running with the $KEY_MODE"
-
-for _ in $(seq 1 180); do
-    st=$(docker inspect -f '{{.State.Health.Status}}' "$FF" 2>/dev/null || echo starting)
-    [ "$st" = "healthy" ] && break
-    [ "$st" = "unhealthy" ] && break
-    sleep 2
-done
-st=$(docker inspect -f '{{.State.Health.Status}}' "$FF" 2>/dev/null || echo unknown)
-if [ "$st" = "healthy" ]; then
-    ok "container healthy — /health runs User::count() through Eloquent, so the"
-    say "      app reads the restored database with the new key"
-else
-    fail "container is $st with a new APP_KEY"
-    docker logs "$FF" 2>&1 | tail -20 | sed 's/^/      /'
-fi
-
 echo
-echo "== 3. does the ledger survive a new APP_KEY? =="
+echo "== 3. is the ledger all there? =="
 q() { docker exec -i "$PG" psql -qtAX -U "$DR_USER" -d "$DR_DB" -c "$1"; }
-acct_id=$(q "select id from accounts where name='$ASSET_ACCOUNT';")
-txns=$(q "select count(*) from journal_meta m join transaction_journals j on j.id=m.transaction_journal_id where m.name='external_id' and m.deleted_at is null and j.deleted_at is null;")
-bal=$(q "select to_char(sum(t.amount),'FM9999999.00') from transactions t join transaction_journals j on j.id=t.transaction_journal_id where t.account_id=$acct_id and t.deleted_at is null and j.deleted_at is null;")
+txns=$(q "select count(*) from passbook.transactions;")
+bal=$(q "select to_char(a.opening_balance + coalesce(sum(case when t.kind='deposit' then t.amount else -t.amount end), 0), 'FM9999999.00')
+           from passbook.asset_accounts a
+           left join passbook.transactions t on t.account = a.name
+          where a.name = '$ASSET_ACCOUNT'
+          group by a.opening_balance;")
 [ "$txns" = "$EXPECT_TXNS" ] && ok "$EXPECT_TXNS transactions present" \
                             || fail "expected $EXPECT_TXNS transactions, got $txns"
 [ "$bal" = "$EXPECT_BAL" ] && ok "balance reads $EXPECT_BAL" \
                           || fail "balance reads $bal, expected $EXPECT_BAL"
 
-# Through the application, not just SQL: this walks Eloquent models and would
-# blow up or print garbage if any ledger field needed the old key.
-if docker exec "$FF" php artisan firefly-iii:correct-database >"$tmp/artisan.log" 2>&1; then
-    if grep -qi "Amount integrity OK" "$tmp/artisan.log"; then
-        ok "app-level integrity check passes against the restored data"
-    else
-        fail "integrity check ran but did not report OK"
-    fi
-    grep -oE 'account #[0-9]+ \("[^"]+"\)' "$tmp/artisan.log" | head -3 | sed 's/^/      read: /' || true
-else
-    fail "firefly-iii:correct-database errored"
-    tail -12 "$tmp/artisan.log" | sed 's/^/      /'
-fi
+# The identity is the primary key, so the restored table cannot hold a row
+# twice — but the count above and the count below disagreeing would say the
+# restore lost rows rather than duplicated them, which is the failure that
+# actually happens.
+ids=$(q "select count(distinct external_id) from passbook.transactions;")
+[ "$ids" = "$txns" ] && ok "every row carries a distinct identity" \
+                     || fail "$txns rows behind $ids identities"
 
-echo
-echo "== 4. token continuity under the $KEY_MODE =="
-# OAuthKeys stores the Passport keypair in the configuration table wrapped in
-# Crypt::encrypt (APP_KEY). A new key cannot decrypt it; restoreKeysFromDB
-# catches DecryptException, deletes both settings and regenerates. Existing
-# Personal Access Tokens are signed with the old private key, so they stop
-# validating. Data is untouched; API access is not.
-before=$(q "select count(*) from configuration where name in ('oauth_private_key','oauth_public_key') and deleted_at is null;")
-say "oauth key settings still in the restored config table: $before"
-tok=$(grep '^FIREFLY_TOKEN=' .env | cut -d= -f2- || true)
-if [ -n "$tok" ]; then
-    code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
-           -H "Accept: application/vnd.api+json" "http://localhost:$PORT/api/v1/about" || echo 000)
-    if [ "$code" = "200" ]; then
-        say "old PAT still authenticates (HTTP $code) — keys survived the key change"
-    else
-        ok "old PAT rejected by the recovered instance (HTTP $code) — expected;"
-        say "      the Passport keypair is APP_KEY-encrypted, so it is regenerated."
-        say "      Recovery therefore needs a NEW token, made in the UI after login."
-    fi
-fi
-docker logs "$FF" 2>&1 | grep -ci "could not decrypt pub/private keypair" >/dev/null 2>&1 \
-    && say "logs confirm: 'Could not decrypt pub/private keypair'" || true
-
-echo
 echo "== 5. config archive =="
 if [ -n "$cfg" ]; then
     tar xzf "$cfg" -C "$tmp"
     n=$(python3 -c "import yaml,sys;d=yaml.safe_load(open(sys.argv[1]))or{};print(len(d.get('aliases')or{}))" "$tmp/config/payee_aliases.yaml" 2>/dev/null || echo 0)
     [ "$n" -gt 0 ] && ok "payee_aliases.yaml recovered, $n alias(es)" || fail "aliases not recovered"
-    if grep -q '^APP_KEY=.\{32\}$' "$tmp/recovery/app-key.env" 2>/dev/null; then
-        ok "APP_KEY recovered from the archive — API tokens keep working"
-    else
-        fail "APP_KEY not in the archive; recovery would need a re-issued token"
-    fi
 else
     fail "no config archive"
 fi
@@ -294,43 +233,12 @@ fi
 
 echo
 echo "== 6. web access after recovery: the credential file is NOT in the backup =="
-# §16.9 excludes config/web-auth.json on purpose, so a recovered install has no
-# web credentials at all. That is the GUARANTEED state after any real recovery,
-# which makes it worth proving rather than assuming.
-#
-# This leg runs Firefly on the APP_KEY recovered from the tarball, because that
-# is what runbook step 7 instructs. Steps 2-4 above answer the separate
-# question (is APP_KEY load-bearing for the data); this one walks the runbook.
-#
-# The dump is reloaded first: the new-key Firefly in step 2 already caught the
-# DecryptException and REGENERATED the Passport keypair, destroying the
-# original. Without a reload the recovered key would have nothing to decrypt
-# and the old token would fail for the wrong reason.
-if [ -z "$cfg" ] || [ ! -f "$tmp/recovery/app-key.env" ]; then
-    fail "no APP_KEY in the archive — skipping the web leg"
-elif ! docker image inspect "$WEBIMAGE" >/dev/null 2>&1; then
+# The backup excludes config/web-auth.json on purpose, so a recovered install
+# has no web credentials at all. That is the GUARANTEED state after any real
+# recovery, which makes it worth proving rather than assuming.
+if ! docker image inspect "$WEBIMAGE" >/dev/null 2>&1; then
     fail "$WEBIMAGE not built — run: docker compose build web"
 else
-    recovered_key=$(cut -d= -f2- < "$tmp/recovery/app-key.env")
-    docker rm -f "$FF" >/dev/null 2>&1 || true
-    gunzip -c "$dump" | docker exec -i "$PG" psql -q -v ON_ERROR_STOP=1 -U "$DR_USER" -d "$DR_DB" >/dev/null
-    ok "dump reloaded (step 2's new key had already regenerated the Passport keypair)"
-
-    docker run -d --name "$FF" --network "$NET" -p "127.0.0.1:$PORT:8080" \
-        -e APP_KEY="$recovered_key" \
-        -e APP_ENV=production -e APP_DEBUG=false -e APP_URL="http://localhost:$PORT" \
-        -e SITE_OWNER=dr@example.com -e DEFAULT_LANGUAGE=en_US -e TZ=Asia/Kolkata \
-        -e TRUSTED_PROXIES='**' -e LOG_CHANNEL=stack -e APP_LOG_LEVEL=info \
-        -e HEALTHCHECK_PATH=/health \
-        -e DB_CONNECTION=pgsql -e DB_HOST="$PG" -e DB_PORT=5432 \
-        -e DB_DATABASE="$DR_DB" -e DB_USERNAME="$DR_USER" -e DB_PASSWORD="$DR_PASS" \
-        "$FFIMAGE" >/dev/null
-    for _ in $(seq 1 180); do
-        [ "$(docker inspect -f '{{.State.Health.Status}}' "$FF" 2>/dev/null || echo starting)" = "healthy" ] && break
-        sleep 2
-    done
-    ok "Firefly restarted on the RECOVERED APP_KEY (runbook step 7)"
-
     # A recovered config/ — exactly what step 4 of the runbook extracts. Note
     # what is NOT here: web-auth.json.
     dr_config="$tmp/config"
@@ -342,8 +250,7 @@ else
 
     docker run -d --name "$WEB" --network "$NET" -p "127.0.0.1:$WEBPORT:8081" \
         -v "$dr_config:/app/config" \
-        -e FIREFLY_URL="http://$FF:8080" \
-        -e FIREFLY_TOKEN="${tok:-}" \
+        -e PASSBOOK_DATABASE_URL="postgresql://$DR_USER:$DR_PASS@$PG:5432/$DR_DB" \
         -e PASSBOOK_ACCOUNT_NUMBER="${DR_ACCOUNT:-$(grep -m1 '^PASSBOOK_ACCOUNT_NUMBER=' .env | cut -d= -f2-)}" \
         -e PASSBOOK_ASSET_ACCOUNT="$ASSET_ACCOUNT" \
         -e PASSBOOK_WEB_SECRET="drill-$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 24)" \
@@ -424,7 +331,7 @@ else
     if [ "$bal" = "$EXPECT_BAL" ]; then
         ok "signed in, and /api/overview reads balance $EXPECT_BAL from the restored ledger"
     else
-        fail "recovered UI reported balance=$bal (Firefly error: $(echo "$ov" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("fireflyError"))'))"
+        fail "recovered UI reported balance=$bal (ledger error: $(echo "$ov" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ledgerError"))'))"
     fi
     pay=$(web "http://localhost:$WEBPORT/api/payees")
     cats=$(echo "$pay" | python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("categories") or []))')

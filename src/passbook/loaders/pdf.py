@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 #
 # Tuned for PAYEE agreement, not narration bytes, and that is the deliberate
 # trade: `payee` is the string rules match on (D10), so it decides behaviour;
-# `narration` goes to Firefly's notes verbatim (§7.2) and is expected to differ
+# `narration` goes to the ledger's notes verbatim (§7.2) and is expected to differ
 # between formats. Measured across the 93-row cross-validation:
 #
 #     eps    payee      narration (whitespace-collapsed)

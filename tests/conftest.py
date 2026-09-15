@@ -8,7 +8,6 @@ recomputed so the §6.6 invariant stays meaningful.
 import csv
 from pathlib import Path
 
-from contextlib import contextmanager
 
 import pytest
 
@@ -38,14 +37,10 @@ def _empty_caches():
     # on disk — so without this each test would quietly demolish the previous
     # one's index.
     index_was, _ix.INDEX_PATH = _ix.INDEX_PATH, scratch / "index.sqlite3"
-    from passbook.firefly import client as _fc
-
-    _fc.forget_everything()
     _yf.forget_everything()
     yield
     _pc.CACHE_DIR = memo_was
     _ix.INDEX_PATH = index_was
-    _fc.forget_everything()
     _yf.forget_everything()
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -88,14 +83,51 @@ def enriched(parsed):
 
 
 class StoreDouble:
-    """Base for the stand-ins that replace `FireflyClient` in tests.
+    """Base for the stand-ins that replace the ledger in tests.
 
-    It exists for `fresh()`. `verify_ledger` reads past the shared cache
-    (non-negotiable 11, §101) and a double that silently lacked the method would
-    have made that read impossible to write — the pressure would have been to
-    soften the real code instead of teaching the double one line.
+    It used to exist for `fresh()` — the real client memoised, and a check that
+    read the memo had not read the ledger. There is no memo now; a query is a
+    query. What is left is the `with` block every call site uses, so a double
+    does not have to remember to grow one.
+
+    A double is held to the real thing's shape deliberately: `MemoryLedger` in
+    `passbook.store.memory` enforces every invariant the schema does, and is
+    the right base for anything that needs to behave like a ledger rather than
+    merely answer one question.
     """
 
-    @contextmanager
-    def fresh(self):
-        yield self
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ledger(monkeypatch):
+    """Tests never open a real database. Enforced, not remembered.
+
+    Every route reaches the ledger through `_base.open_ledger`, so a test that
+    forgets to supply a fake used to fall through to a genuine TCP connect —
+    which does not fail fast. It waits out the driver's connection timeout, and
+    a suite of those turns minutes into an afternoon while looking like nothing
+    more than slowness.
+
+    So the default is a store that refuses immediately, with a message naming
+    the fixture the test should have used. A test that wants a working ledger
+    overrides this by patching the same name, which is what every one of them
+    already does.
+    """
+    from passbook.store import LedgerError
+
+    def refuse(*_args, **_kwargs):
+        raise LedgerError(
+            "no ledger in tests — patch `passbook.web.api._base.open_ledger`, "
+            "or use `passbook.store.memory.MemoryLedger`"
+        )
+
+    monkeypatch.setattr("passbook.web.api._base.open_ledger", refuse)
+    monkeypatch.setattr("passbook.store.open_ledger", refuse)

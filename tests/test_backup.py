@@ -119,7 +119,7 @@ def test_writes_a_gzipped_dump_and_a_config_archive(ready, monkeypatch):
 
     result = backup.run(today=date(2026, 9, 3))
 
-    assert result.dump == "firefly-2026-09-03.sql.gz"
+    assert result.dump == "ledger-2026-09-03.sql.gz"
     dump = ready / "backups" / result.dump
     assert gzip.decompress(dump.read_bytes()).startswith(b"--\n-- PostgreSQL")
     assert result.dump_bytes == dump.stat().st_size
@@ -198,7 +198,7 @@ def test_a_failed_dump_cannot_replace_yesterdays_good_one(ready, monkeypatch):
     truncated file with today's name — and the operator would find out on the
     day they restored it.
     """
-    good = ready / "backups" / "firefly-2026-09-03.sql.gz"
+    good = ready / "backups" / "ledger-2026-09-03.sql.gz"
     good.write_bytes(b"the good one")
 
     monkeypatch.setattr(backup.subprocess, "Popen", FakePgDump(b"", code=1, errors=b"boom\n"))

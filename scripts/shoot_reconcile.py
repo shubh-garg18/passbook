@@ -3,10 +3,9 @@
 
 The empty state of `/reapply` is easy to photograph and says nothing about the
 feature: the whole of §24 is what the page does when rows **do** differ. That
-state needs a ledger, and a ledger needs Firefly — so this stands one up in
-memory instead.
+state needs a ledger with rows already in it, so this stands one up in memory.
 
-The fake store holds every row from the committed fixture, pushed under an
+The fake ledger holds every row from the committed fixture, written under an
 older config: two payees still carry their raw tokens and one row has no
 category. That is exactly the state a rename leaves behind, which is the thing
 the page exists to show.
@@ -41,23 +40,25 @@ FIXTURE = ROOT / "tests" / "fixtures" / "statement.xls"
 
 
 def fake_client_class(asset_name: str, archive: Path):
-    """A Firefly stand-in holding the fixture's rows, one config behind."""
+    """A ledger stand-in holding the fixture's rows, one config behind."""
+    from datetime import date
+    from decimal import Decimal
+
     from passbook import service
-    from passbook.firefly.push import build_payload
+    from passbook.push import build_split
 
     statements = service.archived_statements(archive)
-    groups = []
+    rows = []
     for index, txn in enumerate(statements[0].transactions if statements else []):
-        split = build_payload(txn, asset_name)["transactions"][0]
-        # The stale part: the ledger keeps what it was pushed with. Strip the
+        split = build_split(txn, asset_name)
+        # The stale part: the ledger keeps what it was written with. Strip the
         # category from every third row and leave the description as the raw
         # token, which is what a later alias would have replaced.
-        stale = dict(split)
-        stale["category_name"] = "" if index % 3 == 0 else split.get("category_name", "")
-        stale["description"] = split["description"].replace(" (", " · (", 1)
-        groups.append({"id": str(index + 1), "attributes": {"transactions": [stale]}})
+        split["category"] = "" if index % 3 == 0 else split.get("category", "")
+        split["description"] = split["description"].replace(" (", " · (", 1)
+        rows.append(split)
 
-    class FakeClient:
+    class FakeLedger:
         def __init__(self, *args, **kwargs):
             pass
 
@@ -67,43 +68,33 @@ def fake_client_class(asset_name: str, archive: Path):
         def __exit__(self, *exc):
             return False
 
+        def close(self):
+            return None
+
         def asset_accounts(self):
-            # `current_balance` is not optional: the Ledger asks for it on every
-            # sign-in, and a fake without it raises a KeyError on a page this
-            # script does not even shoot.
+            # `current_balance` and `opening_balance` are not optional: the
+            # Ledger asks for both on every sign-in, and a fake without them
+            # raises on a page this script does not even shoot.
             return [
                 {
-                    "id": "1",
-                    "attributes": {
-                        "name": asset_name,
-                        "current_balance": "5068.09",
-                        "currency_code": "INR",
-                    },
+                    "name": asset_name,
+                    "current_balance": Decimal("5068.09"),
+                    "opening_balance": Decimal("12612.64"),
+                    "opening_on": date(2026, 5, 6),
+                    "currency": "INR",
                 }
             ]
 
-        def account_transactions(self, account_id):
-            return groups
+        def account_transactions(self, account):
+            return rows
 
-        def update_transaction(self, group_id, payload):
-            return {}
+        def identities(self, account):
+            return {r["external_id"] for r in rows}
 
-        # The Status strip signs in alongside every page. A fake that answers
-        # only what the page under test asks still breaks the shot, because the
-        # header renders too.
-        def about(self):
-            return {"data": {"version": "6.6.6", "api_version": "2.1.0"}}
+        def update_transaction(self, external_id, fields):
+            return None
 
-        def categories(self):
-            return []
-
-        def rules(self):
-            return []
-
-        def rule_groups(self):
-            return []
-
-    return FakeClient
+    return FakeLedger
 
 
 def main() -> int:
@@ -131,7 +122,6 @@ def main() -> int:
         shutil.copy(FIXTURE, archive / "canara-1111" / "statement.xls")
         os.chdir(root)
         os.environ["PASSBOOK_ASSET_ACCOUNT"] = "Test Account"
-        os.environ["FIREFLY_TOKEN"] = "shots"
         os.environ["PASSBOOK_ACCOUNT_NUMBER"] = "999900001111"
 
         # The seam is `_base`, not the package: a route resolves the name in its
@@ -139,7 +129,7 @@ def main() -> int:
         # silently ignored and every page would reach for a real store.
         from passbook.web.api import _base as api_base
 
-        api_base.FireflyClient = fake_client_class("Test Account", archive)
+        api_base.open_ledger = fake_client_class("Test Account", archive)
 
         app = create_app(
             {

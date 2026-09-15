@@ -61,3 +61,28 @@ class LedgerStore(Protocol):
     def delete_transaction(self, external_id: str) -> None: ...
     def identities(self, account: str) -> set[str]: ...
     def close(self) -> None: ...
+
+    # A `with` block, because every call site already had one: the store it
+    # replaces was a network client and closing it mattered. It still does.
+    def __enter__(self) -> "LedgerStore": ...
+    def __exit__(self, *exc) -> bool: ...
+
+
+def open_ledger(settings=None, dsn: str | None = None) -> "LedgerStore":
+    """The ledger this install writes to.
+
+    One construction point, on purpose. The previous arrangement grew a second
+    and then a third, each building its own client, and the cost was paid twice
+    per request until they were collapsed back into one. It is also the seam
+    tests patch: a name resolved in another module's globals cannot be reached
+    by patching a package attribute, so there is exactly one place to reach.
+    """
+    from .postgres import PostgresLedger
+
+    if dsn is None:
+        if settings is None:
+            from ..config import load_settings
+
+            settings = load_settings()
+        dsn = settings.ledger_dsn
+    return PostgresLedger(dsn)

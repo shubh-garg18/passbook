@@ -12,13 +12,12 @@ from flask import current_app, jsonify, request, session
 from ... import service
 from ...config import (
     load_attribution,
-    load_settings,
 )
-from ...firefly.client import FireflyError
+from ...store import LedgerError
 from .. import auth as A
 
 from ._base import (
-    _client,
+    _ledger,
     _fail,
     _money,
     _sync,
@@ -44,17 +43,16 @@ def overview():
     closing figure, which is what this card has implied since Phase 7. So it is
     labelled as a sum and the per-account figures travel with it.
     """
-    st = load_settings()
     scope, selected = _account_scope()
     error = None
     parts: list[dict] = []
     total: Decimal | None = None
 
     try:
-        with _client(st.firefly_url, st.firefly_token or "") as client:
+        with _ledger() as store:
             live = {
-                a["attributes"]["name"]: Decimal(str(a["attributes"]["current_balance"]))
-                for a in client.asset_accounts()
+                a["name"]: Decimal(str(a["current_balance"]))
+                for a in store.asset_accounts()
             }
         for account in scope:
             amount = live.get(account.asset_account)
@@ -68,13 +66,13 @@ def overview():
             )
             if amount is not None:
                 total = (total or Decimal(0)) + amount
-    except FireflyError as exc:
+    except LedgerError as exc:
         error = str(exc)
 
     return jsonify(
         {
             "balance": _money(total),
-            "fireflyError": error,
+            "ledgerError": error,
             "account": scope[0].display if len(scope) == 1 else None,
             "selected": selected,
             # Only meaningful for "all"; the client shows the breakdown then.
@@ -155,19 +153,16 @@ def analysis():
     it.
 
     **Two sources, each authoritative for what it carries.** Money and category
-    come from Firefly, because the rules engine assigns the category at store
+    come from the ledger, because the rules engine assigns the category at store
     time (D5) and re-deriving it here would be a second implementation. The
     clock comes from the statement, because `txn_time` is parsed out of the
-    narration (§6.5) and never pushed — Firefly has no idea what time of day
+    narration (§6.5) and never pushed — the ledger has no idea what time of day
     anything happened.
     """
-    st = load_settings()
     scope, selected = _account_scope()
     start, end, window = _date_scope()
-    if not st.firefly_token or not scope:
-        return _fail(
-            "FIREFLY_TOKEN is not set, or no account is registered.", "unconfigured", 503
-        )
+    if not scope:
+        return _fail("No account is registered.", "unconfigured", 503)
 
     # **Everything on this page is additive over transactions, so "all accounts"
     # combines** (§21.9): spend, income, the category breakdown, the roll-ups, the
@@ -188,22 +183,17 @@ def analysis():
     # word total. Separate lines say the same thing without the caveat (§57).
     balances: list[dict] = []
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            live = {a["attributes"]["name"]: a["id"] for a in client.asset_accounts()}
+        with _ledger() as store:
+            live = {a["name"] for a in store.asset_accounts()}
             archive = current_app.config["ARCHIVE"]
             for account in scope:
-                account_id = live.get(account.asset_account)
-                if account_id is None:
+                if account.asset_account not in live:
                     return _fail(
                         f"No asset account named {account.asset_account!r}.",
                         "unconfigured",
                         503,
                     )
-                splits.extend(
-                    split
-                    for group in client.account_transactions(account_id)
-                    for split in group["attributes"]["transactions"]
-                )
+                splits.extend(store.account_transactions(account.asset_account))
                 # §114.2. Out of the index. Everything below needs the account's
                 # deduped rows and the period its statements cover, and both are
                 # a query now rather than a re-read of the whole archive.
@@ -233,8 +223,8 @@ def analysis():
                             ),
                         }
                     )
-    except FireflyError as exc:
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+    except LedgerError as exc:
+        return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)
 
     total_rows = len(splits)
     splits = _splits_within(splits, start, end)
@@ -268,7 +258,7 @@ def analysis():
             "categories": [_slice(s) for s in result.categories],
             "payees": [_slice(s) for s in result.payees],
             "sources": [_slice(s) for s in result.sources],
-            # §64. Firefly's Category, Double and Tag reports — three screens
+            # §64. the ledger's Category, Double and Tag reports — three screens
             # there, one shape here, and all three carry §8/§8.1 because they
             # are computed inside `ledger_analysis` rather than beside it.
             "payeesByCategory": [_breakdown(b) for b in result.payees_by_category],
@@ -343,11 +333,11 @@ def analysis():
 def transactions():
     """Every row in the ledger, searchable. SPEC §61.
 
-    The page passbook never had, and the last routine reason to open Firefly.
-    Firefly calls it the Audit report; here it is just the list.
+    The page passbook never had, and the last routine reason to open the ledger.
+    Elsewhere this is called an audit report; here it is just the list.
 
     **Two sources, each authoritative for what it carries** — the same split as
-    `/analysis`. Money, category and tags come from Firefly, because the rules
+    `/analysis`. Money, category and tags come from the ledger, because the rules
     engine assigns the category at store time (D5). The clock and the raw
     narration come from the statement, because `txn_time` is parsed out of the
     narration (§6.5) and never pushed.
@@ -358,13 +348,10 @@ def transactions():
     that is not there, and §6.6 is the spine of this project. The statement
     sheet keeps its balance column; this does not get one.
     """
-    st = load_settings()
     scope, selected = _account_scope()
     start, end, window = _date_scope()
-    if not st.firefly_token or not scope:
-        return _fail(
-            "FIREFLY_TOKEN is not set, or no account is registered.", "unconfigured", 503
-        )
+    if not scope:
+        return _fail("No account is registered.", "unconfigured", 503)
 
     query = (request.args.get("q") or "").strip().lower()
     want_category = (request.args.get("category") or "").strip()
@@ -384,12 +371,11 @@ def transactions():
 
     rows: list[dict] = []
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            live = {a["attributes"]["name"]: a["id"] for a in client.asset_accounts()}
+        with _ledger() as store:
+            live = {a["name"] for a in store.asset_accounts()}
             archive = current_app.config["ARCHIVE"]
             for account in scope:
-                account_id = live.get(account.asset_account)
-                if account_id is None:
+                if account.asset_account not in live:
                     return _fail(
                         f"No asset account named {account.asset_account!r}.",
                         "unconfigured",
@@ -410,50 +396,46 @@ def transactions():
                     # below stripped the namespace off the LOOKUP — probing a
                     # namespaced dict with a bare key, which misses by
                     # construction. That is §23.1's join bug turned around: a
-                    # pre-migration row whose Firefly external_id is the bare
+                    # pre-migration row whose the ledger external_id is the bare
                     # `20260509000001` silently lost its time of day. Safe
                     # because `mine` is one account's statements, so the bare
                     # id is unambiguous here (§21.1).
                     clocks.setdefault(txn.txn_id, txn.txn_time)
                     narrations.setdefault(txn.txn_id, txn.narration)
 
-                for group in client.account_transactions(account_id):
-                    for split in group["attributes"]["transactions"]:
-                        # Withdrawals and deposits only. Firefly's own audit
-                        # report lists the opening balance too, but it is an
-                        # account fact rather than a transaction: it has no
-                        # payee, no external_id and no Out or In value, so it
-                        # renders as an empty row — and it made this page count
-                        # 114 where `verify-ledger` counts 113, which is the
-                        # kind of off-by-one that gets read as a missing row.
-                        if str(split.get("type") or "") not in ("withdrawal", "deposit"):
-                            continue
-                        external = str(split.get("external_id") or "")
-                        moment = clocks.get(external)
-                        if moment is None and external:
-                            moment = clocks.get(service.txn_id_of(external))
-                        narration = narrations.get(external) or narrations.get(
-                            service.txn_id_of(external), ""
-                        )
-                        rows.append(
-                            {
-                                "id": external or str(split.get("transaction_journal_id") or ""),
-                                "group": str(group["id"]),
-                                "account": account.slug,
-                                "accountLabel": account.display,
-                                "date": str(split.get("date") or "")[:10],
-                                "time": moment.isoformat() if moment else None,
-                                "description": str(split.get("description") or ""),
-                                "category": str(split.get("category_name") or ""),
-                                "counterparty": service._counterparty(split),
-                                "tags": sorted(str(t) for t in (split.get("tags") or [])),
-                                "kind": str(split.get("type") or ""),
-                                "amount": _money(service._split_amount(split)),
-                                "narration": narration,
-                            }
-                        )
-    except FireflyError as exc:
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+                for split in store.account_transactions(account.asset_account):
+                    # Withdrawals and deposits, which is everything the table
+                    # can hold — `kind` has no third value. The previous store
+                    # also returned the opening balance as a row, and it
+                    # rendered with no payee and no Out or In value, making the
+                    # page count one more than `verify-ledger` did. The opening
+                    # balance is a column on the account here.
+                    external = str(split.get("external_id") or "")
+                    moment = clocks.get(external)
+                    if moment is None and external:
+                        moment = clocks.get(service.txn_id_of(external))
+                    narration = narrations.get(external) or narrations.get(
+                        service.txn_id_of(external), ""
+                    )
+                    day = split.get("txn_date")
+                    rows.append(
+                        {
+                            "id": external,
+                            "account": account.slug,
+                            "accountLabel": account.display,
+                            "date": day.isoformat() if day else "",
+                            "time": moment.isoformat() if moment else None,
+                            "description": str(split.get("description") or ""),
+                            "category": str(split.get("category") or ""),
+                            "counterparty": service._counterparty(split),
+                            "tags": sorted(str(t) for t in (split.get("tags") or [])),
+                            "kind": str(split.get("kind") or ""),
+                            "amount": _money(service._split_amount(split)),
+                            "narration": narration,
+                        }
+                    )
+    except LedgerError as exc:
+        return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)
 
     total = len(rows)
     rows = [r for r in rows if _row_in_window(r, start, end)]
@@ -542,7 +524,7 @@ def _row_matches(row: dict, query: str) -> bool:
 
     Includes the RAW narration, which is not rendered in the table: searching
     for a UTR or a bank reference is exactly the case where the display name is
-    no help, and it is the reason this page can replace Firefly's search.
+    no help, and it is the reason this page can replace the ledger's search.
     """
     haystack = (
         f"{row['description']} {row['category']} {row['counterparty']} "

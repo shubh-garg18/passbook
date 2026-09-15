@@ -39,7 +39,7 @@ export type Overview = {
    *  which is a true figure but cannot be reconciled against any one
    *  statement, so `parts` travels with it and the card says so (§21.9). */
   balance: string | null
-  fireflyError: string | null
+  ledgerError: string | null
   account: string | null
   selected: string | null
   parts: { slug: string; label: string; account: string; balance: string | null }[]
@@ -75,7 +75,7 @@ export type Accounts = {
 /** What removing an account would leave behind. SPEC §38. */
 export type Removal = {
   account: AccountSummary
-  /** null when Firefly could not be asked; `countReason` then says why. */
+  /** null when the ledger could not be asked; `countReason` then says why. */
   ledgerRows: number | null
   archiveFiles: number
   countReason: string
@@ -92,7 +92,7 @@ export type Breakdown = { name: string; amount: string; count: number; parts: Sl
  * The Ledger page's charts. SPEC §18.
  *
  * `spend`/`income` are the figures that respect §8 and §8.1; `grossSpend` and
- * `grossIncome` are what Firefly reports by transaction type, kept so the page
+ * `grossIncome` are what the ledger reports by transaction type, kept so the page
  * can show what was excluded rather than quietly differing from the statement.
  */
 export type Analysis = {
@@ -110,12 +110,12 @@ export type Analysis = {
   withdrawals: number
   deposits: number
   categories: Slice[]
-  /** Real spend by counterparty — Firefly's "expense accounts" report, but
+  /** Real spend by counterparty — the ledger's "expense accounts" report, but
    *  through `ledger_analysis` so §8/§8.1's exclusions apply (non-negotiable 9). */
   payees: Slice[]
   /** Counted income by counterparty. The not-earnings deposits are excluded. */
   sources: Slice[]
-  /** One thing and what it is made of. Firefly ships these as three separate
+  /** One thing and what it is made of. Most tools ship these as three separate
    *  report screens (Category, Double, Tag); they are one shape. */
   payeesByCategory: Breakdown[]
   categoriesByPayee: Breakdown[]
@@ -205,7 +205,7 @@ export type PushResult = {
   pushed: number
   /** Skipped because the ledger already holds that transaction, by id (§119). */
   already: number
-  /** Refused by Firefly on its content hash — expected to be 0 since §119. */
+  /** Refused by the ledger on its content hash — expected to be 0 since §119. */
   duplicates: number
   failed: number
   failures: { id: string; message: string }[]
@@ -256,8 +256,8 @@ export type DiffResponse = {
   changes: { path: string; diff: string }[]
   aliasChanges: Record<string, string>
   categoryChanges: Record<string, string>
-  /** What this config would do to rows ALREADY in Firefly, computed before the
-   *  write from the submitted aliases and categories. `null` when Firefly is
+  /** What this config would do to rows ALREADY in the ledger, computed before the
+   *  write from the submitted aliases and categories. `null` when the ledger is
    *  unreachable or unconfigured — writing config works either way. §23. */
   ledger: ReapplyPreview | null
   /** Categories this change would leave with no payees. They keep existing and
@@ -266,10 +266,9 @@ export type DiffResponse = {
 }
 
 export type ReapplyChange = {
+  /** The row's address in the ledger. Empty means it was never matched, and an
+   *  unmatched row is never updated — see `service.sync_ledger`. */
   externalId: string
-  /** The Firefly transaction group. Empty means the row was never matched, and
-   *  an unmatched row is never updated — see `service.sync_ledger`. */
-  groupId: string
   date: string
   amount: string
   kind: 'withdrawal' | 'deposit'
@@ -319,7 +318,7 @@ export type SyncResult = {
   updated: number
   failed: number
   failures: { externalId: string; message: string }[]
-  /** Re-read from Firefly afterwards, not inferred from the request count.
+  /** Re-read from the ledger afterwards, not inferred from the request count.
    *  Anything left needs a re-push — an update cannot create a missing row.
    *  `null` means the re-read itself failed: unverified, which is a third
    *  state and must never render as a pass (non-negotiable 11). */
@@ -344,11 +343,9 @@ export type Artefact = {
 
 export type Status = {
   sync: SyncStatus
-  token: { shapeOk: boolean; expiry: string | null; daysLeft: number | null }
-  firefly: {
-    about: { version: string; api_version: string; driver: string } | null
-    error: string | null
-  }
+  /** Reachability, asked of the ledger rather than inferred from a credential
+   *  being present. `accounts` is null exactly when `error` is not. */
+  store: { accounts: number | null; error: string | null }
   account: { assetAccount: string | null; assertionConfigured: boolean }
   /** SPEC §20. `ok: null` means the check could not be run here — the strip
    *  shows that as a warning, never as a tick. A green light for something never
@@ -423,7 +420,6 @@ export type BackupState = {
  */
 export type LedgerRow = {
   id: string
-  group: string
   account: string
   accountLabel: string
   date: string

@@ -16,7 +16,7 @@ trust.
 > **New here, or not a developer?** → **[What is this?](docs/what-is-this.md)**
 > — the whole idea in plain language, no jargon, two minutes.
 
-Firefly III counts every withdrawal as spending. On a real three-month statement
+Most tools count every withdrawal as spending. On a real three-month statement
 that read **three times** what was actually spent — because moving money to your
 own savings is not spending, and a refund is not income. passbook fixes that, and
 shows you what it excluded instead of hiding it.
@@ -28,12 +28,11 @@ over time, and the rhythm of the week:</sub>
 
 ![Reports](docs/screenshots/reports.png)
 
-<sub>It reads the statement, categorises it, and pushes it into Firefly III,
-which keeps the ledger:</sub>
+<sub>Every row, searchable — by payee, category, amount band, tag or date:</sub>
 
-![The same rows in Firefly III](docs/screenshots/firefly.png)
+![Transactions](docs/screenshots/transactions.png)
 
-<sub>Both generated from `tests/fixtures/statement.xls` — never a real ledger.</sub>
+<sub>All generated from `tests/fixtures/statement.xls` — never a real ledger.</sub>
 
 ## Install
 
@@ -49,12 +48,11 @@ make setup
 one-line Windows equivalent, [listed here](SETUP.md#every-command-on-windows).
 
 That is it. The wizard checks what Docker needs on *your* machine and offers to
-fix it, generates every secret, starts the stack, creates your Firefly account
-and API token, and reads your account number and opening balance out of the
-statement itself.
+fix it, generates every secret, starts the stack, and reads your account number
+and opening balance out of the statement itself.
 
-It asks you three things: a Firefly login to create, a statement to read, and a
-password. **[Full instructions →](SETUP.md)**
+It asks you two things: a statement to read, and a password.
+**[Full instructions →](SETUP.md)**
 
 > **Using Claude Code?** Paste this and it does the whole thing:
 > `Clone https://github.com/shubh-garg18/passbook.git and set it up by following its SETUP.md.`
@@ -103,14 +101,20 @@ wrong number.
   of ten guessed from the fragment alone, **four were wrong**. A rule that never
   fires is worse than no rule, so
   [you write them from your real data](docs/usage.md#writing-categorisation-rules).
-- **Money is `Decimal` everywhere**, including across the HTTP boundary. No
-  floats touch your balance.
+- **Money is `Decimal` everywhere**, including in the database — the amount
+  column is `NUMERIC`, not a float, so nothing can round your balance.
+- **A row cannot be stored twice.** Its identity is the primary key, not a
+  check something could skip. That is not theoretical: the previous ledger
+  decided duplicates on a hash of what was sent, passbook rewrites what it
+  sends whenever you rename a payee, and seven rows once went in twice with
+  nothing raised anywhere.
 - **Backups are drilled, not assumed.** `make dr-drill` rebuilds the whole ledger
   from the encrypted archives on every run.
-- **A rename reaches the rows you already pushed.** Editing a payee used to
+- **A rename reaches the rows you already have.** Editing a payee used to
   change only what *future* imports produced; now it updates the ledger in
-  place, sending only the four fields config owns — never an amount, a date or
-  a type, which is the only reason a rename cannot corrupt anything.
+  place, touching only the four fields config owns. The ledger **refuses** an
+  update that names an amount, a date or a direction — so a rename cannot
+  corrupt anything, by construction rather than by care.
 
 ## Help wanted
 

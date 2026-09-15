@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal
 
 
 from flask import jsonify, request
@@ -13,16 +14,15 @@ from ...config import (
     SUPPORTED_BANKS,
     find_account,
     load_accounts,
-    load_settings,
     save_accounts,
 )
-from ...firefly.client import FireflyError, ValidationFailed
-from ...firefly.push import CURRENCY
+from ...store import LedgerError
+from ...push import CURRENCY
 from .. import auth as A
 
 from ...models import StatementMeta  # noqa: F401  (a string annotation)
 from ._base import (
-    _client,
+    _ledger,
     _fail,
     api,
     log,
@@ -68,7 +68,7 @@ def rename_account(slug: str):
     This is not §23.4's problem in miniature. A *payee* rename moves the row out
     from under its own categorisation rule, because rules match the display
     name; an *account* name is matched by nothing. Nothing keys on it, nothing
-    is pushed with it, and Firefly never sees it. It changes what the switcher,
+    is pushed with it, and the ledger never sees it. It changes what the switcher,
     the masthead and the Payees caption call this account, and that is all.
 
     An empty name is a reset, not an error: it puts the account back to
@@ -110,7 +110,7 @@ def account_removal(slug: str):
     """What removing this account would and would not do. SPEC §38.
 
     Removal is a **registry** edit, not a ledger one. Everything already in
-    Firefly stays, `archive/` stays, and passbook simply stops routing to it
+    The rows stay, `archive/` stays, and passbook simply stops routing to it
     and stops managing it: `reapply_preview` iterates the registry, so those
     rows fall out of every comparison and nothing will ever touch them again.
 
@@ -135,14 +135,12 @@ def account_removal(slug: str):
 
     rows: int | None = None
     reason = ""
-    st = load_settings()
-    if st.firefly_token:
-        try:
-            with _client(st.firefly_url, st.firefly_token) as client:
-                rows = service.rows_in_ledger(client, account.asset_account)
-        except FireflyError as exc:
+    try:
+        with _ledger() as store:
+            rows = service.rows_in_ledger(store, account.asset_account)
+    except LedgerError as exc:
             # Not fatal. The count sharpens the warning; it is not the warning,
-            # and refusing to show the screen because Firefly is asleep would
+            # and refusing to show the screen because the ledger is asleep would
             # make this the one management action that needs the stack up.
             reason = f"The ledger store did not answer, so the row count is unknown: {exc}"
 
@@ -198,20 +196,17 @@ def account_candidates():
     """What a new account could be attached to. SPEC §26.
 
     Registering from the UI needs two things the operator should not have to
-    look up: which Firefly asset accounts exist, and which are already claimed.
+    look up: which asset accounts exist, and which are already claimed.
     Two registry accounts cannot share one asset account — they would merge in
-    Firefly whatever the registry said — so the claimed ones are returned marked
+    The ledger whatever the registry said — so the claimed ones are returned marked
     rather than hidden, because "why is my account not listed" is a worse
     question than seeing it greyed out.
     """
-    st = load_settings()
-    if not st.firefly_token:
-        return _fail("FIREFLY_TOKEN is not set.", "unconfigured", 503)
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            names = [a["attributes"]["name"] for a in client.asset_accounts()]
-    except FireflyError as exc:
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+        with _ledger() as store:
+            names = [a["name"] for a in store.asset_accounts()]
+    except LedgerError as exc:
+        return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)
 
     taken = {a.asset_account for a in load_accounts()}
     return jsonify(
@@ -225,25 +220,21 @@ def account_candidates():
 @api.post("/accounts/asset")
 @A.login_required
 def create_asset_account():
-    """Create the Firefly asset account, so nobody has to leave passbook. §26.7.
+    """Create the asset account, so nobody has to leave passbook. §26.7.
 
-    Registering a second account needed a Firefly asset account to exist first,
+    Registering a second account needed an asset account to exist first,
     which meant a trip to another app, three menus, and remembering to set the
     currency. That is the sort of step that stops a person adding their second
     account at all.
 
-    Two guards, both of which Firefly would enforce anyway but which produce a
+    Two guards, both of which the ledger would enforce anyway but which produce a
     much worse message from over there:
 
       * a name already in use — `uniqueAccountForUser` on the pinned tag;
       * a name already claimed by a registered passbook account, which is a
         different and more confusing failure (§21.1: two accounts sharing one
-        asset account merge in Firefly whatever the registry says).
+        asset account merge in the ledger whatever the registry says).
     """
-    st = load_settings()
-    if not st.firefly_token:
-        return _fail("FIREFLY_TOKEN is not set.", "unconfigured", 503)
-
     name = " ".join(str((request.get_json(silent=True) or {}).get("name") or "").split())
     if not name:
         return _fail("Give the account a name.", "invalid", 422)
@@ -254,64 +245,48 @@ def create_asset_account():
         return _fail(f"{name!r} is already claimed by a registered account.", "invalid", 422)
 
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            if any(a["attributes"]["name"] == name for a in client.asset_accounts()):
+        with _ledger() as store:
+            if any(a["name"] == name for a in store.asset_accounts()):
                 return _fail(f"The ledger already has an account called {name!r}.", "invalid", 422)
-            name = _store_asset_account(client, name)
-    except ValidationFailed as exc:
-        return _fail(f"The ledger refused it: {exc}", "invalid", 422)
-    except FireflyError as exc:
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+            name = _store_asset_account(store, name)
+    except LedgerError as exc:
+        return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)
 
     return jsonify({"ok": True, "name": name})
 
 
-def _store_asset_account(client, name: str, opening: "StatementMeta | None" = None) -> str:
-    """Create one asset account and return the name Firefly settled on. §56.1.
+def _store_asset_account(store, name: str, opening: "StatementMeta | None" = None) -> str:
+    """Create one asset account and return its name.
 
-    Shared by the explicit button and by registration, which creates it as part
-    of registering rather than making the operator do it first: *"I dont want to
-    create manually in Firefly again as I upload the statement in UI."*
+    Created here rather than making the operator do it in another application
+    first: *"I dont want to create manually in the ledger again as I upload the
+    statement in UI."*
 
-    **The opening balance comes from the statement, and §95 is why.** Without
-    it Firefly starts the account at zero, and every figure on it is short by
-    the opening amount forever — the account balances against nothing, and the
-    §20 balance check fails on a ledger that is otherwise perfectly correct.
+    **The opening balance comes from the statement.** Without it the account
+    starts at zero and every figure on it is short by the opening amount
+    forever — the account balances against nothing, and the ledger check fails
+    on a ledger that is otherwise perfectly correct. It was caught the only way
+    it could be: `verify-ledger` reported `opening balance MISSING` on a freshly
+    registered account with no rows in it yet, before a single transaction had
+    been pushed.
 
-    It was caught the only way it could be: `verify-ledger` reported
-    `opening balance MISSING` on a freshly registered account with no rows in
-    it yet, before a single transaction had been pushed. The registration flow
-    created the account and never told it where the money started.
+    Dated the day BEFORE the period starts. On the first day it would sit
+    alongside that day's transactions, and the opening balance is the state
+    before any of them, not one of them.
 
-    `opening_balance` and `opening_balance_date` are `required_with` each other
-    on the pinned tag (`Account/StoreRequest.php` line 107), so they go
-    together or not at all — and `opening` being None is a legitimate case: the
-    explicit "create in Firefly" button has no statement to read one from.
+    `opening` being None is legitimate — the explicit "create the account"
+    button has no statement to read one from — and the account then opens at
+    zero, which `verify-ledger` reports rather than hides.
     """
-    payload = {
-        "name": name,
-        "type": "asset",
-        # required_if:type,asset — an asset account without a role is
-        # rejected by the validator on the pinned tag.
-        "account_role": "defaultAsset",
-        "currency_code": CURRENCY,
-        "include_net_worth": True,
-        "active": True,
-    }
     if opening is not None:
-        # The day BEFORE the period starts. Dated on the first day it would sit
-        # alongside that day's transactions, and Firefly would order it
-        # arbitrarily among them — the opening balance is the state before any
-        # of them, not one of them.
-        payload["opening_balance"] = str(opening.opening_balance)
-        payload["opening_balance_date"] = (
-            opening.period_from - timedelta(days=1)
-        ).isoformat()
+        balance, on = opening.opening_balance, opening.period_from - timedelta(days=1)
+    else:
+        balance, on = Decimal("0.00"), date.today()
 
-    created = client.store_account(payload)
+    store.store_account(name, balance, on, CURRENCY)
     log.info(
-        "created Firefly asset account %r%s",
+        "created asset account %r%s",
         name,
-        f" opening {opening.opening_balance}" if opening else " (no opening balance)",
+        f" opening {balance}" if opening is not None else " (no opening balance)",
     )
-    return (created.get("data") or {}).get("attributes", {}).get("name", name)
+    return name

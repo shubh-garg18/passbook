@@ -70,9 +70,11 @@ def test_the_route_count_is_the_one_the_split_produced():
     and after it — a dropped import in `__init__.py` once left 3. Creating and
     removing a category, the attribution split and the earnings definition took
     it to 44, taking a database backup from the UI to 46, the reminder to 51,
-    and emailed sign-in recovery to 53 — which is full parity with the private
-    repository this one is released from."""
-    assert len(declared()) == 53
+    and emailed sign-in recovery to 53. Moving the ledger in-house took it back
+    to 52: `/bootstrap` pushed `rules.yaml` into a separate rules engine, and
+    there is no separate rules engine — the rules are applied when a row is
+    written."""
+    assert len(declared()) == 52
 
 
 @pytest.mark.parametrize(

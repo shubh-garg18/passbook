@@ -1,7 +1,7 @@
 /* Preview: what is about to be pushed. SPEC §16.1.
  *
  * Rows are shown here — approved in Stage 1 — but **no category column.**
- * Rules are applied by Firefly at store time, so at preview no category
+ * Rules are applied by the ledger at store time, so at preview no category
  * exists. Showing one would be a guess, and D10 measured a 40% error rate on
  * guessing from a truncated token.
  *

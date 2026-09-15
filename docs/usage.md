@@ -11,9 +11,9 @@
 
 ## What the figures mean
 
-Firefly counts **every withdrawal as spend and every deposit as income, by
-type**. Measured on one real three-month ledger, read that way it said **three
-times** the true spend and **1.6 times** the true earnings. That is not a
+The naive reading counts **every withdrawal as spend and every deposit as
+income, by type**. Measured on one real three-month ledger, read that way it
+said **three times** the true spend and **1.6 times** the true earnings. That is not a
 rounding error, and a chart drawn on the naive numbers looks entirely reasonable.
 
 Two rules fix it, and both live in your own `config/rules.yaml`:
@@ -97,20 +97,12 @@ and the drift, not just "mismatch".
 **Why it exists.** A purge plus an interrupted re-push once left the ledger
 holding **21 of 93 rows** with a *self-consistent* balance, and every check that
 existed passed for seven hours. The continuity invariant validates a statement
-*file*; nothing validated Firefly. This catches that corruption whatever caused
-it — an interrupted purge, a row deleted by hand, a restore of the wrong dump.
-Full incident in SPEC §19, the checks in §20.
+*file*; nothing validated the ledger. This catches that corruption whatever
+caused it — a row deleted by hand, a restore of the wrong dump, an import that
+stopped halfway.
 
-One check needs a database query the API cannot answer, so the web UI shows it as
-**unverified** in amber rather than green. A tick for something never checked is
-a lie.
-
-**If it reports an unfinished purge**, that is a *stated* state rather than a
-mystery — intent is recorded before the first delete:
-
-```bash
-uv run passbook purge --resume     # finishes, and clears the record only once §20 passes
-```
+A check that cannot see something reports **unverified** in amber rather than
+green. A tick for something never checked is a lie.
 
 ---
 
@@ -140,15 +132,14 @@ Most traffic is person-to-person UPI, so most of your rules will be about people
 be the token **exactly as the bank emits it**, double spaces included — quote
 those or yaml eats them and the alias silently never fires.
 
-An alias changes the display name only. The raw narration still reaches Firefly's
-notes verbatim, and `payee` keeps the bank's token, so nothing rewrites source
-data.
+An alias changes the display name only. The raw narration is still stored
+verbatim, and `payee` keeps the bank's token, so nothing rewrites source data.
 
 ### Re-applying after an edit
 
-Rules and aliases apply **at push time**, so editing them does not reach rows
-already in Firefly. Renaming a payee on the Payees page now writes those rows in
-the same action; **Re-apply** shows you what would move before it does.
+Rules and aliases apply **when a row is written**, so editing them does not
+reach rows already stored. Renaming a payee on the Payees page writes those rows
+in the same action; **Re-apply** shows you what would move before it does.
 
 From a terminal:
 
@@ -157,10 +148,11 @@ uv run passbook resync            # dry run: what config would change
 uv run passbook resync --confirm  # write it, in place
 ```
 
-**`resync` deletes nothing and needs no backup.** It sends the description, the
-category, the payee account on the other side, and the tags your rules derive —
-and nothing else. Amount, date and the raw narration are not in the request, so
-they cannot move. Running it twice is the same as running it once.
+**`resync` deletes nothing and needs no backup.** It writes the description,
+the category, the counterparty, and the tags your rules derive — and nothing
+else. The ledger **refuses** an update naming an amount, a date or a direction,
+so they cannot move even by mistake. Running it twice is the same as running it
+once.
 
 It also cannot fix everything, and says so instead of implying otherwise: a row
 that is **missing** from the ledger, or one whose amount is wrong, comes from
@@ -170,12 +162,17 @@ the statement. Those need a rebuild:
 make backup                     # always — the next step is a delete
 uv run passbook purge           # dry run: what would go
 uv run passbook purge --confirm # prompts first
-uv run passbook purge --resume  # pushes every archived statement back
+uv run passbook sync            # pushes every archived statement back
 ```
 
 `purge` only removes rows carrying an `external_id`, which is exactly what
-passbook pushed — your opening balance has none, so it is never a candidate.
-That is structural, not a date guard. There is deliberately no `make purge`.
+passbook wrote — your opening balance is a column on the account, not a row, so
+it is never a candidate. That is structural, not a date guard. There is
+deliberately no `make purge`.
+
+There is no `--resume`, and nothing was dropped: the delete used to be thousands
+of separate requests that could die halfway, so an intent file was written
+first. It is one statement in one transaction now.
 
 > **"All 0 transactions already match" is not a pass.** Zero *compared* and zero
 > *differing* are different answers, and a version of this once reported the
@@ -206,7 +203,7 @@ uv run passbook upgrade --check    # what is pending and why; exits 3 if any
 **The version marker is a record, not the authority.** `config/schema-version`
 holds what this install last recorded, and nothing trusts it — every migration
 decides for itself by looking at the data. Delete the file and the worst that
-happens is one extra check. A migration that *cannot answer* — Firefly
+happens is one extra check. A migration that *cannot answer* — the ledger
 unreachable, say — is reported as pending with the reason, never as "nothing to
 do".
 
@@ -234,7 +231,7 @@ chain is the one thing this project will not fudge. The statement sheet keeps
 its balance; a search result does not get one.
 
 **Reports** is the same analysis cut five ways — by category, by payee, by tag,
-over time, and the rhythm of the week and the hour. Firefly ships these as
+over time, and the rhythm of the week and the hour. Most tools ship these as
 separate screens; they are one shape, so they are one page with a control.
 
 **Payees** is where decisions get made, and where the three config edits live

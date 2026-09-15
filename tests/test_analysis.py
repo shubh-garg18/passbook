@@ -6,8 +6,8 @@ one real three-month ledger, the naive by-type reading was **three times** the
 true spend and **1.6 times** the true earnings, and a chart of the naive numbers
 looks entirely reasonable. So every branch of the rule gets a test.
 
-No network: the function takes Firefly's split dicts as data, which is the whole
-reason it takes them as data.
+No network: the function takes ledger rows as data, which is the whole reason
+it takes them as data.
 """
 
 from __future__ import annotations
@@ -43,19 +43,19 @@ def split(
     when: str = "2026-06-10",
     external_id: str | None = None,
 ) -> dict:
-    """One Firefly transaction split, in the shape the API actually returns.
+    """One ledger row, in the shape the store returns.
 
-    Field names read off the live v6.6.6 response, not from memory: `type`,
-    `amount` as an over-precise string, `category_name`, `tags`, `external_id`,
-    and a `date` carrying a timezone offset.
+    The names are the columns: `kind`, a `Decimal` amount, `category`, `tags`,
+    `external_id`, and a `txn_date` that is a `date` rather than a timestamp
+    string that had to be sliced to ten characters at four call sites.
     """
     return {
-        "type": kind,
-        "amount": f"{Decimal(amount):.12f}",
-        "category_name": category,
+        "kind": kind,
+        "amount": Decimal(amount),
+        "category": category,
         "tags": list(tags),
         "external_id": external_id,
-        "date": f"{when}T00:00:00+05:30",
+        "txn_date": date.fromisoformat(when),
     }
 
 
@@ -109,7 +109,7 @@ def test_a_tag_can_never_remove_a_withdrawal_from_spend():
 
 
 def test_an_opening_balance_is_neither_spend_nor_income():
-    """Firefly's own type for it. It is on the account and is not a transaction
+    """the previous store's type for it. It is on the account and is not a transaction
     the bank made — `purge` excludes it structurally for the same reason (§7.3)."""
     result = service.ledger_analysis(
         [
@@ -142,7 +142,7 @@ def test_categories_come_back_largest_first_and_unruled_rows_are_named():
 
 
 def test_a_rollup_totals_the_tag_and_lists_the_categories_that_carry_it():
-    """Two sources for one number, on purpose: the total is the tag as Firefly
+    """Two sources for one number, on purpose: the total is the tag as the ledger
     stored it, the segments are the categories tagged in rules.yaml. If they ever
     disagree the stacked bar will not fill, which is visible."""
     result = service.ledger_analysis(
@@ -180,7 +180,7 @@ def test_an_excluded_category_stays_out_of_its_rollup_too():
 
 def test_the_clock_comes_from_the_statement_not_from_the_ledger():
     """`txn_time` is parsed out of the narration (§6.5) and never pushed, so
-    Firefly has no idea what time of day anything happened. The join is on
+    a bank statement has no time column. The join is on
     `external_id`, which is the bank's own transaction id (§6.1)."""
     result = service.ledger_analysis(
         [
@@ -237,7 +237,7 @@ def test_a_month_ending_one_day_short_is_still_partial():
 
 
 def test_every_amount_is_a_decimal_and_the_over_precision_is_quantised():
-    """Firefly sends `'48.000000000000'`. Non-negotiable #1 does not
+    """the ledger sends `'48.000000000000'`. Non-negotiable #1 does not
     stop at the process boundary, so nothing here ever becomes a float."""
     result = service.ledger_analysis(
         [split("withdrawal", "48.00", category="Shopping")], rules=RULES
@@ -286,7 +286,7 @@ def test_not_spend_and_the_rollups_are_read_from_config_not_hardcoded():
 
 @pytest.fixture
 def fixture_splits(parsed):
-    """The 93 fixture rows as Firefly splits.
+    """The 93 fixture rows as the ledger splits.
 
     Amounts, dates and ids come from `tests/fixtures/statement.xls` through the
     parser — §16.6: every row shown or asserted anywhere comes from the fixture,
@@ -483,15 +483,20 @@ def test_an_excluded_category_never_reaches_the_month_grid():
 
 
 def test_payees_and_sources_carry_the_exclusions_like_every_other_figure():
-    """Firefly's own expense/revenue report counts everything. This must not."""
+    """A by-type expense/revenue report counts everything. This must not.
+
+    One `counterparty` column, rather than whichever of source/destination the
+    direction did not use — which is the version of this a reader had to work
+    out per row.
+    """
     rows = [
-        {**split("withdrawal", "500.00", category="Investments"), "destination_name": "Broker"},
-        {**split("withdrawal", "30.00", category="Shopping"), "destination_name": "Shop"},
-        {**split("withdrawal", "20.00", category="Shopping"), "destination_name": "Shop"},
-        {**split("deposit", "900.00", category="Salary"), "source_name": "Employer"},
+        {**split("withdrawal", "500.00", category="Investments"), "counterparty": "Broker"},
+        {**split("withdrawal", "30.00", category="Shopping"), "counterparty": "Shop"},
+        {**split("withdrawal", "20.00", category="Shopping"), "counterparty": "Shop"},
+        {**split("deposit", "900.00", category="Salary"), "counterparty": "Employer"},
         {
             **split("deposit", "50.00", tags=("not-earnings",)),
-            "source_name": "Self",
+            "counterparty": "Self",
         },
     ]
     result = service.ledger_analysis(rows, rules=RULES)

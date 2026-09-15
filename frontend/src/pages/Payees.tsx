@@ -264,11 +264,11 @@ export function Payees() {
  * The reconcile step also appears immediately after a write (see
  * `PayeesDiff`), but that only helps the session that made the change. This is
  * the case that actually went wrong: payees edited last week, config written,
- * the ledger at :8080 still showing the old names, and no nav item left to
+ * The ledger still showing the old names, and no page left to
  * remind anyone. Now the page that owns the config says so on sight — and
  * fixes it here, because the fix is one non-destructive request.
  *
- * Silent when it cannot ask — an unreachable or unconfigured Firefly is not a
+ * Silent when it cannot ask — an unreachable or unconfigured the ledger is not a
  * problem for the page whose job is editing a yaml file.
  */
 function PendingReapply({ asked, onAsk }: { asked: boolean; onAsk: () => void }) {

@@ -12,9 +12,8 @@ from ... import service
 from ...config import (
     RegistryError,
     load_accounts,
-    load_settings,
 )
-from ...firefly.client import FireflyError, ValidationFailed
+from ...store import LedgerError
 from ...loaders import UnsupportedFormat, sniff
 from ...loaders._table import ParseError
 from ...loaders.pdf import PdfPasswordRequired, PdfPasswordWrong
@@ -24,7 +23,7 @@ from .. import auth as A
 from ._base import (
     ACCEPTED_SNIFF,
     MAX_UPLOAD_BYTES,
-    _client,
+    _ledger,
     _fail,
     _parsed,
     _pending_password,
@@ -163,32 +162,27 @@ def accounts_add():
             }
         )
 
-    # **Create the Firefly side here, if it is not there.** Registering an
+    # **Create the ledger side here, if it is not there.** Registering an
     # account and giving it somewhere to post are one intention, and splitting
     # them made the operator go and do half of it by hand: *"I dont want to
-    # create manually in Firefly again as I upload the statement in UI."*
+    # create manually in the ledger again as I upload the statement in UI."*
     #
-    # Only when it does not already exist. Naming an account Firefly already
+    # Only when it does not already exist. Naming an account the ledger already
     # has attaches to it — that is the operator pointing at something they made
     # on purpose, and inventing a second one beside it would be the wrong kind
     # of helpful.
     made_asset = False
-    st = load_settings()
-    if not st.firefly_token:
-        return _fail("FIREFLY_TOKEN is not set.", "unconfigured", 503)
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            if not any(a["attributes"]["name"] == asset for a in client.asset_accounts()):
+        with _ledger() as store:
+            if not any(a["name"] == asset for a in store.asset_accounts()):
                 # §95. The statement is right here and it knows where the
                 # money started; not passing it is what left a registered
                 # account balancing against zero.
-                asset = _store_asset_account(client, asset, parsed.meta)
+                asset = _store_asset_account(store, asset, parsed.meta)
                 made_asset = True
-    except ValidationFailed as exc:
-        return _fail(f"The ledger refused the new account: {exc}", "invalid", 422)
-    except FireflyError as exc:
+    except LedgerError as exc:
         # Nothing has been written to the registry yet, so this is a clean stop.
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+        return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)
 
     try:
         account = service.register_from_statement(

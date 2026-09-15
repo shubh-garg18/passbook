@@ -1,6 +1,6 @@
 /* The date window the Ledger and Payees are read through. SPEC §25.
  *
- * Firefly has one and the two are read side by side, but the reason it is here
+ * The ledger has one and the two are read side by side, but the reason it is here
  * is Payees: deciding on the eleven tokens that appeared last month is a task
  * with an end, and scrolling the same fifty-nine every week hunting for the new
  * ones is not.

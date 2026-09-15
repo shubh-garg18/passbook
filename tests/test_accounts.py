@@ -148,7 +148,7 @@ def test_an_unregistered_account_is_refused_and_says_what_is_known(two_accounts)
 
 def test_refusing_is_the_default_when_the_registry_is_not_empty(tmp_path, monkeypatch):
     """Auto-registration is for the FIRST account only (§21.3). Account two is an
-    explicit act, because it also needs a Firefly asset account chosen — and
+    explicit act, because it also needs an asset account chosen — and
     `doctor` has refused to guess between several since §7.2."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config").mkdir()
@@ -214,19 +214,17 @@ def test_ids_are_read_tolerantly(external_id, txn_id, slug):
     assert service.is_namespaced(external_id) is (slug is not None)
 
 
-def test_pushes_are_namespaced_but_a_bare_asset_account_still_works():
-    from passbook.firefly.push import build_payload
+def test_writes_are_namespaced_but_a_bare_asset_account_still_works():
+    from passbook.push import build_split
 
     _, transactions = xls.load(XLS_FIXTURE)
     txn = transactions[0]
-    assert build_payload(txn, account())["transactions"][0]["external_id"] == (
-        f"canara-1111-{txn.txn_id}"
-    )
+    assert build_split(txn, account())["external_id"] == f"canara-1111-{txn.txn_id}"
     # The DR drill passes two env vars into a recovered container and nothing
     # else; that path must keep working.
-    legacy = build_payload(txn, "Legacy Asset")["transactions"][0]
+    legacy = build_split(txn, "Legacy Asset")
     assert legacy["external_id"] == txn.txn_id
-    assert legacy["source_name"] == "Legacy Asset"
+    assert legacy["account"] == "Legacy Asset"
 
 
 # --- the registry file -------------------------------------------------------
@@ -253,8 +251,8 @@ def test_a_duplicate_account_number_is_refused_and_masked_in_the_message():
     assert "****1111" in str(caught.value)
 
 
-def test_two_accounts_cannot_share_one_firefly_asset_account():
-    """They would merge in Firefly no matter what the registry said."""
+def test_two_accounts_cannot_share_one_the_ledger_asset_account():
+    """They would merge in the ledger no matter what the registry said."""
     with pytest.raises(RegistryError, match="share asset_account"):
         parse_accounts(
             {
@@ -313,7 +311,7 @@ def test_no_env_vars_and_no_file_means_no_accounts(tmp_path, monkeypatch):
 
 
 # --- the API, scoped ---------------------------------------------------------
-# SPEC §21.9. These use the web test client; Firefly is faked, as everywhere else.
+# SPEC §21.9. These use the web test client; the ledger is faked, as everywhere else.
 
 
 @pytest.fixture
@@ -365,40 +363,41 @@ def two_account_app(tmp_path, monkeypatch):
     return app, client
 
 
-def _fake_firefly_two(monkeypatch, per_account):
-    """Firefly holding `per_account[asset_account] -> [splits]`.
+def _fake_ledger_two(monkeypatch, per_account):
+    """A ledger holding `per_account[asset_account] -> (balance, [rows])`.
 
-    Patched on `_base`, which since §107 is the one module a store client is
-    ever constructed in — the package attribute is not a seam, because a route
-    resolves the name in its own module's globals.
+    Patched on `_base`, the one module a store is ever opened in — the package
+    attribute is not a seam, because a route resolves the name in its own
+    module's globals.
     """
     from passbook.web.api import _base as api_base
 
     class Fake(StoreDouble):
-        def close(self):
-            pass
-
         def asset_accounts(self):
             return [
-                {"id": str(i + 1), "attributes": {"name": name, "current_balance": bal}}
-                for i, (name, (bal, _)) in enumerate(per_account.items())
+                {"name": name, "current_balance": bal, "currency": "INR"}
+                for name, (bal, _) in per_account.items()
             ]
 
-        def account_transactions(self, account_id):
-            name = list(per_account)[int(account_id) - 1]
-            return [{"attributes": {"transactions": per_account[name][1]}}]
+        def account_transactions(self, account):
+            return per_account[account][1]
 
-    monkeypatch.setattr(api_base, "FireflyClient", lambda *a, **k: Fake())
+        def identities(self, account):
+            return {r["external_id"] for r in per_account.get(account, (None, []))[1]}
+
+    monkeypatch.setattr(api_base, "open_ledger", lambda *a, **k: Fake())
 
 
 def _split(external_id, amount="10", kind="withdrawal", category="Shopping"):
     return {
-        "type": kind,
-        "amount": f"{amount}.000000000000",
-        "category_name": category,
+        "kind": kind,
+        "amount": Decimal(amount),
+        "category": category,
         "tags": [],
         "external_id": external_id,
-        "date": "2026-06-10T00:00:00+05:30",
+        "txn_date": date(2026, 6, 10),
+        "description": "",
+        "counterparty": "",
     }
 
 
@@ -435,7 +434,7 @@ def test_a_single_account_install_is_told_there_is_no_switcher(one_account_clien
 
 def test_the_analysis_is_scoped_and_all_accounts_combines(two_account_app, monkeypatch):
     _, client = two_account_app
-    _fake_firefly_two(
+    _fake_ledger_two(
         monkeypatch,
         {
             "First Asset": ("100.00", [_split("canara-1111-20260509000001", "40")]),
@@ -459,7 +458,7 @@ def test_the_balance_sums_across_accounts_and_shows_the_parts(two_account_app, m
     by the client, and the parts travel with it — a sum reconciles against no
     statement, unlike every other balance this app shows."""
     _, client = two_account_app
-    _fake_firefly_two(
+    _fake_ledger_two(
         monkeypatch,
         {"First Asset": ("100.00", []), "Second Asset": ("50.50", [])},
     )
@@ -487,7 +486,7 @@ def test_an_unknown_slug_falls_back_rather_than_erroring(two_account_app, monkey
     """A selection left in a browser after an account is removed must show data,
     not a broken page."""
     _, client = two_account_app
-    _fake_firefly_two(monkeypatch, {"First Asset": ("1.00", []), "Second Asset": ("2.00", [])})
+    _fake_ledger_two(monkeypatch, {"First Asset": ("1.00", []), "Second Asset": ("2.00", [])})
     body = client.get("/api/overview?account=nope").get_json()
     assert body["selected"] == "canara-1111"
 

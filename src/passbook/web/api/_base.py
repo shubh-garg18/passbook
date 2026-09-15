@@ -13,10 +13,10 @@ from decimal import Decimal
 
 from flask import Blueprint, g, has_app_context, jsonify, session
 
-# `FireflyError` is re-exported by the package and `service` is reached
-# through it by tests and by `app.py`; neither is used *here*, which is why
-# autoflake would remove them.
-from ...firefly.client import FireflyClient, FireflyError  # noqa: F401
+# `LedgerError` is re-exported by the package and `service` is reached through
+# it by tests and by `app.py`; neither is used *here*, which is why autoflake
+# would remove them.
+from ...store import LedgerError, open_ledger  # noqa: F401
 from ... import service  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -64,43 +64,44 @@ def _txn(t) -> dict:
 
 
 @contextmanager
-def _client(url: str, token: str):
-    """The ledger store client for THIS request, shared by everything in it.
+def _ledger():
+    """The ledger store for THIS request, shared by everything in it.
 
-    **Measured.** A page load asks three endpoints at once and each built its
-    own client; `/status` built two by itself, one for the version and one
-    inside the integrity check. Opening a client costs ~90ms and
-    `asset_accounts()` — memoised *for the life of a client* — costs ~230ms, so
-    every extra client paid both again for an answer it already had. On this
-    machine, against two registered accounts:
+    **Measured, on the arrangement this replaces.** A page load asks three
+    endpoints at once and each opened its own connection to the ledger;
+    `/status` opened two by itself, one for the version and one inside the
+    integrity check. Opening cost ~90ms and the account listing — memoised for
+    the life of one store — cost ~230ms, so every extra store paid both again
+    for an answer it already had:
 
-        /api/overview      398ms   1 client   1 round trip
-        /api/analysis      887ms   1 client   2 round trips
-        /api/status       1034ms   2 clients  3 round trips
+        /api/overview      398ms   1 store   1 round trip
+        /api/analysis      887ms   1 store   2 round trips
+        /api/status       1034ms   2 stores  3 round trips
 
     Sharing per request is not a cache with a timeout on it — there is nothing
-    to go stale, because a request cannot outlive itself. It is the same
-    lifetime `asset_accounts` already documents; it just was not being kept.
+    to go stale, because a request cannot outlive itself.
 
     Yields rather than returns so the call sites keep their `with` shape. The
-    client is closed by the app-context teardown, not here: closing it at the
-    end of the first block would give the second block a dead connection pool.
+    store is closed by the app-context teardown, not here: closing it at the
+    end of the first block would give the second block a dead connection.
 
     Outside an app context — a script importing this module — there is no `g`
-    to hang it on, so one is built and closed the old way.
+    to hang it on, so one is opened and closed the old way.
     """
     if not has_app_context():
-        with FireflyClient(url, token) as client:
-            yield client
+        store = open_ledger()
+        try:
+            yield store
+        finally:
+            store.close()
         return
 
     cache = getattr(g, "_store_clients", None)
     if cache is None:
         cache = g._store_clients = {}
-    key = (url, token)
-    if key not in cache:
-        cache[key] = FireflyClient(url, token)
-    yield cache[key]
+    if "ledger" not in cache:
+        cache["ledger"] = open_ledger()
+    yield cache["ledger"]
 
 
 def close_clients(_exception=None) -> None:

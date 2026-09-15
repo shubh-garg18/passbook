@@ -1,7 +1,7 @@
 /* Reconciling the ledger with the config. SPEC §23, §15.2, §18.
  *
  * Aliases and rules are applied at PUSH time, so editing config cannot reach
- * rows already in Firefly. There are two ways to reach them, and for a long
+ * rows already in the ledger. There are two ways to reach them, and for a long
  * time only the second one existed:
  *
  *   1. **Update them.** Three fields change on rows that already exist, so
@@ -214,7 +214,7 @@ export function ReconcileCall({
  * Nothing was compared — which is not the same as nothing differing.
  *
  * Stated in ochre, because it is the shape of the bug this phase fixed: rows
- * exist in Firefly and statements exist in `archive/`, but the join between
+ * exist in the ledger and statements exist in `archive/`, but the join between
  * them produced no pairs. It says what to check rather than implying all is
  * well, and it deliberately offers no button: there is nothing to update, and
  * an update is not the remedy for a ledger nobody could read.

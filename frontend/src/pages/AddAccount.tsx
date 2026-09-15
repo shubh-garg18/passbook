@@ -217,20 +217,20 @@ export function AddAccount() {
             </Notice>
           ) : (
             <>
-              {/* §93. "why firefly name there" — because this field names the
-                  account rows are POSTED into, and that store is Firefly.
+              {/* §93. "why the ledger name there" — because this field names the
+                  account rows are POSTED into, and that store is the ledger.
                   The operator should not have to know that: it is an
                   implementation detail of where the ledger lives, and every
                   other page stopped naming it long ago. The field is "Ledger
                   account name" now. The value it holds is unchanged — it is
                   still `asset_account` in `accounts.yaml` and still the name
-                  Firefly matches on — and the code comments still say Firefly,
+                  The ledger matches on — and the code comments still say so,
                   because that is what a reader of the code needs to know.
 
-                  SPEC §56.1. This was two steps: create the Firefly account,
+                  SPEC §56.1. This was two steps: create the ledger account,
                   then choose it. They are one intention, and splitting them
                   sent the operator off to do half of it by hand — "I dont want
-                  to create manually in Firefly again as I upload the statement
+                  to create manually in the ledger again as I upload the statement
                   in UI". Registering now creates it if it does not exist, so
                   this is a name with a sensible default, not a decision. */}
               <div className="fields">

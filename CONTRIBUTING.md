@@ -23,7 +23,7 @@ your statement.
    loudly with the row index. **Never soften or skip this check to make a test
    pass.**
 4. **Never log or commit** the account number in full, the customer ID, or the
-   Firefly token. Mask account numbers to last 4.
+   database password. Mask account numbers to last 4.
 5. **The customer ID is a credential** wherever it appears — including inside
    `PMSBY` narration strings.
 6. **Nothing under `inbox/`, `archive/`, `backups/`, or `.env` gets committed.**
@@ -34,13 +34,14 @@ your statement.
    `passbook payees` output. SPEC D10.
 9. **Never total the ledger by hand.** Every spend or earnings figure — a card,
    a chart, a CLI line — comes from `service.ledger_analysis`, which applies
-   SPEC §8/§8.1. Firefly counts every withdrawal as spend and every deposit as
-   income *by type*; measured on one real three-month ledger, that read **three
-   times** the true spend and **1.6 times** the true earnings. Investments,
-   Transfers, Credit Card and Verification are movement, not spending
-   (`not_spend` in `config/rules.yaml`); `not-earnings`-tagged deposits are
-   money coming back, not earned. A naive sum is not approximately right, and it
-   looks fine.
+   SPEC §8/§8.1. Counting every withdrawal as spend and every deposit as income
+   *by type* read, on one real three-month ledger, **three times** the true
+   spend and **1.6 times** the true earnings. Which categories are movement
+   rather than spending is **`not_spend` in `config/rules.yaml`, and it is the
+   operator's list, not a constant** — never quote it from a doc, because every
+   version of every doc that wrote it down was wrong within a release.
+   `not-earnings`-tagged deposits are money coming back, not earned. A naive sum
+   is not approximately right, and it looks fine.
 10. **Never key anything on `txn_id` across accounts.** The bank sequences it
     per account, so two Canara accounts emit identical ids — measured on the two
     committed fixtures: 93 of 93, and the same masked last four. `external_id`
@@ -61,12 +62,13 @@ your statement.
     silently loses the category — measured, `Canteen` → `Mess` gave `''`. This
     is not D10 being relaxed: following a rename infers nothing, it preserves a
     decision the operator already made. SPEC §24.4.
-14. **An in-place ledger update sends only what config owns.** Description,
-    category, counterparty and the *managed* tags. Never `amount`, `date`,
-    `type`, `external_id` or `notes` — that omission is the only reason a
-    rename cannot corrupt a ledger, because Firefly's update is sparse and an
-    absent field is an untouched one. `reversal` and `large-oneoff` are carried
-    through, never predicted. SPEC §24.2.
+14. **An in-place ledger update writes only what config owns.** Description,
+    category, counterparty and the *managed* tags. The store **refuses**
+    `amount`, `txn_date`, `kind`, `external_id`, `notes` and `account` outright
+    — an update that *could* move money is one that eventually does. It used to
+    be safe only because the previous store's update happened to be sparse.
+    `reversal` and `large-oneoff` are carried through a sync, never re-decided
+    by it. DECISIONS.md §24.2, §36.
 15. **Two palettes, and which one a mark uses is a question about the mark.**
     `--cat-1..8` encodes **identity** — a category, a payee, an account.
     `--ramp-1..5` encodes **rank or magnitude** — one series measured over
@@ -147,7 +149,7 @@ uv sync            # https://docs.astral.sh/uv/ — or python -m venv + pip inst
 uv run pytest -q
 ```
 
-**The test suite needs nothing else.** No Docker, no Firefly, no bank account.
+**The test suite needs nothing else.** No Docker, no database, no bank account.
 Fixtures only; `test_stack.py` is the one module that talks to a running stack
 and it auto-skips when there is none.
 
@@ -196,7 +198,8 @@ The rest:
 
 | | |
 |---|---|
-| `src/passbook/` | parser, Firefly client, service layer, CLI |
+| `src/passbook/` | parser, service layer, CLI |
+| `src/passbook/store/` | the ledger: one interface, a Postgres implementation and an in-memory one the tests hold to the same invariants |
 | `src/passbook/web/` | the JSON API; the UI is a front end over `service.py`, never a second implementation |
 | `frontend/` | React 19 + Vite, build-time only — no Node in the runtime image |
 | `scripts/` | fixture generation, screenshots, setup, backups, DR drill |
@@ -215,11 +218,24 @@ make test          # everything
 make audit-docs    # the documentation rule above
 ```
 
-- **Tests use fixtures, never the network.**
+- **Tests use fixtures, never the network — and it is enforced, not
+  remembered.** `conftest.py` replaces `open_ledger` with one that refuses
+  immediately, naming the fixture you should have used. Without that guard a
+  test that forgot its fake fell through to a real connection attempt, which
+  does not fail fast: it waits out the driver's timeout. A suite of those looks
+  exactly like a slow suite, and this one was read as one for months — thirty
+  minutes, against under two now.
+  The two deliberate exceptions are `test_stack.py` and
+  `test_store_postgres.py`, both documented in their own docstrings, both
+  auto-skipping when nothing is up.
 - **A regression test must be able to fail.** Reintroduce the bug and watch it
   go red before you trust it. One test in this repo passed with the fix deleted,
   because the standard library was quietly covering for the app; it had to be
   rewritten to blind the library first.
+- **A double is held to what the database enforces.** `MemoryLedger` refuses
+  everything `schema.sql` refuses, because a double that accepts what the
+  database would refuse makes the tests pass and production fail. It was found
+  missing one — `kind` — the first time the real schema was tested.
 - **New behaviour needs a test that would have caught the bug**, not one that
   restates the implementation.
 
@@ -246,7 +262,7 @@ said, how long it stayed, what the button read before it.
 ## Writing a migration
 
 You need one whenever a change alters **the shape of data already stored** — in
-Firefly, in `config/`, or in `archive/`. A new chart does not need one. A new
+The ledger, in `config/`, or in `archive/`. A new chart does not need one. A new
 `external_id` format does.
 
 Create `src/passbook/migrations/mNNN_short_name.py`:
@@ -284,18 +300,17 @@ and duplicate versions are a hard error.
 | | |
 |---|---|
 | `ctx.settings` | loaded settings |
-| `ctx.client` | an open `FireflyClient` |
+| `ctx.store` | an open `LedgerStore` |
 | `ctx.registry` | every registered account |
 | `ctx.say(message)` | progress, indented under the migration's name |
 | `ctx.purge_and_repush(account)` | delete and re-push one account, through the proven path |
 | `ctx.statement_paths(account)` | every archived statement, in a stable order |
 
 **Use `ctx.purge_and_repush` rather than writing your own delete.** It is the
-same code `passbook purge --confirm --yes` and `--resume` run: intent recorded
-before the first delete, tombstones force-purged so the re-push is not refused
-as duplicates, and the record cleared only once the ledger verifies. A second
-copy of the most dangerous path in this project is the last thing a migration
-should be.
+same code `passbook purge --confirm --yes` runs, followed by the same write
+`passbook sync` runs, and it refuses to delete rows this machine cannot rebuild
+from `archive/`. A second copy of the most dangerous path in this project is the
+last thing a migration should be.
 
 ### Rules
 
@@ -304,11 +319,11 @@ should be.
 - **Be idempotent.** `pending()` returns None the second time, because the
   situation it detects is gone.
 - **Never delete rows this machine cannot rebuild.** If `archive/` is empty and
-  Firefly holds rows, raise — that is data loss with a progress bar. The
+  The ledger holds rows, raise — that is data loss with a progress bar. The
   baseline migration does exactly this.
-- **Write a test.** `tests/test_migrate.py` has the shape: a fake client, a
-  ledger in the old state, and an assertion that a recorded version does not
-  make it look clean.
+- **Write a test.** `tests/test_migrate.py` has the shape: a fake ledger in the
+  old state, and an assertion that a recorded version does not make it look
+  clean.
 
 ### Then tell people
 

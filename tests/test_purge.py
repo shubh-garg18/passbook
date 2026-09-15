@@ -1,182 +1,131 @@
-"""Purge selection and deletion semantics. Mocked API, no network."""
+"""Removing an account's rows. DECISIONS.md §36.
 
+Most of what this module used to test is gone with the store it tested against:
+soft-delete tombstones that had to be force-deleted afterwards, a 401 that meant
+either "already gone" or "your token died" and had to be told apart, and an
+intent file written before the first delete so an interrupted run could be
+finished later. A delete is a delete now, and it is one statement.
+"""
+
+from __future__ import annotations
+
+from datetime import date
 from decimal import Decimal
 
-import httpx
-import pytest
+from passbook.purge import find_candidates, purge
+from passbook.store import LedgerError
+from passbook.store.memory import MemoryLedger
 
-from passbook.firefly.client import FireflyClient, FireflyError
-from passbook.firefly.purge import Candidate, find_candidates, purge
-
-
-def group(gid, external_id=None, amount="10.00", description="x", date="2026-05-09"):
-    split = {"amount": amount, "description": description, "date": date}
-    if external_id:
-        split["external_id"] = external_id
-    return {"id": str(gid), "attributes": {"transactions": [split]}}
+ASSET = "Canara Bank savings account"
+BASE_TXN_ID = "20260509000001"
 
 
-def make_client(handler) -> FireflyClient:
-    return FireflyClient(
-        "http://firefly.test", "tok",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+def row(external_id: str, **over) -> dict:
+    split = {
+        "external_id": external_id,
+        "account": ASSET,
+        "kind": "withdrawal",
+        "txn_date": date(2026, 5, 9),
+        "amount": Decimal("65.00"),
+        "description": "ZOKVEX QI (UPI)",
+        "counterparty": "ZOKVEX QI",
+        "currency": "INR",
+    }
+    split.update(over)
+    return split
 
 
-def listing(groups):
-    def handler(request):
-        return httpx.Response(
-            200,
-            json={"data": groups, "meta": {"pagination": {"total_pages": 1}}},
-        )
-
-    return handler
-
-
-# --- selection ----------------------------------------------------------------
+def ledger(count: int = 3) -> MemoryLedger:
+    store = MemoryLedger()
+    store.store_account(ASSET, Decimal("12612.64"), date(2026, 5, 7), "INR")
+    first = int(BASE_TXN_ID)
+    for n in range(count):
+        store.store_transaction(row(str(first + n)))
+    return store
 
 
-@pytest.fixture(autouse=True)
-def _isolate_backups(tmp_path, monkeypatch):
-    """`purge()` records intent before deleting (§19.7), and `ops.BACKUPS` is
-    CWD-relative — so without this every purge test drops a real intent file into
-    the operator's `backups/`, where `verify-ledger` then correctly reports an
-    unfinished purge that never happened. Found exactly that way.
+def test_every_stored_row_is_deletable_and_none_is_protected():
+    """`external_id` is the primary key, so a row without one cannot exist.
+
+    The protected list is still returned, and still shown, so that "nothing is
+    protected" is something the operator reads rather than something the code
+    assumes. The opening balance — the row this list existed to shield — is a
+    column on the account now, not a row that could be deleted by accident.
     """
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "backups").mkdir()
+    candidates, protected = find_candidates(ledger(), ASSET)
+    assert len(candidates) == 3
+    assert protected == []
 
 
-def test_only_rows_with_an_external_id_are_deletable():
-    """The opening balance has none, so it is excluded structurally."""
-    groups = [group(1), group(2, "20260509000001"), group(3, "20260509000002")]
-    candidates, protected = find_candidates(make_client(listing(groups)), 3)
-    assert [c.group_id for c in candidates] == ["2", "3"]
-    assert len(protected) == 1
-
-
-def test_an_account_of_only_protected_rows_yields_nothing():
-    candidates, protected = find_candidates(make_client(listing([group(1)])), 3)
-    assert candidates == []
-    assert len(protected) == 1
+def test_an_account_with_no_rows_yields_nothing():
+    store = MemoryLedger()
+    store.store_account(ASSET, Decimal("0.00"), date(2026, 5, 7), "INR")
+    assert find_candidates(store, ASSET) == ([], [])
 
 
 def test_candidate_carries_enough_to_show_a_dry_run():
-    groups = [group(7, "20260509000001", amount="65.00", description="Morning Stall (UPI)")]
-    (candidate,), _ = find_candidates(make_client(listing(groups)), 3)
-    assert candidate == Candidate(
-        group_id="7", external_id="20260509000001", date="2026-05-09",
-        description="Morning Stall (UPI)", amount=Decimal("65.00"),
-    )
+    """A dry run is the only thing standing between the operator and a delete,
+    so it has to say what would go — not how many."""
+    candidate = find_candidates(ledger(1), ASSET)[0][0]
+    assert candidate.external_id == BASE_TXN_ID
+    assert candidate.date == "2026-05-09"
+    assert candidate.description == "ZOKVEX QI (UPI)"
+    assert candidate.amount == Decimal("65.00")
 
 
-def test_pagination_is_followed():
-    pages = {
-        1: {"data": [group(1, "a"), group(2, "b")], "meta": {"pagination": {"total_pages": 2}}},
-        2: {"data": [group(3, "c")], "meta": {"pagination": {"total_pages": 2}}},
-    }
-
-    def handler(request):
-        return httpx.Response(200, json=pages[int(request.url.params["page"])])
-
-    candidates, _ = find_candidates(make_client(handler), 3)
-    assert [c.group_id for c in candidates] == ["1", "2", "3"]
-
-
-# --- deletion -----------------------------------------------------------------
-
-
-def candidates(n):
-    return [Candidate(str(i), f"ext{i}", "2026-05-09", "x", Decimal("1")) for i in range(1, n + 1)]
-
-
-def test_successful_deletes_are_counted():
-    result = purge(make_client(lambda r: httpx.Response(204)), candidates(3))
-    assert (result.deleted, result.already_gone, result.failed) == (3, 0, 0)
+def test_successful_deletes_are_counted_and_the_rows_are_gone():
+    store = ledger()
+    candidates, _ = find_candidates(store, ASSET)
+    result = purge(store, candidates)
+    assert (result.deleted, result.failed) == (3, 0)
     assert result.ok
+    assert store.account_transactions(ASSET) == []
 
 
-def test_trashed_records_are_force_deleted_afterwards():
-    """Deleting alone is not enough.
+def test_a_failure_is_named_rather_than_swallowed():
+    """The operator is about to be told how many rows went, and that number has
+    to be one this function watched happen."""
 
-    Firefly soft-deletes, and `TransactionJournalFactory::errorIfDuplicate`
-    queries `withTrashed()` — so a tombstone keeps rejecting identical content
-    as a duplicate forever. Observed live: after deleting 93 and re-pushing,
-    only the 41 rows whose description had changed got through.
-    """
-    seen = []
+    class Stubborn(MemoryLedger):
+        def delete_transaction(self, external_id):
+            raise LedgerError("connection reset")
 
-    def handler(request):
-        seen.append(f"{request.method} {request.url.path}")
-        return httpx.Response(204)
+    store = Stubborn()
+    store.store_account(ASSET, Decimal("12612.64"), date(2026, 5, 7), "INR")
+    store.store_transaction(row(BASE_TXN_ID))
 
-    result = purge(make_client(handler), candidates(2))
-    assert "DELETE /api/v1/data/purge" in seen
-    assert result.hard_purged is True
-
-
-def test_nothing_deleted_means_no_force_delete():
-    """Don't force-delete other trashed data when this purge did nothing."""
-    seen = []
-
-    def handler(request):
-        seen.append(request.url.path)
-        return httpx.Response(204)
-
-    result = purge(make_client(handler), [])
-    assert "/api/v1/data/purge" not in seen
-    assert result.hard_purged is False
-
-
-def test_401_with_a_working_token_means_already_gone_not_auth_failure():
-    """Firefly 401s for an absent group rather than 404ing, so a bare 401 is
-    ambiguous. A live /about proves the token is fine and the group is gone."""
-
-    def handler(request):
-        if request.url.path == "/api/v1/about":
-            return httpx.Response(200, json={"data": {"version": "6.6.6"}})
-        if request.url.path == "/api/v1/data/purge":
-            return httpx.Response(204)
-        return httpx.Response(401, json={"message": "Unauthenticated."})
-
-    result = purge(make_client(handler), candidates(2))
-    assert (result.deleted, result.already_gone, result.failed) == (0, 2, 0)
-    assert result.ok  # re-running a completed purge is not an error
-
-
-def test_401_with_a_dead_token_aborts_rather_than_reporting_success():
-    """The failure mode that matters: a token dying mid-purge must not be
-    silently recorded as 93 rows already gone."""
-
-    def handler(request):
-        return httpx.Response(401, json={"message": "Unauthenticated."})
-
-    with pytest.raises(FireflyError, match="stopped authenticating"):
-        purge(make_client(handler), candidates(5))
-
-
-def test_abort_message_says_how_far_it_got():
-    calls = {"n": 0}
-
-    def handler(request):
-        if request.url.path == "/api/v1/about":
-            # token works for the first check, dies for the second
-            calls["n"] += 1
-            return httpx.Response(200 if calls["n"] == 1 else 401, json={"data": {}})
-        return httpx.Response(401, json={"message": "Unauthenticated."})
-
-    with pytest.raises(FireflyError, match="0 group"):
-        purge(make_client(handler), candidates(3))
-
-
-def test_other_errors_are_collected_and_do_not_stop_the_run(monkeypatch):
-    # 5xx is retried with backoff; don't actually sleep through it.
-    monkeypatch.setattr("passbook.firefly.client.time.sleep", lambda _s: None)
-
-    def handler(request):
-        return httpx.Response(500, json={"message": "boom"})
-
-    result = purge(make_client(handler), candidates(2))
-    assert result.failed == 2
+    candidates, _ = find_candidates(store, ASSET)
+    result = purge(store, candidates)
+    assert (result.deleted, result.failed) == (0, 1)
     assert not result.ok
-    assert len(result.failures) == 2
+    assert result.failures == [(BASE_TXN_ID, "connection reset")]
+
+
+def test_one_failure_does_not_stop_the_run():
+    refuse = {str(int(BASE_TXN_ID) + 1)}
+
+    class Partly(MemoryLedger):
+        def delete_transaction(self, external_id):
+            if external_id in refuse:
+                raise LedgerError("nope")
+            super().delete_transaction(external_id)
+
+    store = Partly()
+    store.store_account(ASSET, Decimal("12612.64"), date(2026, 5, 7), "INR")
+    first = int(BASE_TXN_ID)
+    for n in range(3):
+        store.store_transaction(row(str(first + n)))
+
+    candidates, _ = find_candidates(store, ASSET)
+    result = purge(store, candidates)
+    assert (result.deleted, result.failed) == (2, 1)
+    assert [r["external_id"] for r in store.account_transactions(ASSET)] == sorted(refuse)
+
+
+def test_progress_is_reported_as_it_goes():
+    """A purge of a whole account is the longest thing the UI ever waits on."""
+    seen: list[int] = []
+    store = ledger()
+    candidates, _ = find_candidates(store, ASSET)
+    purge(store, candidates, on_progress=lambda r: seen.append(r.deleted))
+    assert seen == [1, 2, 3]

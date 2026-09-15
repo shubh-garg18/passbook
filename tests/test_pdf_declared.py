@@ -179,7 +179,7 @@ def test_a_declared_profile_does_not_claim_another_banks_file():
     read Canara's PDF as 93 transactions with correct narrations, correct dates,
     and 44 rows whose money had fallen down the gap between two declared ranges.
     `from_rows` accepted every one of them and the failure surfaced two layers
-    later as a Firefly rejection.
+    later as a a rejected write.
 
     The balance chain is what says no, and using it to answer *is this that
     bank* softens nothing: the statement that wins is checked again on the way

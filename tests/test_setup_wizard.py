@@ -4,10 +4,11 @@
 standard-library-only script that must run before `uv sync` has happened. It is
 loaded by path here.
 
-Only the pure parts are tested. Registration and token minting talk to a live
-Firefly and are covered by running the wizard; what is pinned here is the
-handling of what Firefly answers, because that is what turned a clear message
-into a mystery once already.
+Only the pure parts are tested. What used to be here was most of the file:
+shape-checking an API token, reading a validation error out of a registration
+page, and the minimum password length a separate application enforced. There is
+no separate application and no token, so those tests went with the code they
+guarded — and the wizard is two steps shorter for it.
 """
 
 from __future__ import annotations
@@ -26,52 +27,6 @@ spec = importlib.util.spec_from_file_location(
 wizard = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = wizard
 spec.loader.exec_module(wizard)
-
-
-def test_the_firefly_password_minimum_is_what_firefly_actually_enforces():
-    """MEASURED against the pinned tag, not guessed.
-
-    A 12-character password is refused with "The password must be at least 16
-    characters." The form answers **200 and re-renders**, so a wizard checking
-    only the status code reports success and then cannot log in. An earlier
-    version of this prompt said 8, which would have bounced every user into the
-    manual fallback with no explanation at all.
-    """
-    assert wizard.MIN_FIREFLY_PASSWORD == 16
-
-
-def test_a_rejected_registration_is_read_out_of_the_page():
-    """Firefly renders validation failures into an alert-danger block. Surfacing
-    it is the difference between "try again, here is why" and a dead end."""
-    page = (
-        '<html><body><div class="alert alert-danger" role="alert">'
-        "<strong>The password must be at least 16 characters.</strong>"
-        "</div></body></html>"
-    )
-    assert wizard._form_error(page) == "The password must be at least 16 characters."
-
-
-def test_no_error_block_reads_as_no_error():
-    assert wizard._form_error("<html><body><p>fine</p></body></html>") is None
-    assert wizard._form_error("") is None
-
-
-def test_the_command_line_token_is_refused_by_shape_before_the_api_sees_it():
-    """The single most common way to lose an hour here. It is short and has no
-    dots; a Personal Access Token is a JWT of about a thousand characters."""
-    problem = wizard.looks_like_a_pat("abc123def456")
-    assert problem is not None
-    assert "Command line token" in problem
-    assert "Remote access and tokens" in problem
-
-
-def test_a_truncated_jwt_is_refused_with_its_length():
-    problem = wizard.looks_like_a_pat("eyJ" + "a" * 40 + "." + "b" * 20 + "." + "c" * 20)
-    assert problem is not None and "characters" in problem
-
-
-def test_a_plausible_pat_passes_the_shape_check():
-    assert wizard.looks_like_a_pat("eyJ" + "a" * 400 + "." + "b" * 400 + "." + "c" * 200) is None
 
 
 def test_env_values_are_quoted_when_they_contain_spaces(tmp_path, monkeypatch):
@@ -100,7 +55,7 @@ def test_set_env_replaces_in_place_and_never_appends_a_duplicate(tmp_path, monke
 def test_reading_a_statement_yields_what_the_account_needs(tmp_path):
     """Account number, opening balance and the date it applies from all come out
     of the file — so nobody has to be told twice not to enter their CURRENT
-    balance, which is what Firefly's own setup invites."""
+    balance, which is what the previous store's setup invites."""
     details = wizard.read_statement(REPO_ROOT / "tests" / "fixtures" / "statement.xls")
     assert details is not None
     number, opening, first = details

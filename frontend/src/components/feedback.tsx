@@ -109,7 +109,7 @@ export function describe(error: unknown): { title: string; detail: string } {
       // terminal — the two reasons this sentence was rewritten. What it has
       // to keep is somewhere to go, because "it did not answer" is not
       // something anyone can act on.
-      firefly: 'The ledger store did not answer. Status says whether it is reachable.',
+      ledger: 'The ledger did not answer. Status says whether it is reachable.',
       csrf: 'Reload the page and repeat the action.',
       rate_limited: 'Wait for the lockout to pass, then try again.',
       no_pending: 'Upload a statement first.',

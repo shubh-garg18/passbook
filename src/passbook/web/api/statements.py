@@ -13,7 +13,7 @@ from ...config import (
     load_accounts,
     load_settings,
 )
-from ...firefly.client import FireflyError
+from ...store import LedgerError
 from ...loaders import UnsupportedFormat, sniff
 from ...loaders._table import ParseError
 from ...loaders.pdf import PdfPasswordRequired, PdfPasswordWrong
@@ -23,7 +23,7 @@ from .. import auth as A
 from ._base import (
     ACCEPTED_SNIFF,
     MAX_UPLOAD_BYTES,
-    _client,
+    _ledger,
     _fail,
     _parsed,
     _pending_password,
@@ -79,13 +79,21 @@ def upload_statement():
         # below turns into a 422 AND deletes the staged file — so it can never
         # be picked up by a later `make sync`.
         settings = load_settings()
-        if settings.firefly_token:
-            # Request-scoped like every other site (§101), so an upload that
-            # goes on to register an account does not open a second one.
-            with _client(settings.firefly_url, settings.firefly_token) as client:
-                account = service.resolve_account(parsed.meta, settings, client=client)
-        else:
-            account = service.resolve_account(parsed.meta, settings, client=None)
+        # Request-scoped like every other site, so an upload that goes on to
+        # register an account does not open a second store.
+        #
+        # **The ledger is optional here, and that is deliberate.** A preview
+        # writes nothing, and `resolve_account` consults the store only in one
+        # case: an empty registry with no `PASSBOOK_ASSET_ACCOUNT` set, where
+        # the single asset account it holds is the answer. Refusing to show
+        # somebody their own statement because the database is down would be
+        # the wrong trade, so the store is offered when it opens and omitted
+        # when it does not.
+        try:
+            with _ledger() as store:
+                account = service.resolve_account(parsed.meta, settings, store=store)
+        except LedgerError:
+            account = service.resolve_account(parsed.meta, settings, store=None)
     except (PdfPasswordRequired, PdfPasswordWrong) as exc:
         # A distinct code, because the remedy is a password rather than a
         # different file — and the file is kept STAGED so the retry does not
@@ -186,8 +194,8 @@ def confirm_statement():
         return _fail("Nothing pending — upload a statement first.", "no_pending", 404)
 
     st = load_settings()
-    if not st.firefly_token or not st.passbook_asset_account:
-        return _fail("FIREFLY_TOKEN or PASSBOOK_ASSET_ACCOUNT is not set.", "unconfigured", 503)
+    if not st.passbook_asset_account:
+        return _fail("PASSBOOK_ASSET_ACCOUNT is not set.", "unconfigured", 503)
 
     parsed = service.parse_statement(Path(pending), password=_pending_password())
     try:
@@ -197,8 +205,8 @@ def confirm_statement():
 
     try:
         result = service.push_statement(parsed, st, account=account)
-    except FireflyError as exc:
-        return _fail(f"Push failed: {exc}", "firefly", 502)
+    except LedgerError as exc:
+        return _fail(f"Push failed: {exc}", "ledger", 502)
 
     archived = None
     if result.ok:
@@ -221,7 +229,7 @@ def confirm_statement():
         {
             "parsed": len(parsed.transactions),
             "pushed": result.pushed,
-            # Already in the ledger, by identity (§119) or by Firefly's
+            # Already in the ledger, by identity (§119) or by the ledger's
             # content hash. The UI reads them as one number, "skipped".
             "already": result.already,
             "duplicates": result.duplicates,

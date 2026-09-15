@@ -169,3 +169,29 @@ def test_both_implementations_answer_the_same_questions():
     for implementation in (MemoryLedger, PostgresLedger):
         missing = sorted(n for n in wanted if not callable(getattr(implementation, n, None)))
         assert not missing, f"{implementation.__name__} is missing {missing}"
+
+
+def test_the_balance_is_the_rows_rather_than_a_stored_number():
+    """A stored balance is a second copy of the truth, and the ledger already
+    knows what a second copy of the truth costs."""
+    store = ledger()
+    store.store_transaction(row("canara-1111-20260509000001", amount=Decimal("1418.91")))
+    store.store_transaction(
+        row("canara-1111-20260509000002", kind="deposit", amount=Decimal("500.00"))
+    )
+    live = store.asset_accounts()[0]["current_balance"]
+    assert live == Decimal("10000.00") - Decimal("1418.91") + Decimal("500.00")
+    assert isinstance(live, Decimal)
+
+
+def test_there_is_no_third_direction():
+    """The schema's `CHECK (kind IN (...))`, enforced here too.
+
+    The previous store modelled an opening balance as a transaction, and it
+    turned up in listings as a row with no payee and no amount — counting one
+    more than the archive held, which reads as a phantom transaction. It is a
+    column on the account here, and this is what makes that unwritable.
+    """
+    store = ledger()
+    with pytest.raises(LedgerError, match="not a direction"):
+        store.store_transaction(row(kind="opening balance"))

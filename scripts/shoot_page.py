@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shoot ONE route, both themes, both widths — no ledger, no Firefly.
+"""Shoot ONE route, both themes, both widths — no ledger, no database.
 
 `shoot.py` walks the whole app and stages a statement on the way, so it needs a
 running stack even to reach a page that reads nothing. A page that renders with

@@ -112,7 +112,7 @@ def test_a_window_returns_only_that_window(archive, conn):
 
 def test_a_statement_that_leaves_the_archive_takes_its_rows(archive, conn):
     """The index is a view of `archive/`, which is what `verify-ledger` compares
-    the ledger against (§20). A row it kept after the file was gone would be a
+    The ledger against (§20). A row it kept after the file was gone would be a
     third place for the two to disagree."""
     index.sync(archive, conn, service.parse_statement)
     number = _number(archive)

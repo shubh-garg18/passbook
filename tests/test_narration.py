@@ -247,7 +247,7 @@ def test_scheme_does_not_leak_the_customer_id():
     got = parse(SCHEME_DR)
     assert got["channel"] == SCHEME
     # The customer ID is also the PDF statement password. It must not end up in
-    # a payee, a Firefly description, or a `passbook payees` report. SPEC §11.
+    # a payee, a ledger description, or a `passbook payees` report. SPEC §11.
     assert got["payee"] == "PMSBY"
     assert "888800011" not in str(got)
 

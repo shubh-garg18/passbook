@@ -4,7 +4,7 @@
 exec db pg_dump`, and this container deliberately has no Docker socket (§15.1,
 §15.3). That constraint is real and unchanged — but it was answering the wrong
 question. **A dump does not need the Docker socket. It needs a TCP connection
-to Postgres**, which this container has had all along, the same one Firefly
+to Postgres**, which this container has had all along, the same one the ledger
 uses.
 
 What that was costing: `/reapply/run` refuses without a dump from the last hour
@@ -38,18 +38,18 @@ BACKUPS = Path("backups")
 
 # Matching `make backup` exactly, and the flags are not cosmetic:
 # `--no-owner --no-privileges` stop pg_dump emitting `ALTER ... OWNER TO
-# firefly` and `GRANT ... TO firefly`, which make the restore fail with
-# `role "firefly" does not exist` on any machine where DB_USERNAME differs.
+# passbook` and `GRANT ... TO passbook`, which make the restore fail with
+# `role "passbook" does not exist` on any machine where DB_USERNAME differs.
 # The DR drill caught precisely that.
 PG_DUMP_FLAGS = ("--clean", "--if-exists", "--no-owner", "--no-privileges")
 
 DUMP_TIMEOUT_SECONDS = 300
 
-# The smallest thing that could possibly be a Firefly dump, in bytes of SQL
+# The smallest thing that could possibly be a ledger dump, in bytes of SQL
 # **before compression**.
 #
 # Measured, not chosen: the real dump on this install is 83 KB gzipped and about
-# 1.1 MB of SQL, and Firefly's schema alone is 80-odd tables — so 8 KB is far
+# 1.1 MB of SQL, and the ledger's schema alone is 80-odd tables — so 8 KB is far
 # below any true dump and far above any failure. The floor exists because
 # `pg_dump` can exit 0 having written almost nothing, which is the one backup
 # failure with no symptom until the day you restore it.
@@ -81,8 +81,8 @@ def _settings():
     return {
         "host": os.environ.get("DB_HOST", "db"),
         "port": os.environ.get("DB_PORT", "5432"),
-        "database": os.environ.get("DB_DATABASE", "firefly"),
-        "user": os.environ.get("DB_USERNAME", "firefly"),
+        "database": os.environ.get("DB_DATABASE", "passbook"),
+        "user": os.environ.get("DB_USERNAME", "passbook"),
         "password": os.environ.get("DB_PASSWORD", ""),
     }
 
@@ -106,7 +106,7 @@ def available() -> tuple[bool, str]:
 
 
 def run(backups: Path | None = None, today: date | None = None) -> BackupResult:
-    """Write `firefly-<date>.sql.gz` and `config-<date>.tar.gz`. SPEC §37.
+    """Write `ledger-<date>.sql.gz` and `config-<date>.tar.gz`.
 
     Written to a temporary file and renamed into place, so an interrupted dump
     can never replace a good backup with a truncated one — the failure that
@@ -120,8 +120,8 @@ def run(backups: Path | None = None, today: date | None = None) -> BackupResult:
     stamp = (today or date.today()).isoformat()
     settings = _settings()
 
-    dump = backups / f"firefly-{stamp}.sql.gz"
-    partial = backups / f".firefly-{stamp}.sql.gz.partial"
+    dump = backups / f"ledger-{stamp}.sql.gz"
+    partial = backups / f".ledger-{stamp}.sql.gz.partial"
 
     environment = {**os.environ, "PGPASSWORD": settings["password"]}
     command = [

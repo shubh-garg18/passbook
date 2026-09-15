@@ -141,7 +141,7 @@ TXN_ID = re.compile(r"^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{
 #: (`**3752**` lines, `**0600**` the file mode) is two.
 MASKED_LAST_FOUR = re.compile(r"\*{3,}(\d{4})(?!\d)")
 #: Bank-prefixed only. A bare `<word>-<4 digits>` also matches a Chromium build
-#: (`chromium-1228`), a dated dump (`firefly-2026-07-01`) and a file mode, and a
+#: (`chromium-1228`), a dated dump (`the ledger-2026-07-01`) and a file mode, and a
 #: check with false positives is a check that gets ignored. Add a bank here when
 #: one ships in `src/passbook/banks/`.
 SLUG_LAST_FOUR = re.compile(

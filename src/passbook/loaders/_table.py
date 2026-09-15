@@ -356,7 +356,7 @@ def _derived_id(date_text: str, narration: str, debit: str, credit: str, balance
     reference number should always have it mapped instead — that is why this is
     opt-in per profile and never inferred.
 
-    Prefixed `d-` so a derived id is visibly derived in Firefly, in a log line
+    Prefixed `d-` so a derived id is visibly derived in the ledger, in a log line
     and in a purge-intent file. Nobody should have to wonder which kind they are
     looking at.
     """

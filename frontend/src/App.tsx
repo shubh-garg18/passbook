@@ -44,7 +44,7 @@ export function useSession() {
  *   Re-apply  is not a place, it is the second half of editing a payee. It now
  *             surfaces on Payees, at the moment config is written, where the
  *             operator is already standing. Six nav items meant the step could
- *             be missed entirely — and it was: payees were edited, 8080 kept
+ *             be missed entirely — and it was: payees were edited, the rows kept
  *             showing the old names, and nothing said a second step existed.
  *   Status    is monitoring, and the Ledger already shows the last sync. It is a
  *             strip there, with the artefact tables one click away.

@@ -2,12 +2,12 @@
 
 import base64
 import binascii
-import json
 import re
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 import yaml
 
@@ -25,9 +25,8 @@ class Settings(BaseSettings):
     # DB_PASSWORD and friends, none of which belong to the CLI.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # repr=False so a stray traceback cannot spill them. SPEC §11.
+    # repr=False so a stray traceback cannot spill it. SPEC §11.
     passbook_account_number: str | None = Field(default=None, repr=False)
-    firefly_token: str | None = Field(default=None, repr=False)
 
     # Web UI (Phase 7). The password is stored only as a Werkzeug hash; the
     # plaintext never touches .env, the repo, or a log. SPEC §14.
@@ -91,10 +90,43 @@ class Settings(BaseSettings):
             and self.reminder_recipient
         )
 
-    firefly_url: str = "http://localhost:8080"
-    # The Firefly asset account statements are posted into. Named rather than
-    # guessed: an instance can hold several, and posting 93 rows into the wrong
-    # one is tedious to undo.
+    # --- the ledger. DECISIONS.md §36 ---------------------------------------
+    # passbook keeps its own tables, in a schema of its own, on the Postgres
+    # the stack already runs. A schema rather than a second database because it
+    # needs no superuser and no fresh volume: it can be created inside a
+    # database that already exists and already has someone else's tables in it.
+    #
+    # Two ways in, because there are two callers. The web container reaches the
+    # service by its compose name, and compose passes it
+    # `PASSBOOK_DATABASE_URL` directly. The CLI runs on the host and reaches
+    # the published port, which is what these DB_* values — already in `.env`
+    # for the database container itself — are assembled into.
+    # `PASSBOOK_DB_HOST`, not `DB_HOST`: an install that has been upgraded
+    # still has `DB_HOST=db` in its `.env` from the container that used to sit
+    # in front of this database, and `db` does not resolve from the host.
+    passbook_db_host: str = "127.0.0.1"
+    passbook_db_port: int = 5433
+    db_database: str | None = None
+    db_username: str | None = None
+    db_password: str | None = Field(default=None, repr=False)
+    passbook_database_url: str | None = Field(default=None, repr=False)
+
+    @property
+    def ledger_dsn(self) -> str:
+        """Where the ledger is. Never logged — it carries the password."""
+        if self.passbook_database_url:
+            return self.passbook_database_url
+        user = quote(self.db_username or "passbook", safe="")
+        secret = quote(self.db_password or "", safe="")
+        name = self.db_database or "passbook"
+        return (
+            f"postgresql://{user}:{secret}"
+            f"@{self.passbook_db_host}:{self.passbook_db_port}/{name}"
+        )
+
+    # The asset account statements are written into. Named rather than
+    # guessed: a ledger can hold several, and writing a statement into the
+    # wrong one is tedious to undo.
     passbook_asset_account: str | None = None
     large_txn_threshold: Decimal = Decimal("10000")
 
@@ -347,9 +379,9 @@ class Account:
         """What a person is shown when this account has to be named. SPEC §40.
 
         `Canara ****1111` unless the operator has renamed it, and the fallback
-        matters more than it looks. It used to be the **Firefly asset account's
+        matters more than it looks. It used to be the **asset account's
         name**, which is a string chosen in another app for another purpose: it
-        can be anything, it can be the same for two accounts until Firefly
+        can be anything, it can be the same for two accounts until the ledger
         refuses, and on a fresh install it is often just "Checking Account".
         Bank plus last four is the one label that can never name two of these
         and never needs explaining.
@@ -369,7 +401,7 @@ class Account:
         account**, so two Canara accounts produce identical ids. Namespacing it
         by slug makes the id unique per user, keeps it derivable from
         statement + registry alone (so a re-push reproduces it byte for byte),
-        and leaves it readable: the account is visible at a glance in Firefly, in
+        and leaves it readable: the account is visible at a glance in the ledger, in
         a log line and in a purge-intent file.
         """
         return f"{self.slug}-{txn_id}"
@@ -507,7 +539,7 @@ def save_accounts(accounts: list[Account], path: Path | None = None) -> Path:
         "#\n"
         "# `payee_aliases.yaml` and `rules.yaml` are deliberately SHARED across\n"
         "# accounts: the same person's payees are the same whichever account paid,\n"
-        "# and Firefly's categories are per-user. See §21.5.\n"
+        "# and the ledger's categories are per-user. See §21.5.\n"
     )
     body = yaml.safe_dump(
         {"accounts": [a.to_dict() for a in accounts]}, sort_keys=False, allow_unicode=True
@@ -585,28 +617,3 @@ def load_payee_aliases(path: Path | None = None) -> dict[str, str]:
     if not mapping:
         return {}
     return {str(key): str(value) for key, value in mapping.items()}
-
-
-def token_expiry(token: str) -> datetime | None:
-    """Read the `exp` claim out of a JWT without verifying it or calling out.
-
-    A Firefly Personal Access Token is an RS256 JWT valid for 365 days, and
-    Firefly gives no warning before it lapses — the failure just looks like a
-    generic 401. We only need the expiry, so the signature is irrelevant here;
-    nothing is trusted on the basis of this value.
-
-    Returns None if the token is not a JWT or carries no usable `exp`.
-    """
-    parts = token.strip().split(".")
-    if len(parts) != 3:
-        return None
-    payload = parts[1]
-    payload += "=" * (-len(payload) % 4)  # restore base64url padding
-    try:
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-    except (ValueError, binascii.Error, UnicodeDecodeError):
-        return None
-    exp = claims.get("exp")
-    if not isinstance(exp, (int, float)):
-        return None
-    return datetime.fromtimestamp(exp, tz=timezone.utc)

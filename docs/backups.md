@@ -19,12 +19,13 @@ make dr-drill         # rebuild from the encrypted archives alone
 
 | File | Holds | Second copy? |
 |---|---|---|
-| `firefly-<date>.sql.gz` | the ledger, rules, categories, tags | no |
-| `config-<date>.tar.gz` | `config/*.yaml`, `APP_KEY`, the source as a git bundle | no |
+| `ledger-<date>.sql.gz` | every row, with its category and tags | no |
+| `config-<date>.tar.gz` | `config/*.yaml`, the source as a git bundle | no |
 
-Firefly's rules come back with the dump. **Your aliases do not** — they are
-applied at push time and never stored server-side, so `payee_aliases.yaml` is
-the only copy of the token→name mapping anywhere.
+The rows come back with the dump. **Your aliases and rules do not** — they are
+applied when a row is written and never stored beside it, so
+`payee_aliases.yaml` and `rules.yaml` are the only copies of that knowledge
+anywhere.
 
 `config/web-auth.json` is **excluded on purpose**, and `make backup` fails if it
 ever ends up inside. The yaml is irreplaceable; the credential file carries no
@@ -35,7 +36,7 @@ second factor beside the password hash it exists to be independent of.
 
 ```bash
 make verify-backup                                          # newest vs live
-make verify-backup FILE=backups/firefly-2026-07-01.sql.gz   # an older one
+make verify-backup FILE=backups/ledger-2026-07-01.sql.gz    # an older one
 ```
 
 Loads the dump into a throwaway Postgres container, checks the ledger
@@ -130,8 +131,7 @@ rclone config && rclone copy gdrive:passbook-backups .
 for f in *.gpg; do gpg --decrypt --output "${f%.gpg}" "$f"; done
 
 # 4. unpack — this is where the source comes from
-tar xzf config-<date>.tar.gz     # config/*.yaml, recovery/app-key.env,
-                                 # recovery/source.bundle
+tar xzf config-<date>.tar.gz     # config/*.yaml, recovery/source.bundle
 
 # 5. clone from the bundle, then repoint origin at GitHub
 git clone recovery/source.bundle passbook && cd passbook
@@ -139,17 +139,16 @@ git remote set-url origin https://github.com/shubh-garg18/passbook.git
 
 # 6. move the recovered files in
 mkdir -p backups
-cp ../firefly-*.sql.gz ../config-*.tar.gz backups/
+cp ../ledger-*.sql.gz ../config-*.tar.gz backups/
 cp ../config/*.yaml config/ && cp -r ../recovery .
 
-# 7. environment — APP_KEY BEFORE the stack starts. See the warning below.
+# 7. environment
 make env
-sed -i "s|^APP_KEY=.*|$(cat recovery/app-key.env)|" .env
 #    then restore PASSBOOK_ACCOUNT_NUMBER and PASSBOOK_ASSET_ACCOUNT by hand
 
 # 8. up, and load the ledger
 make up
-make restore FILE=backups/firefly-<date>.sql.gz CONFIRM=yes
+make restore FILE=backups/ledger-<date>.sql.gz CONFIRM=yes
 #    the UI now says "Not set up yet" — correct, see step 9
 
 # 9. web access is deliberately not in the backup
@@ -159,24 +158,17 @@ make web-password        # then sign in and enrol a new authenticator
 make verify-backup && uv run passbook doctor && uv run passbook verify-ledger
 ```
 
-### The one irreversible mistake
+### There is no longer an irreversible mistake here
 
-| | Existing API token |
-|---|---|
-| APP_KEY restored **before** Firefly first boots | works |
-| Firefly boots once on a generated key | **dead, permanently** |
+There used to be one, and it is worth knowing it is gone. The ledger lived in a
+separate application that encrypted part of its own configuration with a key in
+`.env`. Restore the dump, boot once on a generated key, and it silently deleted
+and regenerated the keypair — your API token dead, permanently, with the right
+key still sitting in the archive beside it. `make check` had to **refuse** to
+start the stack to prevent it.
 
-On that first boot Firefly cannot decrypt the stored Passport keypair, so it
-deletes and regenerates it. Putting the right key back afterwards leaves nothing
-to decrypt.
-
-This is a guard, not a warning: `make check` **refuses** when
-`recovery/app-key.env` disagrees with `.env`, because the moment you most want to
-type `make up` to see whether the restore worked is exactly the moment it is
-unsafe. It prints the `sed` to fix it.
-
-No ledger data is encrypted, so losing APP_KEY costs a re-issued token, not your
-ledger.
+Nothing in these tables is encrypted. Restore the dump with whatever credentials
+you like; the rows read back either way.
 
 ### What survives
 
@@ -184,31 +176,33 @@ ledger.
 |---|---|
 | Transactions, balances, categories, tags, rules | **yes** |
 | `payee_aliases.yaml`, `rules.yaml`, `accounts.yaml` | **yes** — the tarball is the only copy |
-| `APP_KEY`, and your API token with it | **yes, if step 7 comes before step 8** |
 | Web password, TOTP, backup codes, remembered browsers | **no** — deliberate; re-run `make web-password` |
-| `DB_PASSWORD`, `FIREFLY_TOKEN` | **no** — regenerated and re-issued |
+| `DB_PASSWORD` | **no** — regenerated, and nothing depends on the old one |
 | Files in `inbox/` and `archive/` | **no** — re-download if needed |
 
 ### Last resort: only the dump
 
-The money is still there. The dump is plain SQL:
+The money is still there, and reading it needs nothing from this project. The
+dump is plain SQL over three tables:
 
 ```bash
-docker run -d --name pg -e POSTGRES_USER=firefly -e POSTGRES_PASSWORD=x \
-  -e POSTGRES_DB=firefly postgres:16-alpine
-gunzip -c firefly-<date>.sql.gz | docker exec -i pg psql -U firefly -d firefly
-docker run -d --link pg -p 8080:8080 -e APP_KEY=<32 chars> \
-  -e DB_CONNECTION=pgsql -e DB_HOST=pg -e DB_DATABASE=firefly \
-  -e DB_USERNAME=firefly -e DB_PASSWORD=x fireflyiii/core:version-6.6.6
+docker run -d --name pg -e POSTGRES_USER=you -e POSTGRES_PASSWORD=x \
+  -e POSTGRES_DB=passbook postgres:16-alpine
+gunzip -c ledger-<date>.sql.gz | docker exec -i pg psql -U you -d passbook
+docker exec -i pg psql -U you -d passbook -c \
+  'select txn_date, description, kind, amount, category from passbook.transactions
+     order by txn_date'
 ```
 
-Tested with no file from this repo: Firefly comes up healthy and the balance
-reads back. What you lose is the *pipeline*, not the ledger.
+`passbook.transactions` is one row per transaction, `passbook.asset_accounts`
+holds each account's opening balance, and `passbook.transaction_tags` the tags.
+Any tool that speaks SQL can read all three. What you lose is the *pipeline*,
+not the ledger.
 
 > Worth a line in your password manager beside the passphrase:
-> **`fireflyiii/core:version-6.6.6`** and **`postgres:16-alpine`**. A newer
-> image migrates the schema on boot and there is no way back.
+> **`postgres:16-alpine`**. A newer image will read this dump; an older one may
+> not.
 
 **Archives taken before `--no-owner --no-privileges` was added** carry
-`ALTER ... OWNER TO firefly` and need a role of that name to restore. Re-take a
+`ALTER ... OWNER TO <user>` and need a role of that name to restore. Re-take a
 backup you can rely on.

@@ -8,7 +8,7 @@ computed final balance equal to the Closing Balance sentinel exactly.
 check to make a test pass.** CLAUDE.md non-negotiable #3.
 
 Hard failures (raise) are reserved for things that mean the parse is wrong or
-the ledger would be corrupted. Soft failures (warn) are observations about the
+The ledger would be corrupted. Soft failures (warn) are observations about the
 bank's habits that could legitimately change without any data being wrong.
 """
 

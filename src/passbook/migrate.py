@@ -60,7 +60,7 @@ class Context:
     supplies, so a migration never grows its own copy of the purge path."""
 
     settings: Any
-    client: Any
+    store: Any
     registry: list[Any]
     say: Callable[[str], None]
     purge_and_repush: Callable[[Any], None]

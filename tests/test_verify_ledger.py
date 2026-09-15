@@ -9,12 +9,12 @@ The first test here is the one that matters: it reconstructs that exact state an
 asserts the check catches it, naming what is missing and by how much. Everything
 else guards a way of getting it wrong.
 
-No network: `verify_ledger` takes a client, and a fake one is enough.
+No network: `verify_ledger` takes a store, and a fake one is enough.
 """
 
 from __future__ import annotations
 
-import json
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,33 +27,36 @@ from passbook.config import Account
 ACCOUNT = "Test Account"
 
 
-class FakeFirefly(StoreDouble):
-    """Just enough Firefly. `splits` are what the account holds."""
+class FakeLedger(StoreDouble):
+    """Just enough ledger. `splits` are what the account holds."""
 
-    def __init__(self, splits, *, balance="6073.38", account=ACCOUNT):
+    def __init__(self, splits, *, balance="6073.38", account=ACCOUNT, opening="12612.64"):
         self.splits = splits
         self.balance = balance
         self.account = account
+        self.opening = opening
 
     def asset_accounts(self):
         return [
-            {"id": "7", "attributes": {"name": self.account, "current_balance": self.balance}}
+            {
+                "name": self.account,
+                "current_balance": self.balance,
+                "opening_balance": self.opening,
+                "opening_on": date(2026, 5, 6),
+                "currency": "INR",
+            }
         ]
 
-    def account_transactions(self, account_id):
-        assert account_id == "7"
-        return [{"attributes": {"transactions": self.splits}}]
-
-
-def opening(amount="12612.64"):
-    return {"type": "opening balance", "amount": amount, "external_id": None}
+    def account_transactions(self, account):
+        assert account == self.account
+        return self.splits
 
 
 def row(external_id, amount="10.00", *, slug="canara-1111"):
-    """A live split. Ids are namespaced (§21.1); `bare=` covers the pre-migration
+    """A stored row. Ids are namespaced; `slug=None` covers the pre-migration
     form, which reads must still tolerate."""
     return {
-        "type": "withdrawal",
+        "kind": "withdrawal",
         "amount": amount,
         "external_id": f"{slug}-{external_id}" if slug else external_id,
     }
@@ -114,7 +117,7 @@ def verdict_for(archive, settings, splits, *, balance=None, **kwargs):
     if balance is None:
         balance = str(closing_balance(archive))
     return service.verify_ledger(
-        FakeFirefly(splits, balance=balance), settings, archive, **kwargs
+        FakeLedger(splits, balance=balance, **kwargs), settings, archive
     )
 
 
@@ -144,10 +147,8 @@ def test_it_catches_the_2026_08_11_state(archive, settings):
     verdict = verdict_for(
         archive,
         settings,
-        [opening()] + [row(i) for i in surviving],
-        balance=str(stalled),
-        trashed=0,
-        intents=[],
+        [row(i) for i in surviving],
+        balance=str(stalled)
     )
 
     assert verdict.ok is False
@@ -170,13 +171,14 @@ def test_a_healthy_ledger_passes_every_check(archive, settings):
     verdict = verdict_for(
         archive,
         settings,
-        [opening()] + [row(i) for i in all_ids(archive)],
-        trashed=0,
-        intents=[],
+        [row(i) for i in all_ids(archive)]
     )
     assert verdict.ok is True
     assert verdict.unchecked == []
-    assert verdict.headline == "all 6 checks passed"
+    # Four, not six. Two of the six were about the store rather than about the
+    # ledger — soft-deleted journals waiting to be force-purged, and a purge
+    # left half-finished — and neither state exists any more.
+    assert verdict.headline == "all 4 checks passed"
     assert all(c.ok is True for c in verdict.checks)
 
 
@@ -184,14 +186,12 @@ def test_a_healthy_ledger_passes_every_check(archive, settings):
 
 
 def test_extra_rows_are_reported_as_well_as_missing_ones(archive, settings):
-    """A row in Firefly with no statement behind it is also a defect — it means
+    """A row in the ledger with no statement behind it is also a defect — it means
     a statement was archived away, or something else pushed into the account."""
     verdict = verdict_for(
         archive,
         settings,
-        [opening()] + [row(i) for i in all_ids(archive)] + [row("99999999999999")],
-        trashed=0,
-        intents=[],
+        [row(i) for i in all_ids(archive)] + [row("99999999999999")]
     )
     rows = check_named(verdict, "rows")
     assert rows.ok is False
@@ -199,77 +199,30 @@ def test_extra_rows_are_reported_as_well_as_missing_ones(archive, settings):
     assert "99999999999999" in rows.detail
 
 
-def test_tombstones_fail_the_check_and_name_the_remedy(archive, settings):
+def test_an_account_that_opens_at_zero_is_loud_about_the_consequence(archive, settings):
+    """A registered account whose opening balance was never set. Every figure on
+    it is short by that amount, and the balance can never equal the bank's — and
+    it was caught exactly this way, on an account with no rows in it yet."""
     verdict = verdict_for(
-        archive, settings, [opening()] + [row(i) for i in all_ids(archive)],
-        trashed=72, intents=[],
-    )
-    trashed = check_named(verdict, "trashed")
-    assert trashed.ok is False
-    assert "72 soft-deleted" in trashed.detail
-    # §66. The remedy named here used to be `passbook purge --confirm --yes`,
-    # which deletes every row carrying an external_id — the whole managed
-    # ledger — to clear a stray tombstone. It was followed for real once. The
-    # check must name the targeted call and must warn OFF the destructive one.
-    assert "data/purge" in trashed.detail
-    assert "purge_trashed" in trashed.detail
-    assert "Do NOT reach for `passbook purge`" in trashed.detail
-
-
-def test_an_unavailable_tombstone_count_is_UNCHECKED_never_a_pass(archive, settings):
-    """The web container has no database credentials and Firefly's API cannot
-    list trashed journals — verified against the pinned tag, `routes/api.php`
-    exposes only `data/destroy` and `data/purge`. Reporting a tick for that would
-    be the §19 failure in miniature: a green light for something never looked at.
-    """
-    verdict = verdict_for(
-        archive, settings, [opening()] + [row(i) for i in all_ids(archive)], intents=[]
-    )
-    trashed = check_named(verdict, "trashed")
-    assert trashed.ok is None
-    assert trashed not in verdict.failed
-    assert trashed in verdict.unchecked
-    # Unchecked does not make the verdict false, and it does not hide either.
-    assert verdict.ok is True
-    assert verdict.headline == "5 of 6 checks passed"
-
-
-def test_an_unfinished_purge_fails_the_check(archive, settings):
-    verdict = verdict_for(
-        archive, settings, [opening()] + [row(i) for i in all_ids(archive)],
-        trashed=0, intents=["purge-intent-20260811-035417.json"],
-    )
-    intent = check_named(verdict, "purge intent")
-    assert intent.ok is False
-    assert "purge --resume" in intent.detail
-
-
-def test_a_missing_opening_balance_is_loud_about_the_consequence(archive, settings):
-    verdict = verdict_for(
-        archive, settings, [row(i) for i in all_ids(archive)], trashed=0, intents=[]
+        archive, settings, [row(i) for i in all_ids(archive)], opening="0.00"
     )
     check = check_named(verdict, "opening balance")
     assert check.ok is False
-    assert "MISSING" in check.detail
+    assert "short by that amount" in check.detail
 
 
-def test_an_opening_balance_with_an_external_id_fails(archive, settings):
-    """It would then be a purge candidate, and `purge`'s exclusion is structural
-    precisely because the opening balance carries no external_id (§7.3)."""
-    tainted = dict(opening())
-    tainted["external_id"] = "20260507000000"
-    verdict = verdict_for(
-        archive, settings, [tainted] + [row(i) for i in all_ids(archive)],
-        trashed=0, intents=[],
-    )
+def test_an_opening_balance_that_is_set_passes_and_says_when(archive, settings):
+    """A column, so it cannot be purged, duplicated, or acquire an id — three
+    ways this used to be able to go wrong when it was a row."""
+    verdict = verdict_for(archive, settings, [row(i) for i in all_ids(archive)])
     check = check_named(verdict, "opening balance")
-    assert check.ok is False
-    assert "external_id" in check.detail
+    assert check.ok is True
+    assert "2026-05-06" in check.detail
 
 
 def test_a_wrong_account_name_fails_before_anything_else(archive, settings):
     verdict = service.verify_ledger(
-        FakeFirefly([], account="Some Other Account"), settings, archive
+        FakeLedger([], account="Some Other Account"), settings, archive
     )
     assert verdict.ok is False
     assert verdict.checks[0].name == "account"
@@ -278,8 +231,7 @@ def test_a_wrong_account_name_fails_before_anything_else(archive, settings):
 def test_an_empty_archive_cannot_be_compared_and_says_so(tmp_path, settings):
     (tmp_path / "archive").mkdir()
     verdict = service.verify_ledger(
-        FakeFirefly([opening()], balance="0.00"), settings, tmp_path / "archive",
-        trashed=0, intents=[],
+        FakeLedger([], balance="0.00"), settings, tmp_path / "archive"
     )
     assert check_named(verdict, "balance").ok is None
     assert check_named(verdict, "rows").ok is None
@@ -294,106 +246,17 @@ def test_the_balance_is_compared_against_the_NEWEST_statement(archive, settings,
 
     shutil.copy(XLS_FIXTURE, archive / "2026-08" / "older.xls")
     verdict = verdict_for(
-        archive, settings, [opening()] + [row(i) for i in all_ids(archive)],
-        trashed=0, intents=[],
+        archive, settings, [row(i) for i in all_ids(archive)]
     )
     # Both files are the same fixture, so the closing balance agrees either way;
     # what matters is that exactly one statement is named.
     assert check_named(verdict, "balance").detail.count(".xls") == 1
 
 
-# --- purge intent -----------------------------------------------------------
-
-
-def test_intent_is_written_before_deleting_and_says_what_to_restore(tmp_path):
-    path = ops.write_purge_intent(
-        ACCOUNT, ["1", "2", "3"], ["archive/2026-08/statement.xls"], backups=tmp_path
-    )
-    assert path.exists()
-    data = json.loads(path.read_text())
-    assert data["stage"] == "purging"
-    assert data["expected_rows"] == 3
-    assert data["statements"] == ["archive/2026-08/statement.xls"]
-    assert data["account"] == ACCOUNT
-    # 600: it names an account and a set of transaction ids.
-    assert oct(path.stat().st_mode)[-3:] == "600"
-
-
-def test_an_unfinished_intent_is_outstanding_and_a_done_one_is_not(tmp_path):
-    path = ops.write_purge_intent(ACCOUNT, ["1"], [], backups=tmp_path)
-    assert ops.outstanding_purge_intents(tmp_path) == [path]
-
-    ops.update_purge_intent(path, stage="purged")
-    assert ops.outstanding_purge_intents(tmp_path) == [path], "purged is not finished"
-
-    ops.update_purge_intent(path, stage="done")
-    assert ops.outstanding_purge_intents(tmp_path) == []
-
-
-def test_an_unreadable_intent_counts_as_outstanding(tmp_path):
-    """It was being written when something stopped — the one interpretation that
-    must never be "probably fine"."""
-    broken = tmp_path / "purge-intent-20260811-035417.json"
-    broken.write_text("{ truncated")
-    assert ops.outstanding_purge_intents(tmp_path) == [broken]
-
-
-def test_clearing_removes_the_file(tmp_path):
-    path = ops.write_purge_intent(ACCOUNT, ["1"], [], backups=tmp_path)
-    ops.clear_purge_intent(path)
-    assert not path.exists()
-    assert ops.outstanding_purge_intents(tmp_path) == []
-
-
-def test_purge_records_intent_even_when_the_caller_forgets(tmp_path, monkeypatch):
-    """`purge()` writes its own intent if none was passed. The guarantee has to
-    be in the function that deletes, not in the discipline of its callers."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "backups").mkdir()
-
-    from passbook.firefly import purge as purge_module
-
-    class Client:
-        def delete_transaction(self, group_id):
-            return None
-
-        def purge_trashed(self):
-            return None
-
-    candidates = [
-        purge_module.Candidate(
-            group_id="1", external_id="20260509000001", date="2026-05-09",
-            description="x", amount=Decimal("1.00"),
-        )
-    ]
-    result = purge_module.purge(Client(), candidates, account=ACCOUNT)
-    assert result.intent is not None and result.intent.exists()
-    data = json.loads(result.intent.read_text())
-    assert data["stage"] == "purged", "advanced only after the force-delete ran"
-    assert data["external_ids"] == ["20260509000001"]
-    assert result.hard_purged is True
-
-
-def test_the_intent_stays_at_purging_if_the_force_delete_never_ran(tmp_path, monkeypatch):
-    """No deletes, no force-purge, so nothing is claimed. An intent still reading
-    `purging` is what tells the next re-push that tombstones may remain."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "backups").mkdir()
-    from passbook.firefly import purge as purge_module
-
-    class Client:
-        def purge_trashed(self):  # pragma: no cover - must not be called
-            raise AssertionError("force-purge ran with nothing deleted")
-
-    result = purge_module.purge(Client(), [], account=ACCOUNT)
-    assert result.hard_purged is False
-    assert json.loads(result.intent.read_text())["stage"] == "purging"
-
-
 def test_ops_still_cannot_execute_anything_but_rclone():
-    """The intent file is deliberately plain file I/O. Counting tombstones needs
-    the database and therefore `docker compose exec`, which lives in the CLI —
-    the web container must never gain that ability (§15.1)."""
+    """The web container must never gain the ability to shell out to anything
+    but rclone: it listens on a port and parses uploads, and the Docker socket
+    would turn a web compromise into a host compromise."""
     import ast
 
     source = (Path(__file__).resolve().parent.parent / "src/passbook/ops.py").read_text()
@@ -409,39 +272,40 @@ def test_ops_still_cannot_execute_anything_but_rclone():
     assert executables <= {"rclone"}, f"ops.py can execute {executables}"
 
 
-# --- §119: the check that could not count -----------------------------------
+# --- the check that could not count -----------------------------------------
 
 
-def test_a_transaction_posted_twice_fails_the_rows_check(archive, settings):
+def test_a_transaction_stored_twice_fails_the_rows_check(archive, settings):
     """The incident this check missed.
 
-    `rows` compared `set(live) == set(archived)`, so a row posted twice was
-    invisible to it: the ledger held more splits than the archive had
+    `rows` compared `set(live) == set(archived)`, so a row written twice was
+    invisible to it: the ledger held more rows than the archive had
     transactions and the check said "one per archived transaction", in green.
     The balance check caught it; this one told the operator everything was
     fine, which is the half that decides where they look.
 
     Non-negotiable 11, literally: a set says which ids are present, only a
     count says how many times.
+
+    The state is now unwritable — `external_id` is the primary key — and the
+    check stays, because a check that cannot fail is the cheapest possible
+    evidence that the guarantee is still the one being relied on.
     """
     ids = all_ids(archive)
     doubled = ids[:7]
     verdict = verdict_for(
         archive,
         settings,
-        [opening()] + [row(i) for i in ids] + [row(i) for i in doubled],
-        trashed=0,
-        intents=[],
+        [row(i) for i in ids] + [row(i) for i in doubled]
     )
 
     rows = check_named(verdict, "rows")
     assert rows.ok is False
-    assert "7 transaction(s) posted MORE THAN ONCE" in rows.detail
+    assert "7 transaction(s) are in the ledger MORE THAN ONCE" in rows.detail
     assert "7 extra row(s)" in rows.detail
     assert doubled[0] in rows.detail
-    # It names the remedy and does not perform it (non-negotiable 12).
-    assert "make backup" in rows.detail
-    assert "passbook dedupe" in rows.detail
+    # It names what to look at and does not repair it (non-negotiable 12).
+    assert "primary key" in rows.detail
     assert verdict.ok is False
 
 
@@ -449,7 +313,7 @@ def test_the_rows_check_counts_splits_not_identities(archive, settings):
     """The pass message must state what was counted, not what was distinct."""
     ids = all_ids(archive)
     verdict = verdict_for(
-        archive, settings, [opening()] + [row(i) for i in ids], trashed=0, intents=[]
+        archive, settings, [row(i) for i in ids]
     )
     rows = check_named(verdict, "rows")
     assert rows.ok is True
@@ -471,14 +335,12 @@ def test_a_row_duplicated_across_the_namespace_migration_is_still_one_row(
         account_number=getattr(settings, "passbook_account_number", "1111"),
         asset_account=getattr(settings, "passbook_asset_account", ""),
     )
-    splits = [opening()] + [row(account.external_id(i)) for i in ids] + [row(ids[0])]
+    splits = [row(account.external_id(i)) for i in ids] + [row(ids[0])]
     verdict = service.verify_ledger(
-        FakeFirefly(splits, balance=str(closing_balance(archive))),
+        FakeLedger(splits, balance=str(closing_balance(archive))),
         account,
-        archive,
-        trashed=0,
-        intents=[],
+        archive
     )
     rows = check_named(verdict, "rows")
     assert rows.ok is False
-    assert "1 transaction(s) posted MORE THAN ONCE" in rows.detail
+    assert "1 transaction(s) are in the ledger MORE THAN ONCE" in rows.detail

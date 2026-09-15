@@ -26,14 +26,13 @@ from ...configwrite import (
     plan_new_category,
     plan_remove_category,
 )
-from ...firefly.bootstrap import bootstrap as bootstrap_rules
-from ...firefly.bootstrap import load_rules
-from ...firefly.client import FireflyError
+from ...rules import load_rules
+from ...store import LedgerError
 from ...service import is_namespaced
 from .. import auth as A
 
 from ._base import (
-    _client,
+    _ledger,
     _fail,
     _money,
     _payee_row,
@@ -566,7 +565,7 @@ def payees_diff():
             "categoryChanges": category_changes,
             "ledger": _ledger_impact(merged, category_changes),
             # Categories this submission would leave with no payees at all.
-            # They keep existing — in the dropdown, and in Firefly — and can
+            # They keep existing — in the dropdown, and in the ledger — and can
             # never match anything again, so a report on one is permanently
             # empty. That is what happened to Day Canteen (§33).
             "emptied": _emptied_categories(merged, category_changes),
@@ -601,7 +600,7 @@ def _emptied_categories(aliases: dict[str, str], category_changes: dict[str, str
 
 
 def _ledger_impact(aliases: dict[str, str], category_changes: dict[str, str]) -> dict | None:
-    """What this *unwritten* config would do to the rows already in Firefly.
+    """What this *unwritten* config would do to the rows already in the ledger.
 
     The count used to be knowable only after the write, so the page asked the
     operator to approve a config diff and then told them the ledger consequence
@@ -609,12 +608,12 @@ def _ledger_impact(aliases: dict[str, str], category_changes: dict[str, str]) ->
     preview takes the prospective aliases and rules as an overlay rather than
     reading the two files off disk.
 
-    `None` when Firefly cannot be asked. That is not an error on this route —
+    `None` when the ledger cannot be asked. That is not an error on this route —
     writing config is what the operator requested, and it works whether or not
-    the ledger is reachable.
+    The ledger is reachable.
     """
     st = load_settings()
-    if not st.firefly_token or not st.passbook_asset_account:
+    if not st.passbook_asset_account:
         return None
 
     rules = load_rules()
@@ -624,11 +623,11 @@ def _ledger_impact(aliases: dict[str, str], category_changes: dict[str, str]) ->
         rules = _rules_with(rules, aliases, category_changes)
 
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
+        with _ledger() as store:
             changes, considered = service.reapply_preview(
-                client, st, current_app.config["ARCHIVE"], aliases=aliases, rules=rules
+                store, st, current_app.config["ARCHIVE"], aliases=aliases, rules=rules
             )
-    except FireflyError as exc:
+    except LedgerError as exc:
         log.info("ledger impact unavailable: %s", exc)
         return None
     return _preview(changes, considered)
@@ -704,26 +703,22 @@ def payees_apply():
     st = load_settings()
     summary = "Config written."
     synced: dict | None = None
-    if st.firefly_token:
+    # The second half of editing a payee, in the same request. Config alone
+    # reaches only FUTURE writes; the rows already in the ledger are what the
+    # operator is looking at, and leaving them for a separate destructive step
+    # meant they were never moved at all.
+    #
+    # There is no rules step before it any more. The rules used to live in a
+    # separate engine that had to be told about the change first; they are
+    # applied by passbook when a row is written, so writing the config *is*
+    # telling it.
+    if st.passbook_asset_account:
         try:
-            with _client(st.firefly_url, st.firefly_token) as client:
-                res = bootstrap_rules(client, load_rules(), st.large_txn_threshold)
-                summary = (
-                    f"Config written. Rules: {len(res.created)} created, "
-                    f"{len(res.updated)} updated, {len(res.existing)} unchanged."
-                )
-
-                # The second half of editing a payee, in the same request.
-                # Config alone reaches only FUTURE pushes; the rows already in
-                # Firefly are what the operator is looking at, and leaving them
-                # for a separate destructive step meant they were never moved
-                # at all. Rules first, then the rows — same order as §15.2, and
-                # for the same reason.
-                if st.passbook_asset_account:
-                    synced = _sync_now(client, st)
-                    summary += _synced_summary(synced)
-        except FireflyError as exc:
-            summary = f"Config written, but the ledger store did not answer: {exc}"
+            with _ledger() as store:
+                synced = _sync_now(store, st)
+                summary += _synced_summary(synced)
+        except LedgerError as exc:
+            summary = f"Config written, but the ledger did not answer: {exc}"
     return jsonify({"ok": True, "summary": summary, "synced": synced})
 
 

@@ -1,7 +1,7 @@
 """Typer entrypoint. SPEC §7.3.
 
 `parse` and `payees` are read-only and make no network calls. `doctor`, `push`,
-`sync`, `bootstrap` and `purge` talk to Firefly; the last three write.
+`sync`, `bootstrap` and `purge` talk to the ledger; the last three write.
 """
 
 import json
@@ -9,7 +9,7 @@ import logging
 import sys
 import shutil
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,14 +27,12 @@ from .config import (
     save_accounts,
     load_payee_aliases,
     load_settings,
-    token_expiry,
 )
-from .firefly.bootstrap import RULES_FILE, load_bills, load_rules
-from .firefly.bootstrap import bootstrap as bootstrap_rules
-from .firefly.client import FireflyClient, FireflyError
-from .firefly.purge import find_candidates, find_duplicates
-from .firefly.purge import purge as purge_transactions
-from .firefly.push import build_payload, push_transactions
+from .rules import load_rules
+from .store import LedgerError, open_ledger
+from .purge import find_candidates
+from .purge import purge as purge_transactions
+from .push import build_split, push_transactions
 from .loaders import load as load_statement
 from . import reminders
 from .loaders import read_grid
@@ -49,7 +47,7 @@ from .validate import (
     check,
 )
 
-app = typer.Typer(add_completion=False, help="Canara Bank -> Firefly III ingest pipeline.")
+app = typer.Typer(add_completion=False, help="Canara Bank -> the ledger ingest pipeline.")
 
 TOKEN_WARN_DAYS = 30
 console = Console()
@@ -73,7 +71,7 @@ def sync_staleness(target: Console | None = None) -> int | None:
     Backups protect what reached the ledger; they cannot recover what never did.
 
     Reads `archive/`, not `inbox/`: a file lands there only after a *successful*
-    push, so it records what actually reached Firefly rather than what was
+    push, so it records what actually reached the ledger rather than what was
     merely downloaded.
     """
     from .service import sync_status
@@ -541,7 +539,7 @@ def accounts_list() -> None:
         )
         return
     table = Table(box=None, pad_edge=False)
-    for column in ("slug", "bank", "account", "firefly asset account", "label"):
+    for column in ("slug", "bank", "account", "the ledger asset account", "label"):
         table.add_column(column)
     for account in registry:
         table.add_row(
@@ -558,7 +556,7 @@ def accounts_list() -> None:
 def accounts_add(
     statement: Path = typer.Argument(..., help="a statement for the account to add"),
     asset_account: str = typer.Option(
-        None, "--asset-account", help="the Firefly asset account to post into"
+        None, "--asset-account", help="the asset account to post into"
     ),
     slug: str = typer.Option(None, help="external_id namespace; defaults to <bank>-<last4>"),
     label: str = typer.Option(None, help="what the switcher shows"),
@@ -587,22 +585,19 @@ def accounts_add(
     settings = load_settings()
     target = (asset_account or "").strip()
     if not target:
-        if not settings.firefly_token:
-            err.print("[red]--asset-account is required[/red] (no FIREFLY_TOKEN to list them).")
-            raise typer.Exit(5)
-        with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-            names = [a["attributes"]["name"] for a in client.asset_accounts()]
+        with open_ledger(settings) as store:
+            names = [a["name"] for a in store.asset_accounts()]
         taken = {a.asset_account for a in registry}
         free = [n for n in names if n not in taken]
         if len(free) == 1:
             target = free[0]
             console.print(f"using the only unclaimed asset account: {target!r}")
         else:
-            # Never guessed. Two accounts sharing one Firefly asset account merge
-            # in Firefly whatever the registry says, and `doctor` has refused to
+            # Never guessed. Two registry accounts sharing one asset account
+            # merge whatever the registry says, and `doctor` has refused to
             # guess between several since §7.2.
             err.print(
-                "[red]--asset-account is required.[/red] Firefly has "
+                "[red]--asset-account is required.[/red] the ledger has "
                 f"{len(names)} asset account(s): {', '.join(repr(n) for n in names)}"
                 + (f"; already claimed: {', '.join(sorted(taken))}" if taken else "")
             )
@@ -633,7 +628,7 @@ def accounts_add(
 
 @app.command()
 def doctor(verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
-    """Check .env, Firefly reachability, the token, and the asset account.
+    """Check .env, the ledger reachability, the token, and the asset account.
 
     Run this before pushing anything. SPEC §7.3.
     """
@@ -658,86 +653,53 @@ def doctor(verbose: bool = typer.Option(False, "-v", "--verbose")) -> None:
     else:
         bad("PASSBOOK_ACCOUNT_NUMBER is not set — the §6.7 safety assertion cannot run")
 
-    token = (settings.firefly_token or "").strip()
-    if not token:
-        bad("FIREFLY_TOKEN is not set")
-    elif token.count(".") != 2:
-        bad(
-            "FIREFLY_TOKEN is not a JWT (expected ~1000 chars and 2 dots). "
-            "The 'Command line token' on the Profile page is a different "
-            "credential — take the one from Options -> Remote access and tokens."
-        )
-    else:
-        ok(f"FIREFLY_TOKEN looks like a JWT ({len(token)} chars)")
-        expiry = token_expiry(token)
-        if expiry is None:
-            warn("token carries no readable `exp` claim; expiry cannot be checked")
-        else:
-            days = (expiry - datetime.now(timezone.utc)).days
-            when = expiry.date().isoformat()
-            if days < 0:
-                bad(f"token EXPIRED on {when}. Issue a new one.")
-            elif days <= TOKEN_WARN_DAYS:
-                warn(f"token expires in {days} days ({when}) — issue a new one soon")
-            else:
-                ok(f"token valid for {days} more days (expires {when})")
-
     sync_staleness()
 
-    console.print("\n[bold]firefly[/bold]")
+    console.print("\n[bold]ledger[/bold]")
     if problems:
         console.print("  [dim]skipped — fix the configuration above first[/dim]")
         raise typer.Exit(1)
 
+    # No credential to check. The ledger is passbook's own, on the database the
+    # stack already runs, so the only question worth asking is whether it
+    # answers — and the way to find that out is to ask it.
     try:
-        with FireflyClient(settings.firefly_url, token) as client:
-            about = client.about()
-            ok(f"reachable at {settings.firefly_url} (v{about.get('version')}, "
-               f"api v{about.get('api_version')}, {about.get('driver')})")
-
-            accounts = client.asset_accounts()
-            names = [a["attributes"]["name"] for a in accounts]
+        with open_ledger(settings) as store:
+            accounts = store.asset_accounts()
+            names = [a["name"] for a in accounts]
+            ok("the ledger answers")
             if not accounts:
-                bad("no asset accounts exist — create one in Firefly first")
+                warn("no asset accounts yet — registering a statement creates one")
             else:
                 ok(f"{len(accounts)} asset account(s): {', '.join(repr(n) for n in names)}")
 
             configured = settings.passbook_asset_account
-            if not configured:
-                bad(
-                    "PASSBOOK_ASSET_ACCOUNT is not set in .env — refusing to guess "
-                    f"which of {len(accounts)} account(s) to post into"
-                )
-            elif configured not in names:
+            if configured and configured not in names:
                 bad(f"PASSBOOK_ASSET_ACCOUNT {configured!r} is not one of {names}")
-            else:
-                match = next(a for a in accounts if a["attributes"]["name"] == configured)
-                currency = match["attributes"].get("currency_code")
+            elif configured:
+                match = next(a for a in accounts if a["name"] == configured)
+                currency = match.get("currency")
                 ok(f"target account {configured!r} exists (currency {currency})")
                 if currency != "INR":
                     bad(f"target account currency is {currency}, expected INR")
-    except FireflyError as exc:
+    except LedgerError as exc:
         bad(str(exc))
 
-    # --- the live ledger itself. SPEC §20, and the gap §19 exposed: everything
-    #     above can pass while Firefly holds a third of the ledger.
+    # --- the ledger's contents, which is a different question from whether it
+    #     answers: everything above can pass while it holds a third of the rows.
     registry = load_accounts(settings=settings)
-    if settings.firefly_token and registry:
-        trashed = _trashed_journals()
-        intents = [p.name for p in ops.outstanding_purge_intents()]
+    if registry:
         try:
-            with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
+            with open_ledger(settings) as store:
                 for entry in registry:
                     console.print(
                         f"\n[bold]ledger integrity[/bold] — {entry.slug} ({entry.masked})"
                     )
                     _print_verdict(
-                        service.verify_ledger(
-                            client, entry, trashed=trashed, intents=intents
-                        ),
+                        service.verify_ledger(store, entry),
                         ok=ok, warn=warn, bad=bad,
                     )
-        except FireflyError as exc:
+        except LedgerError as exc:
             bad(f"could not verify the ledger: {exc}")
 
     console.print()
@@ -756,12 +718,9 @@ def _require_pushable(meta):
     possible answer.
     """
     settings = load_settings()
-    if not settings.firefly_token:
-        err.print("[red]FIREFLY_TOKEN is not set.[/red] Run `passbook doctor`.")
-        raise typer.Exit(5)
     try:
-        with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-            account = service.resolve_account(meta, settings, client=client)
+        with open_ledger(settings) as store:
+            account = service.resolve_account(meta, settings, store=store)
     except UnknownAccount as exc:
         err.print(f"[red]unregistered account:[/red] {exc}")
         err.print("Add it with: [bold]passbook accounts add[/bold]")
@@ -771,7 +730,7 @@ def _require_pushable(meta):
         raise typer.Exit(4) from exc
     if not account.asset_account:
         err.print(
-            "[red]no Firefly asset account for this account.[/red] "
+            "[red]no asset account for this account.[/red] "
             "Run `passbook doctor` to list them, then `passbook accounts add`."
         )
         raise typer.Exit(5)
@@ -797,149 +756,7 @@ def _archived_statements_paths(archive: Path = Path("archive")) -> list[Path]:
     return sorted(p for p in archive.rglob("*") if p.is_file() and not p.name.startswith("."))
 
 
-def _resume_purge(settings) -> None:
-    """Finish an interrupted purge/re-push cycle. SPEC §19.7.
-
-    The intent file says what was being deleted and what has to go back. The
-    LEDGER, not the file, is the source of truth for what remains — so this
-    re-derives the candidates rather than trusting a `deleted` list that was
-    itself written by the run that died.
-    """
-    outstanding = ops.outstanding_purge_intents()
-    if not outstanding:
-        console.print("[green]nothing to resume[/green] — no unfinished purge recorded.")
-        return
-    if len(outstanding) > 1:
-        console.print(
-            f"[yellow]{len(outstanding)} unfinished purges recorded[/yellow]; "
-            "finishing the oldest first."
-        )
-
-    path = outstanding[0]
-    intent = ops.read_purge_intent(path)
-    target = intent.get("account") or settings.passbook_asset_account
-    console.print(
-        f"[bold]resuming[/bold] {path.name}\n"
-        f"  recorded           {intent.get('created')}\n"
-        f"  stage              {intent.get('stage')}\n"
-        f"  account            {target!r}\n"
-        f"  rows to restore    {intent.get('expected_rows')}\n"
-        f"  statements         {len(intent.get('statements') or [])}\n"
-    )
-    if not settings.firefly_token:
-        err.print("[red]FIREFLY_TOKEN is not set.[/red]")
-        raise typer.Exit(5)
-
-    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-        accounts = {a["attributes"]["name"]: a["id"] for a in client.asset_accounts()}
-        if target not in accounts:
-            err.print(f"[red]no asset account named {target!r}[/red]")
-            raise typer.Exit(5)
-
-        # 1. finish the delete, if it never got through the whole list.
-        recorded = set(intent.get("external_ids") or [])
-        candidates, _ = find_candidates(client, accounts[target])
-        left = [c for c in candidates if c.external_id in recorded]
-        if left:
-            console.print(f"  {len(left)} recorded row(s) still present — deleting")
-            result = purge_transactions(client, left, intent=path)
-            if not result.ok:
-                err.print(f"[red]{result.failed} delete(s) failed; nothing pushed.[/red]")
-                raise typer.Exit(6)
-        else:
-            console.print("  delete stage already complete")
-            ops.update_purge_intent(path, stage="purged")
-
-        # 2. push the statements back. Duplicates are the normal outcome here —
-        #    a resume of a run that got partway through re-pushing will hit them.
-        ops.update_purge_intent(path, stage="repushing")
-        pushed = duplicates = failed = 0
-        for name in intent.get("statements") or []:
-            statement = Path(name)
-            if not statement.is_file():
-                console.print(f"  [yellow]missing[/yellow] {name} — cannot re-push it")
-                failed += 1
-                continue
-            parsed = service.parse_statement(statement)
-            service.account_matches(parsed.meta, settings)
-            outcome = service.push_statement(parsed, settings, client)
-            pushed += outcome.pushed
-            duplicates += outcome.duplicates
-            failed += outcome.failed
-            console.print(
-                f"  {statement.name:<40} pushed {outcome.pushed:>3}  "
-                f"duplicates {outcome.duplicates:>3}  failed {outcome.failed}"
-            )
-
-        # 3. only clear the intent once the LEDGER says it is whole.
-        verdict = service.verify_ledger(
-            client, settings, trashed=_trashed_journals(), intents=[]
-        )
-
-    console.print(f"\npushed {pushed}, duplicates {duplicates}, failed {failed}\n")
-    console.print("[bold]ledger integrity[/bold]")
-    _print_verdict(
-        verdict,
-        ok=lambda m: console.print(f"  [green]ok[/green]    {m}"),
-        warn=lambda m: console.print(f"  [yellow]warn[/yellow]  {m}"),
-        bad=lambda m: console.print(f"  [red]FAIL[/red]  {m}"),
-    )
-    if verdict.failed or failed:
-        console.print(
-            f"\n[red bold]not clearing {path.name}[/red bold] — the cycle is still "
-            "unfinished, and the record is what makes that visible."
-        )
-        raise typer.Exit(7)
-    ops.clear_purge_intent(path)
-    console.print(f"\n[green]resumed and verified;[/green] {path.name} cleared.")
-
-
 # --- ledger integrity --------------------------------------------------------
-
-
-def _trashed_journals() -> int | None:
-    """Count soft-deleted journals, or None if it cannot be asked.
-
-    **Deliberately here and not in `ops.py`.** Firefly's API cannot answer this —
-    verified against the pinned tag, `routes/api.php` exposes only
-    `DELETE data/destroy` and `DELETE data/purge`, neither of which lists trashed
-    journals — so it needs the database, which means `docker compose exec`. That
-    ability must never reach the web container (§15.1), and
-    `test_ops_only_ever_executes_rclone` enforces it at AST level. The CLI runs on
-    the host, where the socket is already the operator's.
-
-    None is returned for *any* obstacle, and `verify_ledger` then reports the
-    check as unchecked rather than passed.
-    """
-    import subprocess
-
-    settings = load_settings()
-    env = {}
-    for line in (Path(".env").read_text().splitlines() if Path(".env").is_file() else []):
-        if line.startswith(("DB_USERNAME=", "DB_DATABASE=", "DB_PASSWORD=")):
-            key, _, value = line.partition("=")
-            env[key] = value.strip().strip("\"'")
-    if not {"DB_USERNAME", "DB_DATABASE", "DB_PASSWORD"} <= env.keys():
-        return None
-    try:
-        done = subprocess.run(
-            [
-                "docker", "compose", "exec", "-T",
-                "-e", f"PGPASSWORD={env['DB_PASSWORD']}",
-                "db", "psql", "-qtAX", "-U", env["DB_USERNAME"], "-d", env["DB_DATABASE"],
-                "-c", "select count(*) from transaction_journals where deleted_at is not null;",
-            ],
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if done.returncode != 0:
-        return None
-    try:
-        return int(done.stdout.strip().splitlines()[0])
-    except (ValueError, IndexError):
-        return None
-    _ = settings  # settings are read for .env discovery only
 
 
 def _print_verdict(verdict, *, ok, warn, bad) -> None:
@@ -959,12 +776,12 @@ def verify_ledger_command(
     account: str = typer.Option(None, help="asset account; defaults to PASSBOOK_ASSET_ACCOUNT"),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
-    """Check the LIVE ledger against the statements that built it. SPEC §20.
+    """Check the LIVE ledger against the statements that built it.
 
-    The gap the 2026-08-11 incident exposed (§19): the continuity invariant
-    (§6.6) validates a file at parse time, and nothing validated Firefly. A purge
-    plus an interrupted re-push left 21 of 93 rows with a self-consistent balance,
-    and every existing check passed for seven hours.
+    The gap this exists to close: the continuity invariant validates a *file* at
+    parse time, and for a long time nothing validated the ledger. A purge plus
+    an interrupted re-push once left 21 of 93 rows with a self-consistent
+    balance, and every existing check passed for seven hours.
 
     Exits non-zero if any check fails, so it can gate a script.
     """
@@ -972,8 +789,8 @@ def verify_ledger_command(
     settings = load_settings()
     if account:
         settings = settings.model_copy(update={"passbook_asset_account": account})
-    if not settings.firefly_token or not settings.passbook_asset_account:
-        err.print("[red]FIREFLY_TOKEN or PASSBOOK_ASSET_ACCOUNT is not set.[/red] Run `passbook doctor`.")
+    if not settings.passbook_asset_account:
+        err.print("[red]PASSBOOK_ASSET_ACCOUNT is not set.[/red] Run `passbook doctor`.")
         raise typer.Exit(5)
 
     registry = load_accounts(settings=settings)
@@ -989,16 +806,14 @@ def verify_ledger_command(
     # Every account, not just the first: §21.6. A second account whose rows never
     # arrived is exactly as invisible as the first one's were during §19.
     verdicts = []
-    trashed = _trashed_journals()
-    intents = [p.name for p in ops.outstanding_purge_intents()]
     try:
-        with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
+        with open_ledger(settings) as store:
             for entry in registry:
                 verdicts.append(
-                    (entry, service.verify_ledger(client, entry, trashed=trashed, intents=intents))
+                    (entry, service.verify_ledger(store, entry))
                 )
-    except FireflyError as exc:
-        err.print(f"[red]Firefly did not answer:[/red] {exc}")
+    except LedgerError as exc:
+        err.print(f"[red]the ledger did not answer:[/red] {exc}")
         raise typer.Exit(2) from exc
 
     for entry, verdict in verdicts:
@@ -1034,37 +849,39 @@ def push(
     dry_run: bool = typer.Option(False, "--dry-run", help="print payloads, post nothing"),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
-    """Push one statement into Firefly. SPEC §7.2."""
+    """Write one statement into the ledger."""
     _setup_logging(verbose)
     meta, transactions, warnings = _read(file)
     settings, account = _require_pushable(meta)
 
     if dry_run:
         console.print(
-            f"[bold]dry run[/bold] — {len(transactions)} payloads for "
+            f"[bold]dry run[/bold] — {len(transactions)} rows for "
             f"{meta.masked_account}, routed to {account.slug} "
-            f"({account.asset_account!r}). Nothing is posted.\n"
+            f"({account.asset_account!r}). Nothing is written.\n"
         )
+        rules = load_rules()
         for txn in transactions[:3]:
             console.print_json(
                 json.dumps(
-                    build_payload(txn, account)
+                    build_split(
+                        txn, account, rules=rules, threshold=settings.large_txn_threshold
+                    ),
+                    default=str,  # a date and a Decimal are not JSON by themselves
                 )
             )
         if len(transactions) > 3:
             console.print(f"[dim]... and {len(transactions) - 3} more[/dim]")
         kinds = defaultdict(int)
         for txn in transactions:
-            kinds[
-                build_payload(txn, account)["transactions"][0]["type"]
-            ] += 1
+            kinds[build_split(txn, account)["kind"]] += 1
         console.print(f"\ntypes: {dict(kinds)}")
         console.print(f"rows parsed        {len(transactions)}\nwould push         {len(transactions)}")
         return
 
-    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
+    with open_ledger(settings) as store:
         with console.status(f"pushing {len(transactions)} transactions..."):
-            result = push_transactions(client, transactions, account)
+            result = push_transactions(store, transactions, account)
     _report(result, len(transactions), warnings)
     if not result.ok:
         raise typer.Exit(6)
@@ -1104,9 +921,9 @@ def sync(
             )
             continue
 
-        with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
+        with open_ledger(settings) as store:
             with console.status(f"pushing {len(transactions)}..."):
-                result = push_transactions(client, transactions, account)
+                result = push_transactions(store, transactions, account)
         _report(result, len(transactions), warnings)
 
         if result.ok:
@@ -1123,58 +940,11 @@ def sync(
 
 
 @app.command()
-def bootstrap(
-    dry_run: bool = typer.Option(False, "--dry-run", help="show what would be created"),
-    verbose: bool = typer.Option(False, "-v", "--verbose"),
-) -> None:
-    """Create Firefly rules from config/rules.yaml. Idempotent. SPEC §8."""
-    _setup_logging(verbose)
-    settings = load_settings()
-    if not settings.firefly_token:
-        err.print("[red]FIREFLY_TOKEN is not set.[/red] Run `passbook doctor`.")
-        raise typer.Exit(5)
-
-    config = load_rules()
-    if not config:
-        err.print(f"[red]no rules found[/red] — {RULES_FILE} is missing or empty.")
-        raise typer.Exit(1)
-
-    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-        result = bootstrap_rules(
-            client, config, settings.large_txn_threshold, dry_run=dry_run
-        )
-
-    verb = "would create" if dry_run else "created"
-    console.print(f"{verb:<14} {len(result.created)}")
-    for title in result.created:
-        console.print(f"  [green]+[/green] {title}")
-    if result.updated:
-        console.print(f"updated        {len(result.updated)}")
-        for title in result.updated:
-            console.print(f"  [yellow]~[/yellow] {title}")
-    console.print(f"already present {len(result.existing)}")
-    for title in result.existing:
-        console.print(f"  [dim]=[/dim] {title}")
-    if result.failed:
-        console.print(f"[red]failed         {len(result.failed)}[/red]")
-        for title, message in result.failed:
-            console.print(f"  [red]![/red] {title}: {message}")
-
-    bills = load_bills()
-    console.print(
-        f"\nbills           {len(bills)}"
-        + ("" if bills else "  [dim](bills.yaml is empty by design — SPEC §8)[/dim]")
-    )
-    if not result.ok:
-        raise typer.Exit(6)
-
-
-@app.command()
 def resync(
     confirm: bool = typer.Option(False, "--confirm", help="actually write; omit for a dry run"),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
-    """Write the current config onto rows already in Firefly. SPEC §23.
+    """Write the current config onto rows already in the ledger. SPEC §23.
 
     Aliases and rules are applied at push time, so editing `config/` leaves rows
     already pushed showing the names they were pushed with. This rewrites those
@@ -1184,25 +954,22 @@ def resync(
 
     **Not a purge.** Nothing is deleted, no dump is required, and running it
     twice is the same as running it once. What it cannot do is create a row that
-    is missing from Firefly or correct an amount: those come from the statement,
+    is missing from the ledger or correct an amount: those come from the statement,
     so they need `passbook sync` or a re-push. Anything left over is re-read from
-    Firefly and reported rather than assumed away.
+    The ledger and reported rather than assumed away.
 
     Dry run unless --confirm.
     """
     _setup_logging(verbose)
     settings = load_settings()
-    if not settings.firefly_token:
-        err.print("[red]FIREFLY_TOKEN is not set.[/red] Run `passbook doctor`.")
-        raise typer.Exit(5)
 
-    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-        changes, considered = service.reapply_preview(client, settings)
+    with open_ledger(settings) as store:
+        changes, considered = service.reapply_preview(store, settings)
 
         if considered == 0:
             # A green "0 of 0 match" is the exact shape of §23.1's bug.
             console.print(
-                "[yellow]nothing was compared[/yellow] — no row in Firefly carries an "
+                "[yellow]nothing was compared[/yellow] — no row in the ledger carries an "
                 "external_id matching a statement in archive/. That is an unanswered "
                 "question, not a pass. Check `passbook verify-ledger` and that "
                 "PASSBOOK_ASSET_ACCOUNT names the account the rows were pushed into."
@@ -1211,7 +978,7 @@ def resync(
 
         if not changes:
             console.print(
-                f"[green]nothing to do[/green] — all {considered} row(s) in Firefly "
+                f"[green]nothing to do[/green] — all {considered} row(s) in the ledger "
                 "already match the current config."
             )
             return
@@ -1252,13 +1019,13 @@ def resync(
             )
             return
 
-        result = service.sync_ledger(client, changes)
+        result = service.sync_ledger(store, changes)
         for external_id, message in result.failures[:10]:
             console.print(f"  [red]fail[/red] {external_id}: {message}")
 
         # Re-read. "12 requests returned 200" is not the same claim as "12 rows
         # in the ledger now match", and only the second one is worth printing.
-        remaining, _ = service.reapply_preview(client, settings)
+        remaining, _ = service.reapply_preview(store, settings)
 
     console.print(
         f"\n[green]{result.updated} updated[/green], {result.failed} failed, "
@@ -1266,7 +1033,7 @@ def resync(
     )
     if remaining:
         console.print(
-            "[yellow]Rows an update cannot fix[/yellow] — a row missing from Firefly, or "
+            "[yellow]Rows an update cannot fix[/yellow] — a row missing from the ledger, or "
             "one whose amount or date is wrong. Those need a re-push: "
             "`passbook purge --confirm` then `passbook sync`."
         )
@@ -1339,194 +1106,39 @@ def reminder(
 
 
 @app.command()
-def dedupe(
-    account: str = typer.Option(None, help="asset account; defaults to PASSBOOK_ASSET_ACCOUNT"),
-    confirm: bool = typer.Option(False, "--confirm", help="actually delete; omit for a dry run"),
-    yes: bool = typer.Option(False, "--yes", help="skip the interactive prompt"),
-    verbose: bool = typer.Option(False, "-v", "--verbose"),
-) -> None:
-    """Remove extra copies of a transaction that was posted more than once. §119.2.
-
-    Dry run unless --confirm. **One row of each identity always stays** — this
-    removes surplus, never a transaction. A namespaced `external_id` is kept in
-    preference to a bare one, and among equals the lowest group id, i.e. the
-    original rather than the copy.
-
-    This exists because `verify-ledger` must not repair anything it finds
-    (non-negotiable 12). It reports and names this command; running it is a
-    separate, deliberate act, and it refuses to run without a recent backup
-    (SPEC §19.5).
-
-    Nothing is re-pushed afterwards and no purge intent is recorded: the ledger
-    is being corrected, not emptied, and every remaining row is a row that was
-    already there.
-    """
-    _setup_logging(verbose)
-    settings = load_settings()
-    if not settings.firefly_token:
-        err.print("[red]FIREFLY_TOKEN is not set.[/red] Run `passbook doctor`.")
-        raise typer.Exit(5)
-
-    registry = load_accounts(settings=settings)
-    if account:
-        registry = [a for a in registry if a.slug == account or a.asset_account == account]
-    if not registry:
-        err.print("[red]no accounts registered.[/red] Run `passbook accounts list`.")
-        raise typer.Exit(5)
-
-    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-        # Fresh, for the same reason the check is: deciding what to DELETE from
-        # a cached view of the ledger is worse than reporting from one.
-        with client.fresh() as fresh:
-            live = {a["attributes"]["name"]: a["id"] for a in fresh.asset_accounts()}
-            found: list[tuple[object, list]] = []
-            for entry in registry:
-                account_id = live.get(entry.asset_account)
-                if account_id is None:
-                    console.print(
-                        f"[yellow]skipped[/yellow] {entry.slug} — no asset account "
-                        f"named {entry.asset_account!r}"
-                    )
-                    continue
-                found.append((entry, find_duplicates(fresh, account_id)))
-
-        surplus = [
-            (entry, identity, rows)
-            for entry, dupes in found
-            for identity, rows in dupes
-        ]
-        if not surplus:
-            console.print("\n[green]no duplicates[/green] — every transaction appears once.")
-            return
-
-        extra = sum(len(rows) - 1 for _, _, rows in surplus)
-        console.print(
-            f"\n[bold]{len(surplus)} transaction(s) posted more than once[/bold] — "
-            f"{extra} surplus row(s) to remove.\n"
-        )
-        for entry, identity, rows in surplus:
-            keeper, *copies = rows
-            console.print(f"  {entry.slug}  {identity}  {keeper.date}  {keeper.description}")
-            console.print(
-                f"    [green]keep[/green]   group {keeper.group_id}  "
-                f"{keeper.external_id}  {keeper.amount}"
-            )
-            for copy in copies:
-                console.print(
-                    f"    [red]remove[/red] group {copy.group_id}  "
-                    f"{copy.external_id}  {copy.amount}"
-                )
-
-        if not confirm:
-            console.print(
-                f"\n[bold]dry run[/bold] — nothing deleted. {extra} row(s) would go, "
-                f"{len(surplus)} would stay.\nRe-run with --confirm."
-            )
-            return
-
-        # §19.5. A deletion whose undo does not exist yet is not a deletion
-        # worth doing, and the operator is the one who has to make it exist.
-        dump = ops.newest_dump()
-        if dump is None:
-            err.print(
-                "\n[red]no database backup in backups/.[/red] Run `make backup` first — "
-                "this deletes rows from a live ledger and the dump is the only undo "
-                "(SPEC §19.5)."
-            )
-            raise typer.Exit(5)
-        name, minutes = dump
-        if minutes > BACKUP_MAX_AGE_MINUTES:
-            err.print(
-                f"\n[red]the newest backup, {name}, is {minutes // 60}h old.[/red] "
-                "Run `make backup` first so the undo is of the ledger you are about "
-                "to change (SPEC §19.5)."
-            )
-            raise typer.Exit(5)
-        console.print(f"\nbackup            {name} ({minutes}m old)")
-
-        if not yes:
-            # Without a terminal there is nobody to answer, and `typer.confirm`
-            # aborts on EOF — printing "Aborted." and deleting nothing, which
-            # reads exactly like a command that ran and did its job. Found that
-            # way: run from a non-interactive shell, it looked like it had
-            # worked and the ledger was unchanged. Say which flag is missing
-            # rather than leaving the operator to infer it.
-            if not sys.stdin.isatty():
-                err.print(
-                    "\n[red]no terminal to confirm at[/red] — nothing was deleted. "
-                    "Re-run with --yes to delete without the prompt, or run it in "
-                    "an interactive shell."
-                )
-                raise typer.Exit(5)
-            typer.confirm(
-                f"Delete {extra} surplus row(s)? {len(surplus)} transaction(s) stay",
-                abort=True,
-            )
-
-        deleted = failed = 0
-        for _, _, rows in surplus:
-            for copy in rows[1:]:
-                try:
-                    client.delete_transaction(copy.group_id)
-                except FireflyError as exc:
-                    failed += 1
-                    err.print(f"  [red]fail[/red] group {copy.group_id}: {exc}")
-                else:
-                    deleted += 1
-        # Firefly soft-deletes, and its own duplicate check searches trashed
-        # rows — so without this the identity just removed could not be pushed
-        # back if it ever needed to be. Same reasoning as purge().
-        if deleted:
-            client.purge_trashed()
-
-    console.print(f"\nremoved           {deleted}\nfailed            {failed}")
-    console.print(
-        "\n[bold]Run `passbook verify-ledger`[/bold] — the balance and the row count "
-        "should now both agree with the statements."
-    )
-    if failed:
-        raise typer.Exit(6)
-
-
-@app.command()
 def purge(
     account: str = typer.Option(None, help="asset account name; defaults to PASSBOOK_ASSET_ACCOUNT"),
     confirm: bool = typer.Option(False, "--confirm", help="actually delete; omit for a dry run"),
     yes: bool = typer.Option(False, "--yes", help="skip the interactive prompt"),
-    resume: bool = typer.Option(False, "--resume", help="finish an interrupted purge (SPEC §19.7)"),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
-    """Delete transactions passbook pushed into an asset account.
+    """Delete transactions passbook wrote into an asset account.
 
-    Dry run unless --confirm. Only groups carrying an `external_id` are touched,
+    Dry run unless --confirm. Only rows carrying an `external_id` are touched,
     so an opening balance is excluded structurally rather than by a date guard.
 
-    Use when a re-push is needed — aliases and rules apply at push time, and
-    re-pushing over existing rows just hits dedup.
+    Rarely what you want: a re-push skips rows already in the ledger by
+    identity, and `passbook resync` applies config to existing rows in place.
 
-    **Intent is recorded before the first delete** (§19.7), so an interrupted run
-    is detectable by `verify-ledger` and completable with `--resume`.
+    There is no `--resume`, and that is not a feature that was dropped. The
+    delete used to be thousands of separate requests that could die halfway, so
+    the intent was written to a file first and finished later. It is one
+    statement in one transaction now.
     """
     _setup_logging(verbose)
     settings = load_settings()
-    if resume:
-        _resume_purge(settings)
-        return
     target = account or settings.passbook_asset_account
     if not target:
         err.print("[red]no account given[/red] and PASSBOOK_ASSET_ACCOUNT is unset.")
         raise typer.Exit(5)
-    if not settings.firefly_token:
-        err.print("[red]FIREFLY_TOKEN is not set.[/red] Run `passbook doctor`.")
-        raise typer.Exit(5)
 
-    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-        accounts = {a["attributes"]["name"]: a["id"] for a in client.asset_accounts()}
-        if target not in accounts:
-            err.print(f"[red]no asset account named {target!r}[/red]; have {list(accounts)}")
+    with open_ledger(settings) as store:
+        known = {a["name"] for a in store.asset_accounts()}
+        if target not in known:
+            err.print(f"[red]no asset account named {target!r}[/red]; have {sorted(known)}")
             raise typer.Exit(5)
 
-        candidates, protected = find_candidates(client, accounts[target])
+        candidates, protected = find_candidates(store, target)
 
         if not candidates:
             console.print(f"nothing to purge on {target!r} ({len(protected)} protected).")
@@ -1535,8 +1147,7 @@ def purge(
         total = sum(c.amount for c in candidates)
         dates = sorted(c.date for c in candidates)
         console.print(
-            f"[bold]{'PURGE' if confirm else 'dry run'}[/bold] on {target!r} "
-            f"(account id {accounts[target]})\n"
+            f"[bold]{'PURGE' if confirm else 'dry run'}[/bold] on {target!r}\n"
             f"  deletable (has external_id)  {len(candidates)}\n"
             f"  protected (no external_id)   {len(protected)}"
             + (f"  -> {', '.join(protected[:3])}" if protected else "")
@@ -1563,33 +1174,21 @@ def purge(
             console.print("aborted.")
             raise typer.Exit(1)
 
-        statements = [str(p) for p in _archived_statements_paths()]
-        if not statements:
-            console.print(
-                "[yellow]note[/yellow] archive/ is empty, so the recorded intent "
-                "has nothing to re-push; a resume will only finish the delete."
-            )
         with console.status(f"deleting {len(candidates)}..."):
-            result = purge_transactions(
-                client, candidates, account=target, statements=statements
-            )
+            result = purge_transactions(store, candidates)
 
     console.print(
         f"\ndeleted            {result.deleted}\n"
         f"already gone       {result.already_gone}\n"
-        f"failed             {result.failed}\n"
-        f"trashed purged     {'yes' if result.hard_purged else 'no'}"
-        + ("" if result.hard_purged else "  [yellow](re-push may hit dedup)[/yellow]")
+        f"failed             {result.failed}"
     )
     for external_id, message in result.failures[:10]:
         console.print(f"  [red]fail[/red] {external_id}: {message}")
-    if result.intent:
-        console.print(
-            f"\nintent recorded    {result.intent.name}\n"
-            "[yellow]The ledger is now short until the statements are pushed back.[/yellow] "
-            "Run `passbook purge --resume` (or `passbook sync`) to finish; "
-            "`passbook verify-ledger` reports the gap until then."
-        )
+    console.print(
+        "\n[yellow]The ledger is now short until the statements are pushed "
+        "back.[/yellow] Run `passbook sync`; `passbook verify-ledger` reports "
+        "the gap until then."
+    )
     if not result.ok:
         raise typer.Exit(6)
 
@@ -1597,47 +1196,53 @@ def purge(
 # --- migrations --------------------------------------------------------------
 
 
-def _migration_context(client, settings, registry):
-    """Everything a migration is allowed to touch. SPEC §22.2.
+def _migration_context(store, settings, registry):
+    """Everything a migration is allowed to touch.
 
     The dangerous half is supplied as callables so a migration cannot grow its
-    own copy of the purge path — `purge_and_repush` is the same code
-    `passbook purge --confirm --yes` and `--resume` run.
+    own copy of the rebuild path — `purge_and_repush` is the same code
+    `passbook purge --confirm --yes` runs, followed by the same push `passbook
+    sync` runs.
     """
     from . import migrate
 
     def purge_and_repush(account) -> None:
-        accounts = {a["attributes"]["name"]: a["id"] for a in client.asset_accounts()}
-        if account.asset_account not in accounts:
-            raise RuntimeError(f"no Firefly asset account named {account.asset_account!r}")
-        candidates, _ = find_candidates(client, accounts[account.asset_account])
-        if not candidates:
-            console.print(f"  {account.slug}: nothing pushed yet, nothing to migrate")
-            return
-        statements = [str(p) for p in _archived_statements_paths()]
-        if not statements:
-            # Deleting rows this machine cannot rebuild is not a migration; it is
-            # data loss with a progress bar.
+        known = {a["name"] for a in store.asset_accounts()}
+        if account.asset_account not in known:
+            raise RuntimeError(f"no asset account named {account.asset_account!r}")
+        candidates, _ = find_candidates(store, account.asset_account)
+        statements = _archived_statements_paths()
+        if candidates and not statements:
+            # Deleting rows this machine cannot rebuild is not a migration; it
+            # is data loss with a progress bar.
             raise RuntimeError(
-                f"{account.slug}: {len(candidates)} row(s) in Firefly but nothing in "
-                "archive/ to push back. Re-download the statements first."
+                f"{account.slug}: {len(candidates)} row(s) in the ledger but "
+                "nothing in archive/ to push back. Re-download the statements "
+                "first."
             )
-        console.print(f"  {account.slug}: purging {len(candidates)} row(s)")
-        result = purge_transactions(
-            client,
-            candidates,
-            account=account.asset_account,
-            statements=statements,
-            slug=account.slug,
-        )
-        if not result.ok:
-            raise RuntimeError(f"{account.slug}: {result.failed} delete(s) failed")
-        console.print(f"  {account.slug}: re-pushing {len(statements)} statement(s)")
-        _resume_purge(settings)
+        if candidates:
+            console.print(f"  {account.slug}: purging {len(candidates)} row(s)")
+            result = purge_transactions(store, candidates)
+            if not result.ok:
+                raise RuntimeError(f"{account.slug}: {result.failed} delete(s) failed")
+
+        # This account's statements, not every statement: `statements_for`
+        # attributes each archived file by the account number it carries, so a
+        # two-account archive cannot push one account's rows into the other.
+        mine = service.statements_for(account, service.archived_statements())
+        console.print(f"  {account.slug}: re-pushing {len(mine)} statement(s)")
+        for parsed in mine:
+            outcome = service.push_statement(
+                service.parse_statement(parsed.path), settings, store, account=account
+            )
+            if outcome.failed:
+                raise RuntimeError(
+                    f"{account.slug}: {outcome.failed} row(s) failed to write back"
+                )
 
     return migrate.Context(
         settings=settings,
-        client=client,
+        store=store,
         registry=registry,
         say=lambda message: console.print(f"  {message}"),
         purge_and_repush=purge_and_repush,
@@ -1673,17 +1278,17 @@ def upgrade(
         f"this install: {recorded if recorded is not None else 'unrecorded'}"
     )
 
-    if not settings.firefly_token or not settings.passbook_asset_account:
+    if not settings.passbook_asset_account:
         err.print(
-            "[red]FIREFLY_TOKEN or PASSBOOK_ASSET_ACCOUNT is not set.[/red] "
+            "[red]PASSBOOK_ASSET_ACCOUNT is not set.[/red] "
             "Migrations read the live ledger to decide what is pending, so there "
             "is nothing they can honestly say without it. Run `passbook doctor`."
         )
         raise typer.Exit(5)
 
     registry = load_accounts(settings=settings)
-    with FireflyClient(settings.firefly_url, settings.firefly_token) as client:
-        ctx = _migration_context(client, settings, registry)
+    with open_ledger(settings) as store:
+        ctx = _migration_context(store, settings, registry)
         outstanding = migrate.pending(ctx)
 
         if not outstanding:
@@ -1742,12 +1347,7 @@ def upgrade(
             [
                 item
                 for entry in registry
-                for item in service.verify_ledger(
-                    client,
-                    entry,
-                    trashed=_trashed_journals(),
-                    intents=[p.name for p in ops.outstanding_purge_intents()],
-                ).checks
+                for item in service.verify_ledger(store, entry).checks
             ]
         )
 

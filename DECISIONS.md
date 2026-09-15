@@ -4781,3 +4781,90 @@ written. The old container can then be deleted. **No row is read out of the old
 ledger to do this**, which is the point: the archive is the authority, and a
 rebuild that trusts it cannot inherit whatever was wrong in the store it is
 replacing.
+
+### 36.4 What went with it
+
+Removing the other application removed features that were only ever about it.
+Each is worth naming, because "we dropped that" and "there is nothing left to
+drop" are different sentences.
+
+**The API token.** A JWT that expired after a year, with no warning before it
+lapsed — the failure looked like a generic 401 — so `doctor` read its `exp`
+claim and the Status page counted down the days. It was also the single most
+common way to lose an hour here: the Profile page offers a *different*
+credential of the same name, which cannot authenticate the API, and a shape
+check existed purely to catch that mix-up before the API did. Gone, with the
+four setup steps that produced it.
+
+**The encryption key.** The other application encrypted part of its own
+configuration with a key in `.env`, which made one recovery step irreversible:
+restore a dump, boot once on a generated key, and the stored keypair was
+deleted and regenerated — every token dead, permanently, with the right key
+still sitting in the archive beside it. `make check` had to **refuse to start
+the stack** to prevent it. Nothing in these tables is encrypted.
+
+**Soft deletes, and the force-purge after them.** A delete hid a row, and the
+duplicate check searched hidden rows — so a later push of identical content was
+refused as a duplicate of a transaction that no longer visibly existed.
+Measured: after deleting 93 rows and re-pushing, only the 41 whose description
+had changed got through. A delete is a delete.
+
+**The purge intent file.** Removing an account's rows was thousands of separate
+HTTP deletes that could die halfway, leaving a coherent-looking ledger missing
+an arbitrary prefix of a statement. So the intent was written to a file before
+the first delete, `verify-ledger` reported an unfinished cycle, and `--resume`
+finished it. It is one statement in one transaction now.
+
+**`passbook dedupe`.** The repair for the incident in §34: seven rows written
+twice. `external_id` is the primary key, so the state it repaired cannot be
+reached.
+
+**The rules engine, and `passbook bootstrap`.** Categories were assigned by
+rules pushed into the other application, so a category created on the Payees
+page did nothing to future imports until the rules were synced — and for a
+while the only way to sync them from the UI was a destructive rebuild. passbook
+applies the rules itself, when the row is written, so writing the config *is*
+telling it.
+
+`large_oneoff.exclude_categories` was documented as **inert** for a real
+reason: the engine ran at store time and the category was not committed yet, so
+the two rows the exclusion existed for got tagged anyway. It works now.
+
+### 36.5 The measurement nobody was looking for
+
+The test suite ran in **30 minutes**. It now runs in **under two**.
+
+Not an optimisation — a diagnosis. Every test that reached a route without
+supplying a fake store fell through to a real connection attempt, and a
+connection attempt does not fail fast: it waits out the driver's timeout. A
+suite full of those looks exactly like a slow suite, and it had been read as
+one for months.
+
+So the rule is enforced rather than remembered. `conftest.py` replaces
+`open_ledger` with one that refuses immediately, naming the fixture the test
+should have used. A test that wants a working ledger patches the same name,
+which every one of them already did.
+
+**The general shape: a hermetic test suite that is merely slow is a hermetic
+test suite you have stopped believing.** The guard is cheap; the belief is not.
+
+### 36.6 Two things that had to be measured
+
+**A connection with no timeout hangs rather than failing.** libpq's default is
+no connection timeout at all, and a TCP connect to a port nothing is listening
+on does not reliably come back refused — under WSL's mirrored networking it
+simply hangs. Unbounded, a ledger that is down hangs every page instead of
+erroring on one, and that is the worse failure by a wide margin: an error names
+the problem and a hang looks like slowness. `CONNECT_TIMEOUT` is five seconds,
+and a test asserts the give-up rather than the connect.
+
+**A double cannot prove the schema says what the double enforces.** A `CHECK`
+with a typo in it, a `NUMERIC` that comes back as a float, a `PRIMARY KEY` on
+the wrong column: all three pass every in-memory test and lose money in
+production. `tests/test_store_postgres.py` runs the same invariants against a
+real database and auto-skips when there is none — the same narrow, documented
+exception `test_stack.py` already was.
+
+It earned its place immediately. `MemoryLedger` was not checking `kind`, so a
+row with a direction the database would have refused went straight in — which
+is precisely the class of gap the file exists to close, found by writing it.

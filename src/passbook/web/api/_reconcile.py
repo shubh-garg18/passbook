@@ -19,10 +19,10 @@ from ... import ops, service
 from ...config import (
     load_accounts,
 )
-from ...firefly.client import FireflyError
+from ...store import LedgerError
 
 from ._base import (
-    _client,
+    _ledger,
     _money,
     log,
 )
@@ -32,7 +32,6 @@ from ._base import (
 def _change(c) -> dict:
     return {
         "externalId": c.external_id,
-        "groupId": c.group_id,
         "date": c.date,
         "amount": _money(c.amount),
         "kind": c.kind,
@@ -52,7 +51,7 @@ def _change(c) -> dict:
 
 
 def _preview(changes: list, considered: int) -> dict:
-    """One shape for "what does config say about the rows already in Firefly".
+    """One shape for "what does config say about the rows already in the ledger".
 
     Shared by `/reapply` and by `/payees/diff`, which asks the same question
     about a config that has not been written yet.
@@ -98,7 +97,7 @@ def _dump_state() -> dict:
     }
 
 
-def _sync_now(client, st) -> dict:
+def _sync_now(store, st) -> dict:
     """Compare, write, then **re-read**. SPEC §23.
 
     The re-read is separate and separately guarded. A count of requests that
@@ -108,14 +107,14 @@ def _sync_now(client, st) -> dict:
     which is a third state and never rendered as a pass.
     """
     archive = current_app.config["ARCHIVE"]
-    changes, considered = service.reapply_preview(client, st, archive)
-    result = service.sync_ledger(client, changes)
+    changes, considered = service.reapply_preview(store, st, archive)
+    result = service.sync_ledger(store, changes)
 
     remaining: int | None
     try:
-        after, _ = service.reapply_preview(client, st, archive)
+        after, _ = service.reapply_preview(store, st, archive)
         remaining = len(after)
-    except FireflyError as exc:
+    except LedgerError as exc:
         # Rows were written. Losing the report of that because the *check*
         # failed would be the worst of both — silent writes and a silent error.
         log.warning("could not re-read the ledger after syncing: %s", exc)
@@ -155,37 +154,33 @@ def _synced_summary(synced: dict) -> str:
 
 
 def _ledger_verdict(st, scope=None) -> dict:
-    """The §20 integrity check, for the Ledger strip.
+    """The integrity check, for the Ledger strip.
 
-    `trashed` is deliberately **not** supplied: Firefly's API cannot list
-    soft-deleted journals (verified against the pinned tag) and this container has
-    no database credentials by design (§15.1). The check therefore reports itself
-    unchecked, and the strip must not paint that green — "cannot see" and "fine"
-    are different, which is the whole lesson of §19.
+    A check that cannot see something reports itself **unchecked**, and the
+    strip must not paint that green: "cannot see" and "fine" are different,
+    which is the whole lesson of the seven hours a ledger spent holding 21 of
+    93 rows behind an all-green strip.
     """
     accounts = scope if scope is not None else load_accounts()
-    if not st.firefly_token or not accounts:
+    if not accounts:
         return {"ok": None, "headline": "not configured", "checks": []}
     checks: list[service.Check] = []
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            intents = [p.name for p in ops.outstanding_purge_intents()]
+        with _ledger() as store:
             for account in accounts:
-                # Per account (§21.6). One account's rows are missing from the
-                # other by definition, so a single combined verdict would be
-                # noise; the worst result across accounts is what the strip shows.
+                # Per account. One account's rows are missing from the other by
+                # definition, so a single combined verdict would be noise; the
+                # worst result across accounts is what the strip shows.
                 verdict = service.verify_ledger(
-                    client,
+                    store,
                     account,
                     current_app.config["ARCHIVE"],
-                    trashed=None,
-                    intents=intents,
                 )
                 prefix = f"{account.slug}: " if len(accounts) > 1 else ""
                 checks.extend(
                     service.Check(f"{prefix}{c.name}", c.ok, c.detail) for c in verdict.checks
                 )
-    except FireflyError as exc:
+    except LedgerError as exc:
         return {"ok": None, "headline": f"could not check: {exc}", "checks": []}
     combined = service.LedgerVerdict(checks)
     return {

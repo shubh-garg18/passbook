@@ -125,11 +125,11 @@ def check_disk(report: Report) -> None:
         free_gb = shutil.disk_usage(ROOT).free / 1e9
     except OSError:
         return
-    # Firefly + Postgres + the built web image, plus room for the database.
-    if free_gb < 3:
+    # Postgres, Caddy and the built web image, plus room for the database.
+    if free_gb < 2:
         report.fail(
             f"only {free_gb:.1f} GB free on this disk",
-            "The three images and the database need about 2.5 GB.",
+            "The three images and the database need about 1.5 GB.",
         )
     else:
         report.ok(f"{free_gb:.0f} GB free disk")
@@ -173,25 +173,25 @@ def check_ports(report: Report) -> None:
     """Held ports are a warning, not a failure — the setup can move them.
 
     On WSL with `networkingMode=mirrored` the distro shares Windows's port
-    space, so a Windows service on 8080 makes the bind fail while `ss` inside
+    space, so a Windows service on the port makes the bind fail while `ss` inside
     the distro shows nothing at all. That is why the message says to look on
     the Windows side rather than assuming the check is wrong.
     """
-    firefly = env_port("FIREFLY_HOST_PORT", 8080)
-    ports = {firefly: "Firefly III", 8081: "the passbook web UI"}
+    database = env_port("PASSBOOK_DB_PORT", 5433)
+    ports = {database: "the ledger database", 8081: "the passbook web UI"}
     busy = {port: what for port, what in ports.items() if not port_free(port)}
     if not busy:
         report.ok(f"ports {', '.join(str(p) for p in sorted(ports))} are free")
         return
     for port, what in busy.items():
-        # Only Firefly's host port is settable. Saying "set FIREFLY_HOST_PORT"
-        # about 8081 would send someone to change a variable that has nothing to
-        # do with it, which is worse than saying nothing.
-        if port == firefly:
+        # Only the database's host port is settable. Saying "set
+        # PASSBOOK_DB_PORT" about 8081 would send someone to change a variable
+        # that has nothing to do with it, which is worse than saying nothing.
+        if port == database:
             fix = (
                 "If a passbook is already running, that is fine. Otherwise set\n"
-                "        FIREFLY_HOST_PORT in .env to a free port, and match APP_URL\n"
-                "        and FIREFLY_URL to it — all three have to agree."
+                "        PASSBOOK_DB_PORT in .env to a free port — nothing else\n"
+                "        needs to change, the containers reach it by name."
             )
         else:
             fix = (

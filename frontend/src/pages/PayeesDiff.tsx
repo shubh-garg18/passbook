@@ -2,7 +2,7 @@
  *
  * This page used to end at "Written." and send you back to Payees with a toast
  * mentioning a Re-apply page you had to go and find. That failed in the way
- * that matters: payees were renamed, the ledger at :8080 kept showing the old
+ * that matters: payees were renamed, the ledger kept showing the old
  * names, and nothing on screen said a second step existed.
  *
  * Then the second step moved here, which helped — but the only step on offer
@@ -143,11 +143,11 @@ export function PayeesDiff() {
  * The two consequences a diff of payee lists cannot show. SPEC §33.
  *
  * Both of these actually happened, silently, and were found weeks later from a
- * Firefly report that was empty:
+ * The ledger report that was empty:
  *
  *   * moving Day Canteen, Night Canteen and Mess into a new College Expense
  *     category left those three rules with no payees. They still exist — in
- *     this dropdown and in Firefly — and can never match anything again, so a
+ *     this dropdown and in the ledger — and can never match anything again, so a
  *     report on one is permanently blank.
  *   * College Expense carries no `tag:`, so 29 rows lost `food`. The food
  *     roll-up dropped rows from the total and went on looking entirely plausible.
@@ -339,7 +339,7 @@ function LedgerImpact({ ledger }: { ledger: ReapplyPreview | null }) {
   )
 }
 
-/** After the write: what actually happened to the ledger, re-read from Firefly. */
+/** After the write: what actually happened to the ledger, re-read from the ledger. */
 function Applied({ applied }: { applied: Applied }) {
   const { summary, synced } = applied
 
@@ -398,7 +398,7 @@ function Applied({ applied }: { applied: Applied }) {
  * Whatever the update could not reach.
  *
  * Re-queried rather than inferred from the response we just received. A row an
- * update cannot fix — one missing from Firefly, one with the wrong amount —
+ * update cannot fix — one missing from the ledger, one with the wrong amount —
  * looks exactly like a row it did fix if you only count the requests that
  * returned 200 (non-negotiable 11).
  */

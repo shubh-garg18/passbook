@@ -27,6 +27,11 @@ log = logging.getLogger(__name__)
 #: could reach it is an update that eventually does.
 UPDATABLE = ("description", "category", "counterparty")
 
+#: Seconds to wait for a connection before giving up. Short on purpose: this is
+#: a database on the same machine, so a slow connect is a broken one, and the
+#: caller has a 502 to render.
+CONNECT_TIMEOUT = 5
+
 
 class PostgresLedger:
     """passbook's ledger over psycopg 3."""
@@ -35,7 +40,25 @@ class PostgresLedger:
         import psycopg
 
         try:
-            self._conn = psycopg.connect(dsn, autocommit=True)
+            # `search_path`: the schema script sets it too, but only for the
+            # session that runs it. Setting it on the connection means a
+            # reconnect cannot quietly start resolving `transactions` to
+            # somebody else's table in `public` — an upgraded install has one
+            # sitting there.
+            #
+            # `connect_timeout`: **measured, and not optional.** libpq's default
+            # is no timeout at all, and a TCP connect to a port nothing is
+            # listening on does not always come back refused — under WSL's
+            # mirrored networking it simply hangs. A ledger that is down would
+            # then hang every page instead of erroring on it, which is the
+            # worse failure by a wide margin: an error names the problem and a
+            # hang looks like slowness.
+            self._conn = psycopg.connect(
+                dsn,
+                autocommit=True,
+                options="-c search_path=passbook",
+                connect_timeout=CONNECT_TIMEOUT,
+            )
         except Exception as exc:  # noqa: BLE001 — every failure is the same answer
             raise LedgerError(f"could not connect to the ledger: {exc}") from exc
         self._migrate()
@@ -49,14 +72,33 @@ class PostgresLedger:
     # --- accounts ------------------------------------------------------------
 
     def asset_accounts(self) -> list[dict]:
+        """Every asset account, with its balance derived from its rows.
+
+        `current_balance` is computed here rather than stored, so it cannot
+        drift from the transactions it is a sum of. A stored balance is a second
+        copy of the truth, and the ledger already learned what a second copy of
+        the truth costs.
+        """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT name, opening_balance, opening_on, currency FROM asset_accounts"
-                " ORDER BY name"
+                "SELECT a.name, a.opening_balance, a.opening_on, a.currency,"
+                "       a.opening_balance + COALESCE(SUM("
+                "           CASE WHEN t.kind = 'deposit' THEN t.amount ELSE -t.amount END"
+                "       ), 0)"
+                "  FROM asset_accounts a"
+                "  LEFT JOIN transactions t ON t.account = a.name"
+                " GROUP BY a.name, a.opening_balance, a.opening_on, a.currency"
+                " ORDER BY a.name"
             )
             return [
-                {"name": n, "opening_balance": b, "opening_on": o, "currency": c}
-                for n, b, o, c in cur.fetchall()
+                {
+                    "name": n,
+                    "opening_balance": b,
+                    "opening_on": o,
+                    "currency": c,
+                    "current_balance": live,
+                }
+                for n, b, o, c, live in cur.fetchall()
             ]
 
     def store_account(self, name: str, opening, on, currency: str) -> None:
@@ -156,6 +198,13 @@ class PostgresLedger:
     def delete_transaction(self, external_id: str) -> None:
         with self._conn.cursor() as cur:
             cur.execute("DELETE FROM transactions WHERE external_id = %s", (external_id,))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.close()
+        return False
 
     def close(self) -> None:
         try:

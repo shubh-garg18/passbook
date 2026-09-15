@@ -255,7 +255,7 @@ def main() -> None:
         page.screenshot(path=OUT / "preview-settled.png")
 
         # --- 4. toast wording, after a real push-adjacent action ------------
-        # Discard is the safe one: it changes nothing in Firefly.
+        # Discard is the safe one: it changes nothing in the ledger.
         page.click("text=Discard")
         page.wait_for_selector(".toast", timeout=10000)
         page.wait_for_timeout(400)

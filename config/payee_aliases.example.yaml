@@ -17,11 +17,11 @@
 #     gets the same display name, whatever its amount or time of day. If one
 #     token genuinely covers two things, an alias cannot separate them.
 #
-# An alias changes the DISPLAY NAME ONLY: it sets Firefly's description and
+# An alias changes the DISPLAY NAME ONLY: it sets the ledger's description and
 # destination/source account name. The raw narration is still stored verbatim
-# in Firefly's notes, and `Transaction.payee` keeps the original token.
+# in the ledger's notes, and `Transaction.payee` keeps the original token.
 #
-# Aliases apply at push time. Rows already in Firefly keep the name they were
+# Aliases apply at push time. Rows already in the ledger keep the name they were
 # pushed under.
 
 aliases:

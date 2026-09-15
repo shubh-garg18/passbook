@@ -1,6 +1,6 @@
-# passbook web UI. SPEC §16.3.
+# passbook web UI.
 #
-# The only image this project builds. Firefly and Postgres are pinned upstream
+# The only image this project builds. Postgres and Caddy are pinned upstream
 # images; this one has to exist because it runs our own code.
 #
 # Two stages. Node builds the React bundle and is then thrown away — the
@@ -34,7 +34,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
 #
 # This does NOT give the container the Docker socket — §15.1/§15.3 still hold
 # and it still cannot see or control another container. It reaches Postgres the
-# ordinary way, over the compose network, exactly as Firefly does.
+# ordinary way, over the compose network.
 #
 # ── The version is pinned to the SERVER's, and that is not fussiness ────────
 # Debian trixie ships postgresql-client 17. Its pg_dump happily dumps a 16

@@ -23,8 +23,8 @@ machine by following its SETUP.md. Ask me for anything only I can provide.
 ```
 
 Claude Code will install what is missing, run the wizard, and stop to ask you
-for the three things it cannot know: a Firefly login to create, a bank statement
-to read, and a password for passbook. Everything else it does itself.
+for the two things it cannot know: a bank statement to read, and a password for
+passbook. Everything else it does itself.
 
 If you already have the repository cloned, `cd` into it and say
 **"set this up by following SETUP.md"**.
@@ -126,16 +126,18 @@ It will offer you any statement it finds in your **Downloads** folder, so you
 usually do not have to move a file at all. It copies the one you pick — your
 download stays where it is.
 
-The wizard asks **three things** and does the rest:
+The wizard asks **two things** and does the rest:
 
 | It asks | Note |
 |---|---|
-| A Firefly email and password | It registers the account. You need these to open Firefly itself later. **16 characters minimum** — Firefly's own rule. |
 | Which statement to read | It takes your account number, opening balance and start date from the file. |
-| A password for passbook | Separate from Firefly's. |
+| A password for passbook | Plus a second factor on first sign-in. |
 
-Everything else is automatic: secrets, the stack, the API token, the currency,
-and your account created with the statement's **opening** balance.
+Everything else is automatic: secrets, the stack, and your account created with
+the statement's **opening** balance.
+
+There is no second application to install, no account to register, and no API
+token to paste. There used to be all three.
 
 It is safe to re-run. It never overwrites a secret.
 
@@ -162,20 +164,15 @@ docker compose logs --tail=50
 | Symptom | Cause |
 |---|---|
 | Docker daemon not reachable | Docker Desktop is not started, or on Linux you are not in the `docker` group yet — that needs a fresh login. |
-| `make up` hangs on `Waiting` | First boot runs ~60 database migrations. It is not stuck. |
-| Port 8080 will not bind, but nothing is listening | On Windows/WSL a **Windows** process holds it and the distro cannot see it. `netstat -ano \| findstr :8080` names it. Set `FIREFLY_HOST_PORT` in `.env` and match `APP_URL` and `FIREFLY_URL`. |
-| Firefly says "page expired" | `APP_URL` does not match the address you are visiting. |
+| `make up` hangs on `Waiting` | The database is initialising on first boot. It is not stuck. |
+| A port will not bind, but nothing is listening | On Windows/WSL a **Windows** process holds it and the distro cannot see it. `netstat -ano \| findstr :8081` names it. For the database, set `PASSBOOK_DB_PORT` in `.env`; nothing else has to change. |
 | Postgres will not start | On WSL2, the repo is on `/mnt/c/`. Move it under `~/`. |
 
-**If the wizard could not register automatically**, it falls back to asking, and
-two things matter:
-
-- The token is **Options → Remote access and tokens → Personal Access Tokens**.
-  *Not* the "Command line token" on the Profile page — different credential, will
-  not work, and it is the most common way to lose an hour here.
-- The asset account's opening balance is your statement's **opening** balance,
-  dated on or before the first transaction. Firefly's own wizard invites your
-  *current* balance, which double-counts and leaves the account negative.
+**If the wizard could not read your statement**, it falls back to asking for
+your account number and a name for the account, and the first upload creates
+the account for you — with the statement's **opening** balance, dated the day
+before the first transaction. That detail matters: an account opened at your
+*current* balance counts the closing figure twice and is short forever.
 
 More in [operations.md](docs/operations.md).
 

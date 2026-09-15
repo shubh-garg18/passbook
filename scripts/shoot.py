@@ -4,7 +4,7 @@
 Phase 10 was verified through the API and the test suite and never actually
 looked at. This exists so that cannot happen again.
 
-Runs the real app against the real Firefly and the real archive, with a
+Runs the real app against the real ledger and the real archive, with a
 throwaway credential injected in memory — `config/web-auth.json` is never read
 or written, so the operator's own password and TOTP enrolment are untouched.
 Uploads go to a temporary inbox and are discarded.
@@ -192,7 +192,7 @@ def shoot_written(browser, base: str, auth, out: Path, written: list[str]) -> No
     """Payees -> Review changes -> **Written**, the page that follows a real write.
 
     This is the state the phase exists for: config is on disk and the only
-    question left is whether to reconcile the rows already in Firefly. It cannot
+    question left is whether to reconcile the rows already stored. It cannot
     be reached without writing config, and writing the operator's own
     `config/payee_aliases.yaml` to take a screenshot is not acceptable.
 
@@ -202,9 +202,9 @@ def shoot_written(browser, base: str, auth, out: Path, written: list[str]) -> No
     resolves inside the scratch dir, and the write lands on the copy. The CWD is
     restored and the scratch dir deleted in a `finally`.
 
-    Two things it does touch, deliberately and idempotently: `/payees/apply`
-    syncs rules to Firefly, and since the copied config is identical to the real
-    one that is a no-op ("N unchanged"); and `/reapply` then reports a genuine
+    One thing it does touch, deliberately and idempotently: `/payees/apply`
+    reconciles the stored rows against the copied config, which is identical to
+    the real one — so it is a no-op — and `/reapply` then reports a genuine
     count, because the one alias typed here really would rename rows. The
     destructive button is never clicked.
     """
@@ -263,9 +263,9 @@ def shoot_accounts(browser, base: str, auth, out: Path, written: list[str]) -> N
     holding a **copy** of `config/` and of `archive/`, with a two-account registry
     written into the copy.
 
-    The second account points at an existing, EMPTY Firefly asset account, so it
-    has no pushed rows: what these shots demonstrate is the switcher, the scoping,
-    and the summed balance with its parts. Nothing is pushed anywhere.
+    The second account points at an existing, EMPTY asset account, so it has no
+    rows: what these shots demonstrate is the switcher, the scoping, and the
+    summed balance with its parts. Nothing is written anywhere.
     """
     import os
 
@@ -284,8 +284,8 @@ def shoot_accounts(browser, base: str, auth, out: Path, written: list[str]) -> N
         if source.exists():
             (scratch / name).symlink_to(source)
 
-    # A second registry entry, pointing at an asset account Firefly already has
-    # and passbook has never pushed into.
+    # A second registry entry, pointing at an asset account the ledger already
+    # has and passbook has never written into.
     second = Account(
         slug="canara-cash",
         bank="canara",
@@ -398,7 +398,7 @@ def shoot_drift(browser, base: str, auth, out: Path, written: list[str]) -> None
                         "rows",
                         False,
                         "21 live vs 93 archived — 72 archived row(s) MISSING from "
-                        "Firefly (20260516000001, 20260516000002, 20260517000001, "
+                        "the ledger (20260516000001, 20260516000002, 20260517000001, "
                         "20260520000001, 20260520000002 …)",
                     )
                 ] + [c for c in verdict.checks if c.name != "rows"]

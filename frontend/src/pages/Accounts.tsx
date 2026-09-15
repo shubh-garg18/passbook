@@ -130,7 +130,7 @@ function AccountRow({ account, last }: { account: AccountSummary; last: boolean 
  * Safe in a way a payee rename is not, and worth saying because the two look
  * identical from here. A payee's display name is what categorisation rules
  * match on, so renaming one moves the row out from under its own rule (§23.4).
- * An account's name is matched by nothing: it is not pushed, Firefly never sees
+ * An account's name is matched by nothing: it is not stored, the ledger never sees
  * it, and no rule mentions it. The slug underneath — the thing `external_id` is
  * built from — does not move.
  *

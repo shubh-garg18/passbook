@@ -135,7 +135,7 @@ def enrich(
         # depending on which export it came from — which would make the
         # fallback a trap rather than a fallback.
         #
-        # `narration` is deliberately NOT touched: §7.2 sends it to Firefly's
+        # `narration` is deliberately NOT touched: §7.2 sends it to the ledger's
         # notes verbatim, and the raw string is per-format evidence. PDF-sourced
         # notes therefore differ in whitespace from XLS-sourced notes for the
         # same transaction. That is inherent to the format, not a defect.
@@ -337,7 +337,7 @@ def _neft(raw: str) -> dict | None:
 # --- 5. Scheme / insurance ----------------------------------------------------
 # `PMSBY RENEWAL(26-27) - <customer id> - <policy no>`
 # Embeds the customer ID, which is also the PDF statement password. Nothing from
-# the body is extracted — payee stays None so the ID cannot leak into a Firefly
+# the body is extracted — payee stays None so the ID cannot leak into a ledger
 # description or a payee report. SPEC §11.
 def _scheme(raw: str) -> dict | None:
     if "PMSBY" not in raw.upper():
@@ -360,7 +360,7 @@ def _interest(raw: str) -> dict | None:
         return None
     # **Nothing from the body is extracted**, deliberately. One bank prints its
     # own account number here, and a payee is a display string that reaches
-    # Firefly, a payee report and a log line (§11). The posting is interest;
+    # The ledger, a payee report and a log line (§11). The posting is interest;
     # which quarter it covers is in the date, and whose account it is is
     # already the account.
     return {"channel": INT, "payee": "Savings Interest"}

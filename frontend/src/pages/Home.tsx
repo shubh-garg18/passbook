@@ -146,7 +146,7 @@ export function Home() {
  * page would otherwise have had to spell out.
  *
  * **The stamp prints a date, never a verdict.** "Synced" would be a claim about
- * the ledger, and whether the ledger is right is §20's question, answered by
+ * The ledger, and whether the ledger is right is §20's question, answered by
  * `verify-ledger` and reported by the strip below with its tri-state intact
  * (non-negotiable 11). The date is a fact about a file in `archive/`, which is
  * all this has ever known. Its ink follows the escalation tiers that already
@@ -198,7 +198,7 @@ function Masthead({
             ))}
           </ul>
         )}
-        {data.fireflyError && <p className="muted">{data.fireflyError}</p>}
+        {data.ledgerError && <p className="muted">{data.ledgerError}</p>}
       </div>
 
       <SyncStamp sync={data.sync} />
@@ -247,10 +247,11 @@ function stampDate(iso: string): string {
 /**
  * Status, folded in — and folded away when there is nothing to say. SPEC §18.
  *
- * It used to print five chips on every load: ledger verified, Firefly version,
+ * It used to print five chips on every load: ledger verified, store version,
  * token days left, backup age, backup codes left. All five were true and four
  * of them were noise, and a row of permanently-green chips is training to
- * ignore the row — which is exactly the row §19 needed someone to read.
+ * ignore the row — which is exactly the row the incident needed someone to
+ * read.
  *
  * So it renders **only problems**. All clear shows nothing, and the Status page
  * keeps the full detail one click away. The tri-state survives intact:
@@ -258,9 +259,8 @@ function stampDate(iso: string): string {
  * a green tick for something never checked is the thing this project exists to
  * not do (non-negotiable 11).
  *
- * Its own query, not part of `/overview`: this one calls Firefly for its version
- * and shells out to rclone for the off-site listing, and the balance must not
- * wait behind either.
+ * Its own query, not part of `/overview`: this one shells out to rclone for
+ * the off-site listing, and the balance must not wait behind it.
  */
 /** Longer than this and an item takes its own line. Roughly the width at which
  *  two items no longer fit side by side on a laptop. */
@@ -293,15 +293,8 @@ function StatusStrip() {
       title: data.ledger.checks.map((c) => `${c.name}: ${c.detail}`).join('\n'),
     })
   }
-  if (!data.firefly.about) {
-    problems.push({ key: 'firefly', bad: true, text: 'Ledger store unreachable' })
-  }
-  if (!data.token.shapeOk) {
-    problems.push({ key: 'token', bad: true, text: 'Token is the wrong shape' })
-  } else if (data.token.daysLeft !== null && data.token.daysLeft <= 30) {
-    // 365-day PAT, no warning from Firefly, and the failure looks like a
-    // generic 401. Worth saying inside a month; not worth saying for 335 days.
-    problems.push({ key: 'token', text: `Token expires in ${data.token.daysLeft}d` })
+  if (data.store.error !== null) {
+    problems.push({ key: 'store', bad: true, text: 'The ledger is unreachable' })
   }
   if (data.backups.ageDays === null) {
     problems.push({ key: 'backup', bad: true, text: 'No backup' })
@@ -452,7 +445,7 @@ function Charts() {
         />
         {/* **Adaptive, because the fixed version went dead.** This tile named
             the movement the other two exclude — which mattered when most of
-            the ledger's outflow was hidden behind a toggle. Since §62 and §67
+            The ledger's outflow was hidden behind a toggle. Since §62 and §67
             took Credit
             Card, Investments and Transfers out of `not_spend`, it reads ₹0.00
             and "nothing excluded" on most windows: a quarter of the summary

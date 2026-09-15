@@ -1,39 +1,39 @@
-"""Payload construction and push semantics. SPEC §7.2, §10.
+"""Row construction and push semantics. DECISIONS.md §36.
 
-The API is mocked via httpx.MockTransport. Nothing here touches the network.
+The ledger here is `MemoryLedger`, which enforces every invariant the schema
+does. Nothing touches the network — there is nothing left to reach.
 """
 
-import json
-from datetime import date
+from datetime import date, time
 from decimal import Decimal
 
-import httpx
 import pytest
 
-from passbook.config import token_expiry
-from passbook.firefly.client import (
-    DuplicateTransaction,
-    FireflyClient,
-    FireflyError,
-    ValidationFailed,
-    forget_everything,
-)
-from passbook.firefly.push import build_payload, push_transactions
 from passbook.models import UPI, Transaction
+from passbook.push import build_split, push_transactions
+from passbook.store import LedgerError
+from passbook.store.memory import MemoryLedger
 
 ASSET = "Canara Bank savings account"
 
 #: The fixture statement's first transaction id.
 BASE_TXN_ID = "20260509000001"
 
+RULES = {
+    "rules": [
+        {"title": "Eating out", "category": "Eating out", "tag": "food", "payees": ["ZOKVEX QI"]},
+    ],
+    "not_earnings": {"tag": "not-earnings", "earnings_only": ["Employer"]},
+    "large_oneoff": {"tag": "large-oneoff", "exclude_categories": ["Investments"]},
+}
+
 
 def ids(count: int) -> list[str]:
     """`count` consecutive ids, derived from the fixture's rather than spelled.
 
     Written out, a 14-digit literal reads as an account number or a UTR to the
-    privacy audit (non-negotiable 20) — correctly, since it cannot tell the
-    difference. Deriving them keeps the only long digit run in this file the
-    fixture's own.
+    privacy audit — correctly, since it cannot tell the difference. Deriving
+    them keeps the only long digit run in this file the fixture's own.
     """
     first = int(BASE_TXN_ID)
     return [str(first + n) for n in range(count)]
@@ -54,466 +54,231 @@ def txn(**kw) -> Transaction:
     return Transaction(**base)
 
 
-# --- payload shape ------------------------------------------------------------
+def ledger(*, account: str = ASSET) -> MemoryLedger:
+    store = MemoryLedger()
+    store.store_account(account, Decimal("12612.64"), date(2026, 5, 7), "INR")
+    return store
 
 
-def test_withdrawal_puts_the_asset_account_on_the_source_side():
-    split = build_payload(txn(), ASSET)["transactions"][0]
-    assert split["type"] == "withdrawal"
-    assert split["source_name"] == ASSET
-    assert split["destination_name"] == "ZOKVEX QI"
+# --- row shape ----------------------------------------------------------------
 
 
-def test_deposit_reverses_the_sides():
-    split = build_payload(
-        txn(debit=None, credit=Decimal("48.00")), ASSET
-    )["transactions"][0]
-    assert split["type"] == "deposit"
-    assert split["source_name"] == "ZOKVEX QI"
-    assert split["destination_name"] == ASSET
+def test_direction_is_a_field_rather_than_a_sign():
+    """Two pieces of code can disagree about a sign silently. They cannot
+    disagree about `kind`."""
+    assert build_split(txn(), ASSET)["kind"] == "withdrawal"
+    assert build_split(txn(debit=None, credit=Decimal("65.00")), ASSET)["kind"] == "deposit"
 
 
-def test_amount_is_a_positive_string_never_a_float():
-    """CLAUDE.md non-negotiable #1: money is Decimal, never float."""
-    split = build_payload(txn(), ASSET)["transactions"][0]
-    assert split["amount"] == "65.00"
-    assert isinstance(split["amount"], str)
-    assert Decimal(split["amount"]) > 0
-    assert "float" not in str(type(split["amount"]))
-    # and it must survive json round-tripping without becoming a float
-    assert isinstance(json.loads(json.dumps(split))["amount"], str)
-
-
-def test_deposit_amount_is_also_positive():
-    split = build_payload(txn(debit=None, credit=Decimal("48.00")), ASSET)["transactions"][0]
-    assert Decimal(split["amount"]) == Decimal("48.00")
+def test_amount_is_positive_and_stays_a_decimal():
+    """Non-negotiable 1, at the last boundary it could be lost."""
+    for split in (
+        build_split(txn(), ASSET),
+        build_split(txn(debit=None, credit=Decimal("65.00")), ASSET),
+    ):
+        assert isinstance(split["amount"], Decimal)
+        assert split["amount"] == Decimal("65.00")
 
 
 def test_narration_is_preserved_verbatim_in_notes():
-    t = txn()
-    split = build_payload(t, ASSET)["transactions"][0]
-    assert split["notes"] == t.narration  # byte-for-byte, always
+    assert build_split(txn(), ASSET)["notes"] == txn().narration
+
+
+def test_the_counterparty_is_a_column_rather_than_an_account():
+    """It used to live in whichever of source/destination the direction did not
+    use, and a helper had to work out which."""
+    assert build_split(txn(), ASSET)["counterparty"] == "ZOKVEX QI"
+    assert build_split(txn(), ASSET)["account"] == ASSET
 
 
 def test_external_id_is_the_banks_own_transaction_id():
-    split = build_payload(txn(), ASSET)["transactions"][0]
-    assert split["external_id"] == "20260509000001"
-
-
-def test_currency_is_inr():
-    assert build_payload(txn(), ASSET)["transactions"][0]["currency_code"] == "INR"
-
-
-def test_dedup_and_rules_flags_are_set():
-    payload = build_payload(txn(), ASSET)
-    assert payload["error_if_duplicate_hash"] is True
-    assert payload["apply_rules"] is True
+    assert build_split(txn(), ASSET)["external_id"] == BASE_TXN_ID
 
 
 def test_description_combines_payee_and_channel():
-    assert build_payload(txn(), ASSET)["transactions"][0]["description"] == "ZOKVEX QI (UPI)"
+    assert build_split(txn(), ASSET)["description"] == "ZOKVEX QI (UPI)"
 
 
 def test_missing_payee_becomes_unknown_channel():
-    """SPEC §7.2: `"Unknown (<channel>)"` when narration yielded no payee."""
-    split = build_payload(txn(payee=None), ASSET)["transactions"][0]
-    assert split["destination_name"] == "Unknown (UPI)"
+    split = build_split(txn(payee=None), ASSET)
     assert split["description"] == "Unknown (UPI)"
+    assert split["counterparty"] == "Unknown (UPI)"
 
 
-def test_reversal_is_tagged_and_still_posts_as_a_deposit():
-    split = build_payload(
-        txn(debit=None, credit=Decimal("48.00"), payee=None, is_reversal=True), ASSET
-    )["transactions"][0]
-    assert split["type"] == "deposit"  # Firefly nets it correctly
+def test_the_time_of_day_survives_the_write():
+    """It did not, before: the old store had no column for it, so the hour had
+    to be recovered from the archive every time a chart wanted it."""
+    at = time(1, 51, 33)
+    assert build_split(txn(txn_time=at), ASSET)["txn_time"] == at
+
+
+def test_reversal_is_tagged_and_still_stored_as_a_deposit():
+    split = build_split(
+        txn(debit=None, credit=Decimal("65.00"), is_reversal=True), ASSET
+    )
+    assert split["kind"] == "deposit"
     assert "reversal" in split["tags"]
 
 
-def test_large_oneoff_is_never_tagged_client_side():
-    """SPEC D5: the parser normalises, Firefly classifies.
-
-    Tagging this here cannot honour §8's exclusions — the pusher does not know
-    which category a row will land in. Doing so tagged the fund purchase and
-    the card payment, the exact two rows the rule was meant to skip.
-    """
-    for amount in (Decimal("15000.00"), Decimal("10000.00"), Decimal("999999.00")):
-        split = build_payload(txn(debit=amount), ASSET)["transactions"][0]
-        assert "large-oneoff" not in split.get("tags", [])
+# --- the rules run before the write, not after --------------------------------
 
 
-# --- client behaviour ---------------------------------------------------------
+def test_no_rules_means_no_category_rather_than_a_guessed_one():
+    split = build_split(txn(), ASSET)
+    assert split["category"] == ""
+    assert split["tags"] == []
 
 
-def make_client(handler, *, holds=(), **kw) -> FireflyClient:
-    """`handler` answers the POST; the pre-push ledger read is answered here.
+def test_the_category_is_decided_before_the_row_is_stored():
+    split = build_split(txn(), ASSET, rules=RULES)
+    assert split["category"] == "Eating out"
+    assert "food" in split["tags"]
 
-    Since §119 `push_transactions` reads what the account already holds before
-    posting anything, so every test that pushes has to be able to answer that
-    read. `holds` is the external_ids already in the ledger — empty for the
-    tests about posting, non-empty for the tests about the overlap.
-    """
-    accounts = {
-        "data": [{"id": "7", "attributes": {"name": ASSET}}],
-        "meta": {"pagination": {"total_pages": 1}},
-    }
-    rows = {
-        "data": [
-            {"attributes": {"transactions": [{"external_id": external}]}}
-            for external in holds
-        ],
-        "meta": {"pagination": {"total_pages": 1}},
-    }
 
-    def route(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if request.method == "GET" and path == "/api/v1/accounts":
-            return httpx.Response(200, json=accounts)
-        if request.method == "GET" and path == "/api/v1/accounts/7/transactions":
-            return httpx.Response(200, json=rows)
-        return handler(request)
+def test_large_oneoff_is_tagged_now_that_the_category_is_known():
+    big = txn(debit=Decimal("50000.00"))
+    split = build_split(big, ASSET, rules=RULES, threshold=Decimal("10000"))
+    assert "large-oneoff" in split["tags"]
 
-    forget_everything()
-    return FireflyClient(
-        "http://firefly.test", "unused-token",
-        client=httpx.Client(transport=httpx.MockTransport(route)), **kw
+
+def test_the_category_exclusion_that_used_to_be_inert():
+    """It was documented as inert for a real reason: the engine that applied it
+    ran at store time, and the category was not committed yet — so the rows the
+    exclusion existed for were tagged anyway."""
+    rules = {**RULES, "rules": [{"category": "Investments", "payees": ["ZOKVEX QI"]}]}
+    split = build_split(
+        txn(debit=Decimal("50000.00")), ASSET, rules=rules, threshold=Decimal("10000")
     )
+    assert split["category"] == "Investments"
+    assert "large-oneoff" not in split["tags"]
 
 
-def validation_error(message: str, status: int = 422) -> httpx.Response:
-    return httpx.Response(
-        status, json={"message": message, "errors": {"transactions.0.description": [message]}}
-    )
+def test_a_threshold_without_rules_tags_nothing():
+    """Asking what a row would look like is not the same as deciding what it is."""
+    split = build_split(txn(debit=Decimal("50000.00")), ASSET, threshold=Decimal("10000"))
+    assert split["tags"] == []
 
 
-def test_duplicate_is_detected_by_message_not_by_error_key():
-    """The trap, verified against the live instance.
-
-    A genuine validation failure lands under the SAME `transactions.0.description`
-    key as a duplicate — an empty POST returns "Need at least one transaction."
-    there. Keying on the field name would silently swallow real errors as
-    duplicates.
-    """
-    client = make_client(lambda r: validation_error("Duplicate of transaction #42."))
-    with pytest.raises(DuplicateTransaction):
-        client.store_transaction({})
-
-    client = make_client(lambda r: validation_error("Need at least one transaction."))
-    with pytest.raises(ValidationFailed) as exc:
-        client.store_transaction({})
-    assert not isinstance(exc.value, DuplicateTransaction)
-
-
-def test_real_validation_failure_is_not_counted_as_a_duplicate():
-    client = make_client(lambda r: validation_error("The amount field is required."))
-    result = push_transactions(client, [txn()], ASSET)
-    assert result.duplicates == 0
-    assert result.failed == 1
-    assert not result.ok
-
-
-def test_duplicates_are_counted_and_do_not_stop_the_run():
-    """Firefly's own rejection is still counted, and still not an error.
-
-    It is the backstop since §119, not the mechanism — three DIFFERENT ids, so
-    the identity pre-check lets all three through to the POST.
-    """
-    client = make_client(lambda r: validation_error("Duplicate of transaction #7."))
-    rows = [txn(txn_id=i) for i in ids(3)]
-    result = push_transactions(client, rows, ASSET)
-    assert (result.pushed, result.duplicates, result.failed) == (0, 3, 0)
-    assert result.ok
-
-
-def test_successful_pushes_are_counted():
-    client = make_client(lambda r: httpx.Response(200, json={"data": {"id": "1"}}))
-    rows = [txn(txn_id=i) for i in ids(2)]
-    result = push_transactions(client, rows, ASSET)
-    assert (result.pushed, result.duplicates, result.failed) == (2, 0, 0)
-
-
-def test_mixed_run_reports_each_category():
-    seen = {"n": 0}
-
-    def handler(request):
-        seen["n"] += 1
-        if seen["n"] == 1:
-            return httpx.Response(200, json={"data": {}})
-        if seen["n"] == 2:
-            return validation_error("Duplicate of transaction #7.")
-        return validation_error("Something else went wrong.")
-
-    rows = [txn(txn_id=i) for i in ids(3)]
-    result = push_transactions(make_client(handler), rows, ASSET)
-    assert (result.pushed, result.duplicates, result.failed) == (1, 1, 1)
-
-
-def test_server_errors_are_retried_then_raised(monkeypatch):
-    monkeypatch.setattr("passbook.firefly.client.time.sleep", lambda _s: None)
-    calls = {"n": 0}
-
-    def handler(request):
-        calls["n"] += 1
-        return httpx.Response(503, json={"message": "upstream down"})
-
-    client = make_client(handler, retries=3)
-    with pytest.raises(FireflyError) as exc:
-        client.store_transaction({})
-    assert calls["n"] == 3
-    assert exc.value.status == 503
-
-
-def test_retry_gives_up_and_succeeds_if_the_server_recovers(monkeypatch):
-    monkeypatch.setattr("passbook.firefly.client.time.sleep", lambda _s: None)
-    calls = {"n": 0}
-
-    def handler(request):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            return httpx.Response(500, json={"message": "flaky"})
-        return httpx.Response(200, json={"data": {"id": "9"}})
-
-    assert make_client(handler, retries=3).store_transaction({}) == {"data": {"id": "9"}}
-
-
-def test_client_errors_are_not_retried(monkeypatch):
-    monkeypatch.setattr("passbook.firefly.client.time.sleep", lambda _s: None)
-    calls = {"n": 0}
-
-    def handler(request):
-        calls["n"] += 1
-        return httpx.Response(404, json={"message": "nope"})
-
-    with pytest.raises(FireflyError):
-        make_client(handler, retries=3).store_transaction({})
-    assert calls["n"] == 1, "4xx must not be retried"
-
-
-def test_401_explains_the_expiry_possibility():
-    client = make_client(lambda r: httpx.Response(401, json={"message": "Unauthenticated."}))
-    with pytest.raises(FireflyError, match="365 days"):
-        client.store_transaction({})
-
-
-def test_error_never_contains_the_token():
-    secret = "eyJhbGciOiJSUzI1NiJ9.SECRETTOKENVALUE.sig"
-    client = FireflyClient(
-        "http://firefly.test", secret,
-        client=httpx.Client(transport=httpx.MockTransport(
-            lambda r: httpx.Response(422, json={"message": "bad"}))),
-    )
-    with pytest.raises(FireflyError) as exc:
-        client.store_transaction({})
-    assert secret not in str(exc.value)
-    assert "SECRETTOKENVALUE" not in repr(exc.value.body)
-
-
-# --- token expiry (no API call) -----------------------------------------------
-
-
-def _jwt(exp: int) -> str:
-    import base64
-
-    def seg(obj):
-        raw = json.dumps(obj).encode()
-        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
-    return f"{seg({'alg': 'RS256'})}.{seg({'exp': exp})}.signature"
-
-
-def test_expiry_is_read_from_the_exp_claim():
-    from datetime import datetime, timezone
-
-    when = datetime(2027, 8, 7, 12, 0, tzinfo=timezone.utc)
-    assert token_expiry(_jwt(int(when.timestamp()))) == when
-
-
-def test_non_jwt_tokens_yield_no_expiry():
-    """The 'Command line token' is 32 chars with no dots — the wrong credential."""
-    assert token_expiry("0123456789abcdef0123456789abcdef") is None
-    assert token_expiry("") is None
-    assert token_expiry("a.b") is None
-
-
-def test_malformed_payload_does_not_raise():
-    assert token_expiry("header.!!!not-base64!!!.sig") is None
-    assert token_expiry("aGVsbG8.aGVsbG8.sig") is None  # valid base64, not JSON
-
-
-def test_jwt_without_an_exp_claim_yields_none():
-    import base64
-
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": "1"}).encode()).rstrip(b"=").decode()
-    assert token_expiry(f"aGVsbG8.{payload}.sig") is None
-
-
-# --- §119: the overlap is skipped by identity, not by content -----------------
+# --- the overlap is skipped by identity ---------------------------------------
 #
 # Every test below exists because of one incident. A statement overlapping an
-# already-pushed period was re-uploaded after a config change. Firefly's
-# `error_if_duplicate_hash` hashes the SUBMITTED payload
-# (`TransactionJournalFactory::hashArray`), the config change had rewritten the
-# descriptions, so the hashes no longer matched and seven rows were posted a
-# second time. The balance went wrong by the sum of the extra copies and
-# nothing raised.
+# already-pushed period was re-uploaded after a config change. The old store
+# decided duplicates on a hash of the SUBMITTED payload, the config change had
+# rewritten the descriptions, so the hashes no longer matched and seven rows
+# were written a second time. The balance went wrong by the sum of the extra
+# copies and nothing raised.
 
 
-def test_a_row_already_in_the_ledger_is_never_posted_again():
-    posts = []
+def test_a_row_already_in_the_ledger_is_never_written_again():
+    store = ledger()
+    push_transactions(store, [txn()], ASSET)
+    result = push_transactions(store, [txn()], ASSET)
 
-    def handler(request):
-        posts.append(json.loads(request.content))
-        return httpx.Response(200, json={"data": {"id": "1"}})
-
-    client = make_client(handler, holds=[BASE_TXN_ID])
-    result = push_transactions(client, [txn()], ASSET)
-
-    assert posts == []
     assert (result.pushed, result.already, result.duplicates, result.failed) == (0, 1, 0, 0)
     assert result.skipped == 1
     assert result.ok
+    assert len(store.account_transactions(ASSET)) == 1
 
 
 def test_a_changed_description_does_not_make_it_a_new_transaction():
     """The incident, reproduced.
 
-    Same transaction, same id, different payload — an alias renamed the payee
-    between the two pushes. Firefly's content hash sees two different rows.
-    passbook sees one id.
+    Same transaction, same id, different row — an alias renamed the payee
+    between the two pushes. A content hash sees two different rows. passbook
+    sees one id, and so does the primary key.
     """
-    posts = []
-
-    def handler(request):
-        posts.append(json.loads(request.content))
-        return httpx.Response(200, json={"data": {"id": "1"}})
-
-    client = make_client(handler, holds=[BASE_TXN_ID])
+    store = ledger()
+    push_transactions(store, [txn()], ASSET)
     renamed = txn(payee="Someone Else Entirely")
-    assert build_payload(renamed, ASSET) != build_payload(txn(), ASSET)  # hash would differ
+    assert build_split(renamed, ASSET) != build_split(txn(), ASSET)  # a hash would differ
 
-    result = push_transactions(client, [renamed], ASSET)
-    assert posts == []
+    result = push_transactions(store, [renamed], ASSET)
     assert result.already == 1
+    assert len(store.account_transactions(ASSET)) == 1
+
+
+def test_the_key_refuses_the_repeat_even_when_the_pre_read_misses_it():
+    """The pre-read is an optimisation and a better message. The guarantee is
+    the primary key, and it holds with the pre-read removed."""
+    store = ledger()
+    store.store_transaction(build_split(txn(), ASSET))
+    with pytest.raises(LedgerError, match="already in the ledger"):
+        store.store_transaction(build_split(txn(payee="Renamed"), ASSET))
 
 
 def test_the_pre_migration_id_is_the_same_transaction_as_the_namespaced_one():
-    """§21.1 tolerant read. A bare id in the ledger still means "already there".
+    """A bare id in the ledger still means "already there".
 
-    Without this, running the migration would make every pre-migration row
-    look absent and the next push would double the ledger.
+    The namespace migration can then be run when it suits rather than being
+    forced by a push that would otherwise double every row.
     """
     from passbook.config import Account
 
     account = Account(
-        slug="canara-1111", bank="canara", account_number="1111", asset_account=ASSET
+        slug="canara-1111",
+        bank="canara",
+        label="Savings",
+        account_number="XXXXXXXX1111",
+        asset_account=ASSET,
     )
-    posts = []
+    store = ledger()
+    store.store_transaction(build_split(txn(), ASSET))  # written before the migration
 
-    def handler(request):
-        posts.append(json.loads(request.content))
-        return httpx.Response(200, json={"data": {"id": "1"}})
-
-    client = make_client(handler, holds=[BASE_TXN_ID])  # bare, pre-migration
-    result = push_transactions(client, [txn()], account)
-    assert posts == []
+    result = push_transactions(store, [txn()], account)
     assert result.already == 1
+    assert result.pushed == 0
 
 
-def test_only_the_rows_not_already_there_are_posted():
-    posts = []
+def test_only_the_rows_not_already_there_are_written():
+    one, two, three = ids(3)
+    store = ledger()
+    push_transactions(store, [txn(txn_id=one)], ASSET)
 
-    def handler(request):
-        posts.append(json.loads(request.content)["transactions"][0]["external_id"])
-        return httpx.Response(200, json={"data": {"id": "1"}})
-
-    four = ids(4)
-    client = make_client(handler, holds=four[:2])
-    result = push_transactions(client, [txn(txn_id=i) for i in four], ASSET)
-
-    assert posts == four[2:]
-    assert (result.pushed, result.already) == (2, 2)
+    result = push_transactions(
+        store,
+        [txn(txn_id=one), txn(txn_id=two), txn(txn_id=three)],
+        ASSET,
+    )
+    assert (result.pushed, result.already) == (2, 1)
+    assert {r["external_id"] for r in store.account_transactions(ASSET)} == {one, two, three}
 
 
 def test_one_statement_cannot_duplicate_itself():
-    """A row posted during this run joins the known set immediately."""
-    posts = []
-
-    def handler(request):
-        posts.append(json.loads(request.content))
-        return httpx.Response(200, json={"data": {"id": "1"}})
-
-    client = make_client(handler)
-    result = push_transactions(client, [txn(), txn(), txn()], ASSET)
-    assert len(posts) == 1
-    assert (result.pushed, result.already) == (1, 2)
+    """`known` is updated as rows are written, so a file listing the same id
+    twice writes it once."""
+    store = ledger()
+    result = push_transactions(store, [txn(), txn()], ASSET)
+    assert (result.pushed, result.already) == (1, 1)
+    assert len(store.account_transactions(ASSET)) == 1
 
 
 def test_a_ledger_that_cannot_be_read_stops_the_push():
-    """Never guess. A push that could not see the ledger might duplicate it."""
-    posts = []
+    """A read that failed and a read that found nothing are different answers.
+    Writing on the second one when it was really the first is how an account
+    gets doubled."""
 
-    def route(request):
-        if request.method == "GET":
-            return httpx.Response(500, json={"message": "nope"})
-        posts.append(request)
-        return httpx.Response(200, json={"data": {"id": "1"}})
+    class Unreadable(MemoryLedger):
+        def identities(self, account):
+            raise LedgerError("connection refused")
 
-    forget_everything()
-    client = FireflyClient(
-        "http://firefly.test", "unused-token",
-        client=httpx.Client(transport=httpx.MockTransport(route)),
-        retries=1,
-    )
-    with pytest.raises(FireflyError):
-        push_transactions(client, [txn()], ASSET)
-    assert posts == []
+    store = Unreadable()
+    store.store_account(ASSET, Decimal("12612.64"), date(2026, 5, 7), "INR")
+    with pytest.raises(LedgerError):
+        push_transactions(store, [txn()], ASSET)
+    assert store.account_transactions(ASSET) == []
 
 
-def test_an_account_with_no_rows_yet_pushes_everything():
-    """An asset account Firefly has never seen holds nothing — push it all."""
-    posts = []
-
-    def route(request):
-        if request.method == "GET" and request.url.path == "/api/v1/accounts":
-            return httpx.Response(
-                200, json={"data": [], "meta": {"pagination": {"total_pages": 1}}}
-            )
-        posts.append(request)
-        return httpx.Response(200, json={"data": {"id": "1"}})
-
-    forget_everything()
-    client = FireflyClient(
-        "http://firefly.test", "unused-token",
-        client=httpx.Client(transport=httpx.MockTransport(route)),
-    )
-    result = push_transactions(client, [txn()], ASSET)
-    assert (result.pushed, result.already) == (1, 0)
+def test_an_account_with_no_rows_yet_writes_everything():
+    store = ledger()
+    one, two = ids(2)
+    result = push_transactions(store, [txn(txn_id=one), txn(txn_id=two)], ASSET)
+    assert (result.pushed, result.already, result.failed) == (2, 0, 0)
 
 
-def test_the_pre_push_read_ignores_the_shared_cache():
-    """§101 + non-negotiable 11: a stale view is not a view of the ledger."""
-    reads = {"n": 0}
-
-    def route(request):
-        if request.method == "GET" and request.url.path == "/api/v1/accounts":
-            return httpx.Response(
-                200,
-                json={
-                    "data": [{"id": "7", "attributes": {"name": ASSET}}],
-                    "meta": {"pagination": {"total_pages": 1}},
-                },
-            )
-        if request.method == "GET":
-            reads["n"] += 1
-            return httpx.Response(
-                200, json={"data": [], "meta": {"pagination": {"total_pages": 1}}}
-            )
-        return httpx.Response(200, json={"data": {"id": "1"}})
-
-    forget_everything()
-    client = FireflyClient(
-        "http://firefly.test", "unused-token",
-        client=httpx.Client(transport=httpx.MockTransport(route)),
-    )
-    client.account_transactions("7")            # fills the shared cache
-    push_transactions(client, [txn()], ASSET)   # must not read it back
-    assert reads["n"] == 2
+def test_a_row_for_an_unregistered_account_fails_rather_than_vanishing():
+    store = MemoryLedger()  # no accounts at all
+    result = push_transactions(store, [txn()], ASSET)
+    assert result.pushed == 0
+    assert result.failed == 1
+    assert not result.ok
+    assert result.failures[0][0] == BASE_TXN_ID

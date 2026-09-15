@@ -50,15 +50,14 @@ def read_env() -> dict[str, str]:
 
 
 def configured(env: dict[str, str]) -> bool:
-    """The three the web service refuses to start without.
+    """The two the web service refuses to start without.
 
     Checked here rather than left to compose, because compose's message for a
     missing one is an interpolation error naming a variable the user has never
-    seen — and it aborts the whole stack, including the Firefly they need
-    running in order to produce the token compose is complaining about.
+    seen, and it aborts the whole stack rather than the one service.
     """
     return all(env.get(key) for key in
-               ("FIREFLY_TOKEN", "PASSBOOK_ACCOUNT_NUMBER", "PASSBOOK_ASSET_ACCOUNT"))
+               ("PASSBOOK_ACCOUNT_NUMBER", "PASSBOOK_ASSET_ACCOUNT"))
 
 
 def up(*services: str) -> int:

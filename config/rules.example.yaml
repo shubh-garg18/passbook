@@ -1,4 +1,4 @@
-# Firefly III categorisation rules.  SPEC §8, D10.
+# The ledger categorisation rules.  SPEC §8, D10.
 #
 # Copy to rules.yaml and fill in from `passbook payees` output.
 # The real file is gitignored because it names real counterparties.
@@ -24,7 +24,7 @@
 # raw narration carries no payee at all, so a notes-based matcher would miss it;
 # its description does carry one, because narration.py backfills it by UTR.
 #
-# `strict: false` means ANY trigger matches (Firefly's own semantics), which is
+# `strict: false` means ANY trigger matches (the previous store's semantics), which is
 # what lets one rule per category list several payees.
 #
 # Every categorisation rule sets `stop_processing: false` so it never
@@ -45,7 +45,7 @@ rules:
     notes_starts: SBINT
 
 # ── what is not spending ──────────────────────────────────────────────────────
-# Read by the charts (SPEC §18), not by Firefly: these categories are money
+# Read by the charts (SPEC §18), not by the ledger: these categories are money
 # MOVING, not money leaving. Counting them as spend was measured at three times
 # the true figure on one real ledger — not roughly right, and entirely plausible
 # on a chart.

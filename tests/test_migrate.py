@@ -59,7 +59,7 @@ def test_recording_round_trips_and_explains_itself(tmp_path):
 
 def _ctx(**overrides):
     fields = dict(
-        settings=None, client=None, registry=[], say=lambda m: None,
+        settings=None, store=None, registry=[], say=lambda m: None,
         purge_and_repush=lambda a: None, statement_paths=lambda a: [],
     )
     fields.update(overrides)
@@ -90,13 +90,13 @@ def test_a_step_that_cannot_tell_is_reported_as_pending(monkeypatch):
     """"could not determine" must never render as "nothing to do". That is the
     tri-state rule from §20.2 applied to migrations."""
     def explodes(ctx):
-        raise RuntimeError("Firefly is asleep")
+        raise RuntimeError("the ledger is asleep")
 
     monkeypatch.setattr(migrate, "all_migrations", lambda: [_step(1, pending=explodes)])
     outstanding = migrate.pending(_ctx())
     assert len(outstanding) == 1
     assert "could not determine" in outstanding[0][1]
-    assert "Firefly is asleep" in outstanding[0][1]
+    assert "the ledger is asleep" in outstanding[0][1]
 
 
 def test_pending_is_returned_in_run_order(monkeypatch):
@@ -131,19 +131,16 @@ def test_duplicate_versions_are_a_hard_error(monkeypatch):
 
 # ── the baseline migration's own detection ───────────────────────────────────
 
-class FakeClient:
+class FakeLedger:
     def __init__(self, external_ids):
         self._ids = external_ids
 
     def asset_accounts(self):
-        return [{"id": "7", "attributes": {"name": "Savings"}}]
+        return [{"name": "Savings", "current_balance": 0, "currency": "INR"}]
 
-    def account_transactions(self, account_id):
-        assert account_id == "7"
-        return [
-            {"attributes": {"transactions": [{"external_id": external}]}}
-            for external in self._ids
-        ]
+    def account_transactions(self, account):
+        assert account == "Savings"
+        return [{"external_id": external} for external in self._ids]
 
 
 def _account(slug="canara-1111"):
@@ -156,7 +153,7 @@ def _account(slug="canara-1111"):
 def test_the_baseline_is_a_no_op_on_a_ledger_that_is_already_namespaced():
     from passbook.migrations import m001_namespace_external_ids as m001
 
-    ctx = _ctx(client=FakeClient(["canara-1111-20260509000001"]), registry=[_account()])
+    ctx = _ctx(store=FakeLedger(["canara-1111-20260509000001"]), registry=[_account()])
     assert m001.pending(ctx) is None
     assert m001.verify(ctx) is None
 
@@ -165,7 +162,7 @@ def test_the_baseline_detects_bare_ids_and_says_how_many():
     from passbook.migrations import m001_namespace_external_ids as m001
 
     ctx = _ctx(
-        client=FakeClient(["20260509000001", "20260509000002", "canara-1111-20260510000001"]),
+        store=FakeLedger(["20260509000001", "20260509000002", "canara-1111-20260510000001"]),
         registry=[_account()],
     )
     reason = m001.pending(ctx)
@@ -183,17 +180,17 @@ def test_the_baseline_reads_the_ledger_not_a_version_file(tmp_path):
     migrate.record_version(1, marker)
     assert migrate.recorded_version(marker) == 1
 
-    ctx = _ctx(client=FakeClient(["20260509000001"]), registry=[_account()])
+    ctx = _ctx(store=FakeLedger(["20260509000001"]), registry=[_account()])
     assert m001.pending(ctx) is not None, "the marker must not outrank the rows"
 
 
 def test_the_baseline_never_deletes_rows_it_cannot_rebuild():
-    """archive/ empty plus rows in Firefly is data loss with a progress bar."""
+    """archive/ empty plus rows in the ledger is data loss with a progress bar."""
     from passbook.migrations import m001_namespace_external_ids as m001
 
     calls = []
     ctx = _ctx(
-        client=FakeClient(["20260509000001"]),
+        store=FakeLedger(["20260509000001"]),
         registry=[_account()],
         purge_and_repush=lambda account: calls.append(account),
     )

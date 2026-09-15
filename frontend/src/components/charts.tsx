@@ -351,7 +351,7 @@ export function FlowBar({
 /**
  * A tag's total with its member categories stacked inside one bar.
  *
- * The total comes from the TAG as Firefly stored it; the segments come from the
+ * The total comes from the TAG as the ledger stored it; the segments come from the
  * categories that carry that tag in rules.yaml. They are two different sources
  * for the same number on purpose — if they ever disagree, the segments will not
  * fill the bar, and that is a visible bug rather than a silent one.
@@ -610,8 +610,8 @@ export function MonthColumns({ months, title }: { months: Month[]; title: 'spend
 }
 
 /* ---------------------------------------------------------------------------
- * §57. Three marks added so Firefly's report screens stop being a reason to
- * open Firefly. All three obey non-negotiable 16: `--ramp-*` and nothing else,
+ * §57. Three marks added so the ledger's report screens stop being a reason to
+ * open the ledger. All three obey non-negotiable 16: `--ramp-*` and nothing else,
  * one ink at five densities, ordered by magnitude.
  * ------------------------------------------------------------------------- */
 
@@ -636,7 +636,7 @@ export function topWithOther(slices: Slice[], keep: number): Slice[] {
 /**
  * The category distribution as a ring.
  *
- * Asked for by name — Firefly's pie is the chart the operator missed. It is
+ * Asked for by name — the ledger's pie is the chart the operator missed. It is
  * drawn in the ramp rather than in ten hues, which works here for a reason
  * specific to this data: the slices are already rank-ordered, so density is
  * carrying the same fact the arc length carries, and the identity is in the
@@ -779,7 +779,7 @@ type BalanceSeries = {
 }
 
 /**
- * The balance, over time. Firefly's headline chart, and passbook had none.
+ * The balance, over time. the ledger's headline chart, and passbook had none.
  *
  * **This is not the trend line `MonthColumns` refuses to draw.** That one would
  * interpolate a direction through four monthly aggregates, two of them stubs —
@@ -891,7 +891,7 @@ export function BalanceLine({ series }: { series: BalanceSeries[] }) {
 /**
  * Category against month, as density.
  *
- * Firefly's Category report, compressed. Twenty-one categories over four months
+ * The ledger's Category report, compressed. Twenty-one categories over four months
  * is 21 sparklines — a wall of near-identical stubs — or one grid where each
  * cell's density is its share of that category's biggest month. Density for
  * magnitude is exactly what the ramp is for, so this needs no new ink.

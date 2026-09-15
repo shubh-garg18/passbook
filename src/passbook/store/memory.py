@@ -10,6 +10,9 @@ Specifically, and each of these is a constraint in `schema.sql`:
 * `external_id` is unique. A second insert of the same identity raises rather
   than appending — the thing that went wrong when a content hash was the guard.
 * `amount` is a `Decimal` and never negative. Direction lives in `kind`.
+* `kind` is `withdrawal` or `deposit`, and nothing else. There is no third
+  value: an opening balance is a column on the account, not a row that could
+  turn up in a listing with no payee and no amount.
 * A transaction must belong to an account that exists.
 """
 
@@ -30,7 +33,15 @@ class MemoryLedger:
     # --- accounts ------------------------------------------------------------
 
     def asset_accounts(self) -> list[dict]:
-        return [dict(a) for a in self._accounts.values()]
+        out = []
+        for account in self._accounts.values():
+            live = Decimal(account["opening_balance"])
+            for row in self._rows.values():
+                if row["account"] != account["name"]:
+                    continue
+                live += row["amount"] if row["kind"] == "deposit" else -row["amount"]
+            out.append({**account, "current_balance": live})
+        return out
 
     def store_account(self, name: str, opening, on, currency: str) -> None:
         if name in self._accounts:
@@ -64,6 +75,10 @@ class MemoryLedger:
         if account not in self._accounts:
             raise LedgerError(f"no asset account named {account!r}")
 
+        kind = str(split.get("kind") or "")
+        if kind not in ("withdrawal", "deposit"):
+            raise LedgerError(f"{kind!r} is not a direction; use withdrawal or deposit")
+
         amount = Decimal(str(split["amount"]))
         if amount < 0:
             raise LedgerError("amount is positive; direction belongs in `kind`")
@@ -71,7 +86,7 @@ class MemoryLedger:
         self._rows[external_id] = {
             "external_id": external_id,
             "account": account,
-            "kind": split["kind"],
+            "kind": kind,
             "txn_date": split["txn_date"],
             "amount": amount,
             "description": split.get("description", ""),
@@ -107,6 +122,13 @@ class MemoryLedger:
 
     def delete_transaction(self, external_id: str) -> None:
         self._rows.pop(external_id, None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.close()
+        return False
 
     def close(self) -> None:
         return None

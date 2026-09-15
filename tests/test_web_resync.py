@@ -13,6 +13,8 @@ reading the code:
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 # The web fixtures live in `test_web.py` rather than `conftest.py`. Importing
@@ -20,21 +22,21 @@ import pytest
 # fixture between modules without moving it.
 from test_web import api, app, signed_in  # noqa: F401
 # A package attribute is not a patch seam: a route resolves the name in its
-# own module's globals, so the fake goes on `_base` — the one place a client
-# is ever constructed.
+# own module's globals, so the fake goes on `_base` — the one place a store is
+# ever opened.
 from passbook.web.api import _base as _api_base
 
 
 @pytest.fixture
-def firefly(monkeypatch):
-    """A store holding one row, whose description is one rename out of date."""
+def ledger(monkeypatch):
+    """A ledger holding one account and no rows."""
 
-    class FakeClient:
+    class FakeLedger:
         instances: list = []
 
         def __init__(self, *args, **kwargs):
             self.updates: list[tuple[str, dict]] = []
-            FakeClient.instances.append(self)
+            FakeLedger.instances.append(self)
 
         def __enter__(self):
             return self
@@ -42,42 +44,38 @@ def firefly(monkeypatch):
         def __exit__(self, *exc):
             return False
 
+        def close(self):
+            return None
+
         def asset_accounts(self):
-            # `current_balance` is not optional: the verdict reads it, and a
-            # fake without it fails inside a route rather than in the test.
+            # `current_balance` and `opening_balance` are not optional: the
+            # verdict reads both, and a fake without them fails inside a route
+            # rather than in the test.
             return [
                 {
-                    "id": "1",
-                    "attributes": {
-                        "name": "Test Account",
-                        "current_balance": "5068.09",
-                        "currency_code": "INR",
-                    },
+                    "name": "Test Account",
+                    "current_balance": "5068.09",
+                    "opening_balance": "12612.64",
+                    "opening_on": date(2026, 5, 6),
+                    "currency": "INR",
                 }
             ]
 
-        def account_transactions(self, account_id):
+        def account_transactions(self, account):
             return []
 
-        def update_transaction(self, group_id, payload):
-            self.updates.append((group_id, payload))
-            return {}
+        def identities(self, account):
+            return set()
 
-        # §101: the client memoises per instance, and a push must read the
-        # ledger fresh before deciding a row is new. A fake without this is a
-        # fake the pusher cannot use.
-        def fresh(self):
-            return self
+        def update_transaction(self, external_id, fields):
+            self.updates.append((external_id, fields))
 
-    FakeClient.instances = []
-    import passbook.web.api as api_mod
-
-    monkeypatch.setattr(_api_base, "FireflyClient", FakeClient)
-    monkeypatch.setenv("FIREFLY_TOKEN", "t")
-    return FakeClient
+    FakeLedger.instances = []
+    monkeypatch.setattr(_api_base, "open_ledger", FakeLedger)
+    return FakeLedger
 
 
-def test_reapply_builds_a_response_rather_than_raising(signed_in, firefly):
+def test_reapply_builds_a_response_rather_than_raising(signed_in, ledger):
     """The regression: `_preview` calls `_change`, which was never ported.
 
     A `NameError` inside a route is a 500 the whole page shows as "something
@@ -90,7 +88,7 @@ def test_reapply_builds_a_response_rather_than_raising(signed_in, firefly):
         assert key in body, f"{key} missing from /reapply"
 
 
-def test_reapply_sync_answers_with_what_it_verified(signed_in, firefly):
+def test_reapply_sync_answers_with_what_it_verified(signed_in, ledger):
     """`remaining` is a claim about the ledger; `updated` is a claim about the
     requests. Only the first may make `ok` true (non-negotiable 11)."""
     response = signed_in.post("/reapply/sync")
@@ -102,7 +100,7 @@ def test_reapply_sync_answers_with_what_it_verified(signed_in, firefly):
     assert set(body) >= {"ok", "considered", "attempted", "updated", "failed", "remaining"}
 
 
-def test_nothing_compared_is_never_reported_as_ok(signed_in, firefly, monkeypatch):
+def test_nothing_compared_is_never_reported_as_ok(signed_in, ledger, monkeypatch):
     """§24.1's exact shape: a join that matched nothing said "all match".
 
     `remaining` of `None` is *unverified* — the third state — and must not make
@@ -127,7 +125,7 @@ def test_nothing_compared_is_never_reported_as_ok(signed_in, firefly, monkeypatc
     assert body["ok"] is False
 
 
-def test_a_rename_reaches_rules_yaml_in_the_same_request(signed_in, firefly, tmp_path, monkeypatch):
+def test_a_rename_reaches_rules_yaml_in_the_same_request(signed_in, ledger, tmp_path, monkeypatch):
     """§24.4. A rule matches the display name, so relabelling a payee without
     rewriting its entry silently de-categorises it."""
     from passbook import configwrite

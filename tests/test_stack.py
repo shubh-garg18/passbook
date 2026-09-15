@@ -27,21 +27,18 @@ WEB = "http://127.0.0.1:8081"
 TIMEOUT = 6
 
 
-def _firefly_host_port() -> str:
-    """The host port `make up` published Firefly on — 8080 unless `.env` moved
-    it. Read rather than assumed: on WSL with `networkingMode=mirrored` the
-    distro shares Windows's port space, and a Windows service on 8080 forces
-    the move. Hardcoding it made this file fail against a working stack."""
+def _database_host_port() -> str:
+    """The host port `make up` published the database on — 5433 unless `.env`
+    moved it. Read rather than assumed: a Postgres already installed on this
+    machine forces the move, and hardcoding it made this file fail against a
+    working stack."""
     env = Path(__file__).resolve().parents[1] / ".env"
     if env.exists():
         for line in env.read_text().splitlines():
             key, _, value = line.partition("=")
-            if key.strip() == "FIREFLY_HOST_PORT" and value.strip():
+            if key.strip() == "PASSBOOK_DB_PORT" and value.strip():
                 return value.strip()
-    return "8080"
-
-
-FIREFLY = f"http://127.0.0.1:{_firefly_host_port()}"
+    return "5433"
 
 
 def fetch(url: str, host: str | None = None) -> tuple[int, str]:
@@ -75,14 +72,27 @@ needs_caddy = pytest.mark.skipif(
     not _up(CADDY, "passbook.localhost"), reason="stack is down; run `make up`"
 )
 needs_ports = pytest.mark.skipif(not _up(WEB), reason="stack is down; run `make up`")
-# Firefly gets its own gate rather than riding on the web UI's. Its HOST port is
-# settable and the web UI's is not, so on a checkout whose `.env` names a
-# different port — or has no `.env` at all, which is every fresh clone — the two
-# are not the same question. Measured on a fresh clone beside a running stack:
-# gated on the web UI, this failed with a socket timeout after six seconds
-# instead of skipping, because something unrelated was holding 8080.
-needs_firefly = pytest.mark.skipif(
-    not _up(FIREFLY), reason=f"nothing answering on {FIREFLY}; run `make up`"
+
+
+def _database_listening() -> bool:
+    """A TCP connect, not a query: the CLI runs on the host and reaches the
+    database on a published port, and this checks that the port is there.
+
+    Its own gate rather than riding on the web UI's. The database's host port
+    is settable and the web UI's is not, so on a checkout whose `.env` names a
+    different port — or has no `.env` at all, which is every fresh clone — the
+    two are not the same question.
+    """
+    import socket
+
+    with socket.socket() as probe:
+        probe.settimeout(2)
+        return probe.connect_ex(("127.0.0.1", int(_database_host_port()))) == 0
+
+
+needs_database = pytest.mark.skipif(
+    not _database_listening(),
+    reason=f"nothing listening on 127.0.0.1:{_database_host_port()}; run `make up`",
 )
 
 
@@ -94,28 +104,29 @@ def test_passbook_localhost_reaches_the_web_container():
     status, body = fetch(f"{CADDY}/api/session", host="passbook.localhost")
     assert status == 200
     payload = json.loads(body)
-    # Shape unique to our API — Firefly has no such endpoint.
+    # Shape unique to our API — the ledger has no such endpoint.
     assert {"authenticated", "configured", "stage"} <= set(payload)
 
 
 @needs_caddy
-def test_khata_localhost_reaches_firefly_not_the_web_container():
-    status, body = fetch(f"{CADDY}/login", host="khata.localhost")
-    assert status == 200
-    assert "Firefly III" in body, "khata is not being routed to the app container"
+def test_there_is_exactly_one_host_and_the_other_is_gone():
+    """A second hostname used to serve a separate ledger application beside
+    this one. It is gone, and so is that application — so the second host has
+    to answer like any other unknown name, not like a door left ajar.
 
-    # And the passbook API is genuinely absent on that host — proof the two
-    # routes point at different upstreams rather than both at `web`.
-    status, _ = fetch(f"{CADDY}/api/session", host="khata.localhost")
+    Asserted on the fallback rather than on the page a host serves. `:80` and
+    `passbook.localhost` are not namespaced by checkout, so on a machine
+    running a passbook from somewhere else this file is talking to *that*
+    stack — and a test that asserted on its page content would fail for a
+    reason that has nothing to do with this one.
+    """
+    status, body = fetch(f"{CADDY}/", host="khata.localhost")
     assert status == 404
+    assert "passbook.localhost" in body
 
-
-@needs_caddy
-def test_the_two_hosts_are_not_the_same_upstream():
-    _, passbook = fetch(f"{CADDY}/", host="passbook.localhost")
-    _, khata = fetch(f"{CADDY}/login", host="khata.localhost")
-    assert "<title>passbook</title>" in passbook
-    assert "Firefly III" in khata
+    status, page = fetch(f"{CADDY}/", host="passbook.localhost")
+    assert status == 200
+    assert '<div id="root">' in page, "the SPA shell is what this host serves"
 
 
 @needs_caddy
@@ -145,11 +156,17 @@ def test_port_8081_still_answers_directly():
     assert "configured" in json.loads(body)
 
 
-@needs_firefly
-def test_the_firefly_host_port_still_answers_directly():
-    status, _ = fetch(f"{FIREFLY}/")
-    # Firefly redirects an anonymous request to /login; either is "answering".
-    assert status in (200, 302)
+@needs_database
+def test_the_database_port_is_published_for_the_cli():
+    """`passbook sync`, `verify-ledger` and `upgrade` all run on the HOST while
+    the web container reaches the same database over the compose network. If
+    this port stops being published, every one of them stops working and the
+    UI keeps going — which is the confusing half of that failure."""
+    from passbook.config import load_settings
+    from passbook.store import open_ledger
+
+    with open_ledger(load_settings()) as store:
+        assert isinstance(store.asset_accounts(), list)
 
 
 @needs_ports

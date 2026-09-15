@@ -75,7 +75,7 @@ def _account_scope(default_to_first: bool = True):
 
 
 # --- the date range -------------------------------------------------------
-# SPEC §25. Firefly has one and the operator reads the two side by side; more
+# SPEC §25. the ledger has one and the operator reads the two side by side; more
 # to the point, a payee list is a per-period job. Deciding on the eleven tokens
 # that appeared last month is a task; scrolling the same 59 every week looking
 # for the new ones is not.
@@ -155,7 +155,7 @@ def _iso(value: date | None) -> str | None:
 
 
 def _splits_within(splits: list[dict], start: date | None, end: date | None) -> list[dict]:
-    """The same window, over Firefly splits rather than parsed transactions.
+    """The same window, over the ledger splits rather than parsed transactions.
 
     A split's `date` is an ISO-8601 *datetime* with an offset
     (`2026-08-24T00:00:00+05:30`), so it is cut at the `T` rather than parsed:

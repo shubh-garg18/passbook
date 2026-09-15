@@ -7,19 +7,17 @@ from pathlib import Path
 
 from flask import current_app, jsonify
 
-from ... import ops, service
+from ... import service
 from ...config import (
     load_settings,
 )
-from ...firefly.bootstrap import bootstrap as bootstrap_rules
-from ...firefly.bootstrap import load_rules
-from ...firefly.client import FireflyError
-from ...firefly.purge import find_candidates
-from ...firefly.purge import purge as purge_transactions
+from ...store import LedgerError
+from ...purge import find_candidates
+from ...purge import purge as purge_transactions
 from .. import auth as A
 
 from ._base import (
-    _client,
+    _ledger,
     _fail,
     _money,
     api,
@@ -41,15 +39,15 @@ from ._reconcile import (
 @A.login_required
 def reapply_preview():
     st = load_settings()
-    if not st.firefly_token or not st.passbook_asset_account:
-        return _fail("FIREFLY_TOKEN or PASSBOOK_ASSET_ACCOUNT is not set.", "unconfigured", 503)
+    if not st.passbook_asset_account:
+        return _fail("PASSBOOK_ASSET_ACCOUNT is not set.", "unconfigured", 503)
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
+        with _ledger() as store:
             changes, considered = service.reapply_preview(
-                client, st, current_app.config["ARCHIVE"]
+                store, st, current_app.config["ARCHIVE"]
             )
-    except FireflyError as exc:
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+    except LedgerError as exc:
+        return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)
 
     return jsonify(_preview(changes, considered))
 
@@ -57,7 +55,7 @@ def reapply_preview():
 @api.post("/reapply/sync")
 @A.login_required
 def reapply_sync():
-    """Write the current config onto the rows already in Firefly. SPEC §23.
+    """Write the current config onto the rows already in the ledger. SPEC §23.
 
     **This is what a payee edit was always supposed to do.** Renaming a payee
     used to write `config/` and sync the rules, and stop there: the ledger kept
@@ -71,19 +69,19 @@ def reapply_sync():
     source of truth, which means a failed run is re-run rather than recovered.
 
     It cannot fix everything, and says so rather than implying otherwise. A row
-    missing from Firefly, a wrong amount or a wrong date still need
+    missing from the ledger, a wrong amount or a wrong date still need
     `/reapply/run`; §20's verdict is returned alongside so the difference is
     visible rather than assumed.
     """
     st = load_settings()
-    if not st.firefly_token or not st.passbook_asset_account:
-        return _fail("FIREFLY_TOKEN or PASSBOOK_ASSET_ACCOUNT is not set.", "unconfigured", 503)
+    if not st.passbook_asset_account:
+        return _fail("PASSBOOK_ASSET_ACCOUNT is not set.", "unconfigured", 503)
 
     try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            synced = _sync_now(client, st)
-    except FireflyError as exc:
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
+        with _ledger() as store:
+            synced = _sync_now(store, st)
+    except LedgerError as exc:
+        return _fail(f"The ledger store did not answer: {exc}", "ledger", 502)
 
     log.info(
         "in-place sync: %d updated, %d failed, %s still differ",
@@ -107,7 +105,7 @@ def reapply_sync():
 def reapply_run():
     """Back up, purge, sync rules, re-push, verify. SPEC §15.2.
 
-    Order is load-bearing. The rules must reach Firefly *before* the re-push:
+    Order is load-bearing. The rules must reach the ledger *before* the re-push:
     they are applied at store time, so a rule the engine has not been told about
     cannot categorise anything. Skipping that step once produced six
     uncategorised rows while every other check still reported green.
@@ -150,29 +148,18 @@ def reapply_run():
     if not statements:
         return _fail("Nothing in archive/ to re-push.", "empty_archive", 409)
 
-    with _client(st.firefly_url, st.firefly_token or "") as client:
-        accounts = {a["attributes"]["name"]: a["id"] for a in client.asset_accounts()}
-        account_id = accounts.get(st.passbook_asset_account)
-        if account_id is None:
+    with _ledger() as store:
+        known = {a["name"] for a in store.asset_accounts()}
+        if st.passbook_asset_account not in known:
             return _fail(
                 f"No asset account named {st.passbook_asset_account!r}.", "unconfigured", 503
             )
 
-        candidates, protected = find_candidates(client, account_id)
-        # Intent BEFORE the first delete (§19.7). If this request dies here — the
-        # container restarts, the machine sleeps — the file is what makes the
-        # half-finished state visible instead of merely coherent.
-        result = purge_transactions(
-            client,
-            candidates,
-            account=st.passbook_asset_account or "",
-            statements=[str(p) for p in statements],
-        )
+        candidates, protected = find_candidates(store, st.passbook_asset_account or "")
+        result = purge_transactions(store, candidates)
         if not result.ok:
             return _fail(
-                f"Purge failed ({result.failed} errors); nothing re-pushed. "
-                f"Recorded as {result.intent.name if result.intent else 'no intent'} — "
-                "run `passbook purge --resume` on the host.",
+                f"Purge failed ({result.failed} errors); nothing re-pushed.",
                 "purge",
                 500,
             )
@@ -181,24 +168,13 @@ def reapply_run():
                 "state": "ok",
                 "message": (
                     f"purged {result.deleted} row(s), {len(protected)} protected "
-                    "(no external_id), trashed records force-deleted"
+                    "(no external_id)"
                 ),
             }
         )
 
-        boot = bootstrap_rules(client, load_rules(), st.large_txn_threshold)
-        steps.append(
-            {
-                "state": "ok" if boot.ok else "bad",
-                "message": (
-                    f"rules synced — {len(boot.created)} created, "
-                    f"{len(boot.updated)} updated, {len(boot.existing)} unchanged"
-                ),
-            }
-        )
-
-        if result.intent:
-            ops.update_purge_intent(result.intent, stage="repushing")
+        # No rules step: the rules are applied by the push below, on the way
+        # in, so there is nothing to synchronise into a separate engine first.
         pushed = duplicates = failed = 0
         for path in statements:
             parsed = service.parse_statement(path)
@@ -207,8 +183,8 @@ def reapply_run():
             # rebuild, i.e. after the purge, which is the worst possible place
             # to stop. `allow_register=False`: a rebuild re-pushes what it just
             # deleted and must never invent an account while doing it.
-            target = service.resolve_account(parsed.meta, st, client=client, allow_register=False)
-            res = service.push_statement(parsed, st, client, account=target)
+            target = service.resolve_account(parsed.meta, st, store=store, allow_register=False)
+            res = service.push_statement(parsed, st, store, account=target)
             pushed += res.pushed
             duplicates += res.skipped
             failed += res.failed
@@ -219,7 +195,7 @@ def reapply_run():
             }
         )
 
-        balance = service.ledger_balance(st, client)
+        balance = service.ledger_balance(st, store)
 
     expected = None
     try:
@@ -239,8 +215,8 @@ def reapply_run():
         }
     )
 
-    # The intent is cleared only once the ledger itself verifies — not when the
-    # last HTTP call returns. §19.7, and §20 is what does the verifying.
+    # Verified against the ledger itself, not against the fact that the last
+    # write returned. The rebuild is only finished when the checks say so.
     verdict = _ledger_verdict(st)
     steps.append(
         {
@@ -248,19 +224,6 @@ def reapply_run():
             "message": f"ledger integrity — {verdict['headline']}",
         }
     )
-    if result.intent:
-        if verdict["ok"] and reconciles and not failed:
-            ops.clear_purge_intent(result.intent)
-        else:
-            steps.append(
-                {
-                    "state": "bad",
-                    "message": (
-                        f"{result.intent.name} kept: the cycle is unfinished, and the "
-                        "record is what makes that visible. `passbook purge --resume`."
-                    ),
-                }
-            )
 
     return jsonify(
         {

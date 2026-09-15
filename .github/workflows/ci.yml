@@ -4,7 +4,7 @@ name: tests
 # something enforces it, so `audit-docs` runs here as its own job — a red cross
 # on a PR that pastes a real balance into a comment.
 #
-# Nothing in this workflow needs Docker, Firefly, or a bank account. The whole
+# Nothing in this workflow needs Docker, a database, or a bank account. The whole
 # suite runs on fixtures; `test_stack.py` auto-skips when no stack is up, which
 # on a runner is always.
 

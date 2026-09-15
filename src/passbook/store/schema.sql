@@ -4,6 +4,15 @@
 -- Everything here is a decision that was made somewhere else first and is now
 -- enforced by the database instead of by discipline.
 
+-- passbook keeps its tables in a schema of its own rather than in `public`.
+-- A schema, not a second database: creating one needs no superuser and no
+-- fresh volume, so it lands cleanly inside a database that already exists and
+-- already has somebody else's tables sitting in it. An install upgrading off
+-- the old ledger therefore needs no database surgery — the old tables are
+-- simply not ours, and dropping them is a separate decision made later.
+CREATE SCHEMA IF NOT EXISTS passbook;
+SET search_path TO passbook;
+
 CREATE TABLE IF NOT EXISTS asset_accounts (
     name             TEXT PRIMARY KEY,
     -- The statement's OPENING balance, not the current one. Seeding with the

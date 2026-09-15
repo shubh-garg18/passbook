@@ -1962,7 +1962,7 @@ button.danger {
  * of these IS a passbook, and the page is the shelf they sit on.
  *
  * The head is a two-column row that collapses to one on a phone rather than
- * letting a long Firefly account name push the Remove button off the edge —
+ * letting a long the ledger account name push the Remove button off the edge —
  * the control that needs to stay reachable is the one with consequences.
  */
 
@@ -2946,7 +2946,7 @@ input[aria-invalid='true'] {
 
 /* --- §57 the ring, the line, the grid ------------------------------------
  *
- * Three marks added so Firefly's report screens stop being a reason to leave.
+ * Three marks added so the ledger's report screens stop being a reason to leave.
  * All three take their ink from --ramp-* and nothing else (non-negotiable 16).
  */
 

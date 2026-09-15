@@ -11,7 +11,7 @@ second Canara account emits *the same ids*: measured on the two committed
 fixtures, 93 of 93 identical, and the same masked last four. A dict keyed on the
 bare id merged two accounts and kept 93 of 186 rows with no error at all.
 
-**Why it cannot be an in-place edit.** Firefly's API has no way to change an
+**Why it cannot be an in-place edit.** the ledger's API has no way to change an
 `external_id` without rewriting the row, so the only path is the proven one from
 §19.5: purge, then re-push from `archive/`. That is a delete, which is why this
 migration refuses to start without a fresh dump and why nothing is marked
@@ -32,22 +32,21 @@ DESCRIPTION = (
 def _bare_ids(ctx) -> dict[str, list[str]]:
     """Rows still carrying the bank's bare id, per account slug.
 
-    Read from Firefly, not from a version file: a marker claiming this is done
-    while the rows disagree is the §19 failure in miniature.
+    Read from the ledger, not from a version file: a marker claiming this is
+    done while the rows disagree is the same failure that let a ledger sit at
+    21 of 93 rows behind an all-green strip.
     """
     from .. import service
 
-    live = {a["attributes"]["name"]: a["id"] for a in ctx.client.asset_accounts()}
+    known = {a["name"] for a in ctx.store.asset_accounts()}
     out: dict[str, list[str]] = {}
     for account in ctx.registry:
-        account_id = live.get(account.asset_account)
-        if account_id is None:
+        if account.asset_account not in known:
             continue
         stale = [
             external
-            for group in ctx.client.account_transactions(account_id)
-            for split in group.get("attributes", {}).get("transactions", [])
-            if (external := split.get("external_id")) and not service.is_namespaced(external)
+            for row in ctx.store.account_transactions(account.asset_account)
+            if (external := row.get("external_id")) and not service.is_namespaced(external)
         ]
         if stale:
             out[account.slug] = stale

@@ -1,7 +1,7 @@
 /* What goes stale when the ledger moves. SPEC §16.1.
  *
  * Every page here is a view of two things: the statements in `archive/` (plus
- * whatever is staged in the session) and the rows in Firefly. Anything that
+ * whatever is staged in the session) and the rows in the ledger. Anything that
  * changes either of those changes all of them — and the invalidation for that
  * was written out by hand at each call site, which meant it was different at
  * each call site:

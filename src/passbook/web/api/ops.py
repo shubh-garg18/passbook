@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 
 
 from flask import current_app, jsonify, request
@@ -12,16 +12,13 @@ from ... import backup, ops, reminders, service
 from ...config import (
     load_accounts,
     load_settings,
-    token_expiry,
 )
-from ...firefly.bootstrap import bootstrap as bootstrap_rules
-from ...firefly.bootstrap import load_rules
-from ...firefly.client import FireflyError
+from ...store import LedgerError
 from .. import auth as A
 
 from ._base import (
     _artefact,
-    _client,
+    _ledger,
     _fail,
     _sync,
     api,
@@ -34,45 +31,6 @@ from ._reconcile import (
 from ._scope import (
     _account_scope,
 )
-
-
-@api.post("/bootstrap")
-@A.login_required
-def bootstrap():
-    """Push `config/rules.yaml` into Firefly's rules engine. SPEC §86.
-
-    **The last operation that needed a terminal.** Categories are assigned by
-    Firefly at store time from rules this pushes (D5), so a category created on
-    the Payees page does nothing to future imports until the rules are synced —
-    and the only way to sync them from the UI was `/reapply/run`, which purges
-    and re-pushes the entire ledger. Reaching for a destructive rebuild to
-    register a rule is the kind of thing an operator does once and regrets.
-
-    Idempotent by construction: `bootstrap_rules` creates what is missing and
-    updates what drifted, and reports both. It writes rules, never transactions
-    — nothing here can touch a row.
-    """
-    st = load_settings()
-    if not st.firefly_token:
-        return _fail("FIREFLY_TOKEN is not set.", "unconfigured", 503)
-    try:
-        with _client(st.firefly_url, st.firefly_token) as client:
-            result = bootstrap_rules(client, load_rules(), st.large_txn_threshold)
-    except FireflyError as exc:
-        return _fail(f"The ledger store did not answer: {exc}", "firefly", 502)
-
-    return jsonify(
-        {
-            "ok": result.ok,
-            "created": list(result.created),
-            "updated": list(result.updated),
-            "unchanged": len(result.existing),
-            "message": (
-                f"{len(result.created)} rule(s) created, {len(result.updated)} updated, "
-                f"{len(result.existing)} already current"
-            ),
-        }
-    )
 
 
 @api.get("/backup")
@@ -300,16 +258,18 @@ def reminder_ics():
 def status():
     st = load_settings()
     scope, selected = _account_scope()
-    expiry = token_expiry(st.firefly_token or "") if st.firefly_token else None
-    days_left = (expiry - datetime.now(timezone.utc)).days if expiry else None
 
-    about = None
-    firefly_error = None
+    # Reachability, asked of the ledger itself rather than inferred from a
+    # credential being present. The card used to report on a token's shape and
+    # expiry, which said whether a string looked right — not whether anything
+    # answered.
+    accounts = None
+    ledger_error = None
     try:
-        with _client(st.firefly_url, st.firefly_token or "") as client:
-            about = client.about()
-    except FireflyError as exc:
-        firefly_error = str(exc)
+        with _ledger() as store:
+            accounts = len(store.asset_accounts())
+    except LedgerError as exc:
+        ledger_error = str(exc)
 
     remote, remote_error = ops.remote_backups(os.environ.get("PASSBOOK_RCLONE_REMOTE"))
     auth = A.current_auth()
@@ -317,13 +277,7 @@ def status():
     return jsonify(
         {
             "sync": _sync(service.sync_status(scope, current_app.config["ARCHIVE"])),
-            "token": {
-                # Shape only. The token itself never crosses this boundary.
-                "shapeOk": bool(st.firefly_token and st.firefly_token.count(".") == 2),
-                "expiry": expiry.date().isoformat() if expiry else None,
-                "daysLeft": days_left,
-            },
-            "firefly": {"about": about, "error": firefly_error},
+            "store": {"accounts": accounts, "error": ledger_error},
             "account": {
                 "assetAccount": scope[0].asset_account if len(scope) == 1 else None,
                 "assertionConfigured": bool(load_accounts()),

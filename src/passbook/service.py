@@ -30,9 +30,19 @@ from .config import (
     load_payee_aliases,
     save_accounts,
 )
-from .firefly.bootstrap import load_rules
-from .firefly.client import FireflyClient, FireflyError
-from .firefly.push import PushResult, push_transactions
+# The rules engine lives in `rules.py` now that passbook applies it itself
+# (§36). Re-exported here because every caller was written against
+# `service.predict_category`, and a rename would be a diff on all of them
+# for no gain.
+from .rules import (  # noqa: F401
+    load_rules,
+    managed_tags,
+    predict_category,
+    predict_tags,
+    rule_categories,
+)
+from .push import PushResult, push_transactions
+from .store import LedgerError, LedgerStore, open_ledger
 from .identity import (  # noqa: F401  (re-exported, §119)
     _NAMESPACED,
     _TXN_ID_FORM,
@@ -109,7 +119,7 @@ def resolve_account(
     meta: StatementMeta,
     settings: Settings,
     *,
-    client: FireflyClient | None = None,
+    store: LedgerStore | None = None,
     allow_register: bool = True,
 ) -> Account:
     """Route a statement to its account, registering the FIRST one. SPEC §21.2-3.
@@ -118,11 +128,11 @@ def resolve_account(
 
     * the account is registered — route to it;
     * the registry is **empty** and this is the first statement — register it, so
-      a single-account operator never learns this feature exists (§21.3). The
-      Firefly asset account is taken from `PASSBOOK_ASSET_ACCOUNT` if set, else
-      from Firefly itself when it holds exactly one asset account. It is never
-      guessed between several — `doctor` has refused to do that since §7.2 and
-      posting 93 rows into the wrong account is tedious to undo;
+      a single-account operator never learns this feature exists. The asset
+      account is taken from `PASSBOOK_ASSET_ACCOUNT` if set, else from the
+      ledger itself when it holds exactly one. It is never guessed between
+      several — `doctor` has refused to do that since the first release, and
+      posting a statement into the wrong account is tedious to undo;
     * anything else raises `UnknownAccount`, which every front end already turns
       into a 422 that deletes the staged file. **An unregistered account cannot
       silently import.**
@@ -135,8 +145,8 @@ def resolve_account(
             raise
 
     asset = (settings.passbook_asset_account or "").strip()
-    if not asset and client is not None:
-        names = [a["attributes"]["name"] for a in client.asset_accounts()]
+    if not asset and store is not None:
+        names = [a["name"] for a in store.asset_accounts()]
         if len(names) == 1:
             asset = names[0]
         elif names:
@@ -299,24 +309,33 @@ def sync_status(
 def push_statement(
     parsed: ParsedStatement,
     settings: Settings,
-    client: FireflyClient | None = None,
+    store: LedgerStore | None = None,
     *,
     account: Account | None = None,
 ) -> PushResult:
-    """Push one parsed statement. Identical semantics to `passbook sync`.
+    """Write one parsed statement. Identical semantics to `passbook sync`.
 
-    `account` decides both the Firefly asset account and the `external_id`
-    namespace (§21.1). Without it the statement is routed by its own metadata,
-    which is the only source that cannot disagree with itself.
+    `account` decides both the asset account and the `external_id` namespace.
+    Without it the statement is routed by its own metadata, which is the only
+    source that cannot disagree with itself.
+
+    The rules run here rather than at the ledger, so every row is stored already
+    carrying the category and the tags config says it should have.
     """
-    owned = client is None
-    client = client or FireflyClient(settings.firefly_url, settings.firefly_token or "")
+    owned = store is None
+    store = store or open_ledger(settings)
     try:
-        target = account or resolve_account(parsed.meta, settings, client=client)
-        return push_transactions(client, parsed.transactions, target)
+        target = account or resolve_account(parsed.meta, settings, store=store)
+        return push_transactions(
+            store,
+            parsed.transactions,
+            target,
+            rules=load_rules(),
+            threshold=settings.large_txn_threshold,
+        )
     finally:
         if owned:
-            client.close()
+            store.close()
 
 
 def archive_statement(
@@ -452,121 +471,6 @@ class PayeeRow:
         return not self.category and self.token not in SYNTHETIC_PAYEES
 
 
-def rule_categories(rules: dict | None = None) -> dict[str, str]:
-    """display-name -> category, inverted out of rules.yaml.
-
-    Rules match on the *display* name (alias where one exists, raw token
-    otherwise), because that is what `description` carries at push time.
-    """
-    rules = rules if rules is not None else load_rules()
-    mapping: dict[str, str] = {}
-    for spec in rules.get("rules") or []:
-        category = spec.get("category")
-        if not category:
-            continue
-        for payee in spec.get("payees") or []:
-            mapping[payee] = category
-    return mapping
-
-
-def predict_category(description: str, narration: str, rules: dict | None = None) -> str:
-    """What Firefly's rules would set for this row. Mirrors bootstrap.py.
-
-    Inverting the `payees:` lists alone is not enough, and getting that wrong
-    made the re-apply preview claim rows would *lose* their category:
-
-    * `description_starts` is a PREFIX match, so `Mother` also catches
-      `Mother (via friend)`.
-    * Several rules match the raw narration instead — `Bank Charges` via
-      `notes_contains: CHARGES`, `Interest Income` via `notes_starts: SBINT`,
-      `Credit Card` via `notes_contains: **TCARD`. Those have no payee entry at
-      all.
-    * Every categorisation rule sets `stop_processing: false`, so all matching
-      rules run and the LAST one wins.
-    """
-    rules = rules if rules is not None else load_rules()
-    found = ""
-    for spec in rules.get("rules") or []:
-        category = spec.get("category")
-        if not category:
-            continue
-        matched = any(description.startswith(p) for p in (spec.get("payees") or []))
-        if not matched and spec.get("notes_contains"):
-            matched = spec["notes_contains"] in narration
-        if not matched and spec.get("notes_starts"):
-            matched = narration.startswith(spec["notes_starts"])
-        if matched:
-            found = category
-    return found
-
-
-# Tags a payee edit can move, and therefore the only tags an in-place sync is
-# allowed to write. SPEC §23.2.
-#
-# Deliberately NOT the whole tag vocabulary:
-#
-#   * `reversal` is set by the pusher from a parser-derived fact (§7.2). Config
-#     cannot change it, so a sync must never touch it.
-#   * `large-oneoff` is the rules engine's alone. push.py refuses to compute it
-#     client-side for a stated reason — the pusher cannot know the category a
-#     row will land in, so it tagged the two rows §8 exists to exclude. Guessing
-#     it here would repeat exactly that mistake.
-#
-# Everything outside this set is carried through a sync untouched.
-
-
-def managed_tags(rules: dict | None = None) -> set[str]:
-    """The tags derived from `rules.yaml` that a rename or re-categorisation moves."""
-    rules = rules if rules is not None else load_rules()
-    tags = {str(spec["tag"]) for spec in (rules.get("rules") or []) if spec.get("tag")}
-    not_earnings = (rules.get("not_earnings") or {}).get("tag")
-    if not_earnings:
-        tags.add(str(not_earnings))
-    return tags
-
-
-def predict_tags(
-    description: str, narration: str, kind: str, rules: dict | None = None
-) -> set[str]:
-    """The managed tags this row should carry. Mirrors bootstrap.py, as `predict_category` does.
-
-    Two sources, both read straight out of `rules.yaml`:
-
-    * a category rule's own `tag:` (`food`, `family`). `add_tag` is additive and
-      every rule sets `stop_processing: false`, so **every** match contributes —
-      unlike the category, where the last match wins.
-    * `not_earnings`, which is inverted: a deposit carries the tag unless its
-      description starts with one of `earnings_only`. That is the strict rule in
-      §8.1, and it can never land on a withdrawal.
-
-    This exists because `add_tag` cannot un-tag. Renaming a payee into an
-    earnings source leaves the stale `not-earnings` tag behind, and a stale
-    `not-earnings` is not a cosmetic problem: non-negotiable 9 excludes those
-    deposits from earnings, so the total silently reads low.
-    """
-    rules = rules if rules is not None else load_rules()
-    tags: set[str] = set()
-
-    for spec in rules.get("rules") or []:
-        if not spec.get("tag"):
-            continue
-        matched = any(description.startswith(p) for p in (spec.get("payees") or []))
-        if not matched and spec.get("notes_contains"):
-            matched = spec["notes_contains"] in narration
-        if not matched and spec.get("notes_starts"):
-            matched = narration.startswith(spec["notes_starts"])
-        if matched:
-            tags.add(str(spec["tag"]))
-
-    not_earnings = rules.get("not_earnings") or {}
-    if kind == "deposit" and not_earnings.get("tag"):
-        earnings = [str(p) for p in (not_earnings.get("earnings_only") or [])]
-        if not any(description.startswith(p) for p in earnings):
-            tags.add(str(not_earnings["tag"]))
-
-    return tags
-
-
 def payee_inventory(
     transactions: list[Transaction],
     aliases: dict[str, str] | None = None,
@@ -589,7 +493,7 @@ def payee_inventory(
             PayeeRow(
                 token=token,
                 alias=alias,
-                # Predicted the same way Firefly decides, so a notes-matched
+                # Predicted the same way the ledger decides, so a notes-matched
                 # row (Bank Charges, Interest Income) is not shown as undecided.
                 category=categories.get(alias or token, "")
                 or predict_category(
@@ -617,28 +521,29 @@ def unknown_tokens(
     return [r.token for r in payee_inventory(transactions, aliases, categories) if r.needs_decision]
 
 
-def ledger_balance(settings: Settings, client: FireflyClient | None = None) -> Decimal | None:
+def ledger_balance(settings: Settings, store: LedgerStore | None = None) -> Decimal | None:
     """Current balance of the configured asset account, or None if unavailable."""
-    owned = client is None
-    client = client or FireflyClient(settings.firefly_url, settings.firefly_token or "")
+    owned = store is None
+    store = store or open_ledger(settings)
     try:
-        for account in client.asset_accounts():
-            if account["attributes"]["name"] == settings.passbook_asset_account:
-                return Decimal(str(account["attributes"]["current_balance"]))
+        for account in store.asset_accounts():
+            if account["name"] == settings.passbook_asset_account:
+                return Decimal(str(account["current_balance"]))
         return None
     finally:
         if owned:
-            client.close()
+            store.close()
 
 
 @dataclass
 class ReapplyChange:
     """One live row, and what the current config says it should be.
 
-    Carries `group_id` because the fix is now an **update**, not a re-push: it
-    is the id `PUT /api/v1/transactions/{group}` needs, and reading it here is
-    what makes the join provable — a change with no group id never matched a
-    live row and must never be reported as one.
+    Addressed by `external_id`, which is what makes the join provable: a change
+    carrying an id the ledger does not hold never matched a live row, and must
+    never be reported as one. It used to carry a second id as well — the group
+    an update had to be aimed at — and that id is gone, because the identity is
+    the address now.
     """
 
     external_id: str
@@ -652,7 +557,6 @@ class ReapplyChange:
     new_counterparty: str = ""
     old_tags: tuple[str, ...] = ()
     new_tags: tuple[str, ...] = ()
-    group_id: str = ""
     kind: str = "withdrawal"
 
     @property
@@ -681,42 +585,41 @@ class ReapplyChange:
         )
 
 
-def _live_splits(client: FireflyClient, account_id: str) -> dict[str, tuple[str, dict]]:
-    """`external_id -> (group id, split)`, keyed on the id **as Firefly holds it**.
+def _live_splits(store, account: str) -> dict[str, dict]:
+    """`external_id -> row`, keyed on the id **as the ledger holds it**.
 
     Keyed on the whole `external_id`, never on the bank's bare `txn_id`
     (non-negotiable 10). The lookup side does the tolerating, in `_match`.
+
+    It used to return `(group id, row)`, because an update had to be addressed
+    to the group the row lived in. There are no groups: the identity is the
+    address.
     """
-    live: dict[str, tuple[str, dict]] = {}
-    for group in client.account_transactions(account_id):
-        for split in group["attributes"]["transactions"]:
-            if split.get("external_id"):
-                live[str(split["external_id"])] = (str(group["id"]), split)
-    return live
+    return {
+        str(row["external_id"]): row
+        for row in store.account_transactions(account)
+        if row.get("external_id")
+    }
 
 
-def rows_in_ledger(client: FireflyClient, asset_account: str) -> int:
-    """How many rows Firefly holds against this asset account, by name.
+def rows_in_ledger(store, asset_account: str) -> int:
+    """How many rows the ledger holds against this asset account, by name.
 
     Public because removing an account has to say how many rows it is about to
-    stop managing (§38), and a management screen reaching into `_live_splits`
-    to find that out would be the second caller of a private helper — which is
-    how a private helper stops being one without anybody deciding it should.
+    stop managing, and a management screen reaching into `_live_splits` to find
+    that out would be the second caller of a private helper — which is how a
+    private helper stops being one without anybody deciding it should.
 
-    An asset account Firefly has never heard of is 0, not an error: the registry
-    can name one that was deleted in Firefly's own UI, and that is precisely a
-    state the operator is entitled to clean up from here.
+    An asset account the ledger has never heard of is 0, not an error: the
+    registry can name one that no longer exists, and that is precisely a state
+    the operator is entitled to clean up from here.
     """
-    match = next(
-        (a for a in client.asset_accounts() if a["attributes"]["name"] == asset_account),
-        None,
-    )
-    return len(_live_splits(client, str(match["id"]))) if match else 0
+    return len(store.identities(asset_account))
 
 
 def _match(
-    live: dict[str, tuple[str, dict]], account: Account | None, txn_id: str
-) -> tuple[str, str, dict] | None:
+    live: dict[str, dict], account: Account | None, txn_id: str
+) -> tuple[str, dict] | None:
     """Find one row, namespaced form first, bare form second. §21.1.
 
     Both forms are tried because a ledger may hold rows from before the
@@ -732,25 +635,23 @@ def _match(
     for candidate in ([account.external_id(txn_id)] if account else []) + [txn_id]:
         found = live.get(candidate)
         if found is not None:
-            return candidate, found[0], found[1]
+            return candidate, found
     return None
 
 
 def _counterparty(split: dict) -> str:
-    """The name on the other side — the expense or revenue account.
+    """The name on the other side.
 
-    An alias rename moves this too, because `build_payload` uses the same name
-    for the description and for the counterparty account. Comparing only the
-    description would report a row as reconciled while Firefly's Expense
-    accounts list still carried the old truncated token.
+    It used to be whichever of `source_name`/`destination_name` the direction
+    did not use, because the previous store modelled every row as a transfer
+    between two accounts and this had to work out which side was the payee. It
+    is a column now, and this is the one line left of that.
     """
-    if (split.get("type") or "withdrawal") == "withdrawal":
-        return str(split.get("destination_name") or "")
-    return str(split.get("source_name") or "")
+    return str(split.get("counterparty") or "")
 
 
 def reapply_preview(
-    client: FireflyClient,
+    store: LedgerStore,
     settings: Settings,
     archive: Path = Path("archive"),
     *,
@@ -760,24 +661,22 @@ def reapply_preview(
 ) -> tuple[list[ReapplyChange], int]:
     """What the current config would change in the ledger. Reads only.
 
-    Aliases and rules are applied **at push time**, so editing config leaves
-    rows already in Firefly untouched. This compares what is in the ledger
-    against what the current config would produce.
+    Aliases and rules are applied **when a row is written**, so editing config
+    leaves rows already in the ledger untouched. This compares what is in the
+    ledger against what the current config would produce.
 
     `aliases` and `rules` override what is on disk, so the confirm screen can
     show the consequence of a config change *before* it is written rather than
     after.
     """
-    from .firefly.push import build_payload
+    from .push import build_split
 
     aliases = load_payee_aliases() if aliases is None else aliases
     rules = load_rules() if rules is None else rules
     registry = load_accounts(settings=settings) if accounts is None else accounts
     managed = managed_tags(rules)
 
-    by_name: dict[str, str] = {}
-    for asset in client.asset_accounts():
-        by_name[asset["attributes"]["name"]] = str(asset["id"])
+    known = {str(a["name"]) for a in store.asset_accounts()}
 
     statements = archived_statements(archive)
     changes: list[ReapplyChange] = []
@@ -785,23 +684,22 @@ def reapply_preview(
 
     for account in registry or [None]:
         target = account.asset_account if account else settings.passbook_asset_account
-        account_id = by_name.get(target or "")
-        if account_id is None:
+        if target not in known:
             # Skipped, but never silently: `considered` then stays 0, and every
             # caller is required to read that as "nothing was compared" rather
-            # than as a pass (§23.1). The log says which account went missing.
+            # than as a pass. The log says which account went missing.
             log.warning(
-                "no Firefly asset account named %r; %s compared nothing",
+                "no asset account named %r; %s compared nothing",
                 target,
                 account.slug if account else "the unregistered ledger",
             )
             continue
-        live = _live_splits(client, account_id)
+        live = _live_splits(store, target or "")
         mine = statements_for(account, statements) if account else statements
 
         # Statements overlap by design — a weekly download re-covers earlier
         # weeks — so the same row appears in several files. Count it once,
-        # keyed on the id it carries in Firefly.
+        # keyed on the id it carries in the ledger.
         seen: set[str] = set()
         for parsed in mine:
             try:
@@ -812,19 +710,19 @@ def reapply_preview(
                 found = _match(live, account, txn.txn_id)
                 if found is None:
                     continue
-                external_id, group_id, current = found
+                external_id, current = found
                 if external_id in seen:
                     continue
                 seen.add(external_id)
 
-                split = build_payload(txn, account or (target or ""))["transactions"][0]
+                split = build_split(txn, account or (target or ""))
 
                 # Only the managed tags are reconciled; everything else the row
                 # carries is preserved verbatim. `reversal` is the pusher's and
-                # `large-oneoff` is the rules engine's — see `managed_tags`.
+                # `large-oneoff` is set once at write time — see `managed_tags`.
                 held = {str(t) for t in (current.get("tags") or [])}
                 wanted = (held - managed) | predict_tags(
-                    split["description"], txn.narration, split["type"], rules
+                    split["description"], txn.narration, split["kind"], rules
                 )
 
                 change = ReapplyChange(
@@ -833,7 +731,7 @@ def reapply_preview(
                     amount=(txn.debit or txn.credit or Decimal(0)),
                     old_description=str(current.get("description") or ""),
                     new_description=split["description"],
-                    old_category=str(current.get("category_name") or ""),
+                    old_category=str(current.get("category") or ""),
                     new_category=predict_category(
                         split["description"], txn.narration, rules
                     ),
@@ -841,8 +739,7 @@ def reapply_preview(
                     new_counterparty=_counterparty(split),
                     old_tags=tuple(sorted(held)),
                     new_tags=tuple(sorted(wanted)),
-                    group_id=group_id,
-                    kind=split["type"],
+                    kind=split["kind"],
                 )
                 if change.changed:
                     changes.append(change)
@@ -866,71 +763,51 @@ class SyncResult:
 
 
 def sync_ledger(
-    client: FireflyClient,
+    store: LedgerStore,
     changes: list[ReapplyChange],
     *,
     on_progress=None,
 ) -> SyncResult:
-    """Write the current config onto rows already in Firefly. SPEC §23.
+    """Write the current config onto rows already in the ledger.
 
     **The non-destructive half of re-apply.** A rename or a re-categorisation
     changes three fields on an existing row and nothing else, so it does not
-    need the row deleted and pushed again — it needs
-    `PUT /api/v1/transactions/{group}`. That removes the database dump from the
-    critical path, because nothing is deleted and the write is idempotent:
-    config is the source of truth, so a failed run is re-run, not recovered.
+    need the row deleted and written again. That keeps the database dump off
+    the critical path: nothing is deleted, the write is idempotent, and config
+    is the source of truth — so a failed run is re-run, not recovered.
 
-    **Verified against the validating code on the pinned tag (v6.6.6)**, not
-    from memory — `app/Api/V1/Requests/Models/Transaction/UpdateRequest.php`
-    and the services it feeds:
+    **It cannot move money, and that is enforced rather than observed.** The
+    update used to be safe because the other application's update happened to
+    be sparse, and an absent field happened to be an untouched one. The store
+    refuses `amount`, `txn_date`, `kind`, `external_id`, `notes` and `account`
+    outright: an update that *could* move money is one that eventually does.
 
-      * The update is sparse. `getTransactionData()` starts each split from
-        `$current = []` and copies only the keys present in the request, so
-        omitting `amount`, `date` and `type` leaves them untouched. That is why
-        this can never move money: the fields that carry it are not sent.
-      * `validateJournalIds` returns early for a submission of fewer than two
-        splits, so a single-split group needs no `transaction_journal_id`.
-      * `validateSingleUpdate` skips account validation entirely when no
-        `source_*`/`destination_*` key is present, and when one is, it fetches
-        the original other side itself.
-      * `category_name: ""` clears the category rather than creating a category
-        named empty: `ConvertEmptyStringsToNull` (global middleware in
-        `bootstrap/app.php`) turns it into null, and
-        `CategoryRepository::findCategory` guards its create branch with
-        `'' !== (string) $categoryName`, so `storeCategory` reaches
-        `sync([])`. D10 holds — no category is invented.
-
-    `apply_rules` is deliberately **false**. The rules engine is what produced
-    the categories being corrected here; letting it run on the way in would let
-    a stale rule overwrite the value this function was called to write.
+    An empty category clears the category. It does not create one named `""` —
+    no category is ever invented from a row.
     """
     result = SyncResult()
     for change in changes:
-        if not change.group_id:
-            # A change with no group id never matched a live row. Refusing it
-            # is the point: the alternative is a PUT to a guessed id.
+        if not change.external_id:
+            # A change with no identity never matched a live row. Refusing it
+            # is the point: the alternative is a write to a guessed address.
             result.failed += 1
-            result.failures.append((change.external_id, "no ledger group id — not matched"))
+            result.failures.append(("", "no ledger identity — not matched"))
             continue
 
-        split: dict = {"description": change.new_description}
+        fields: dict = {"description": change.new_description}
         if change.category_changed:
-            split["category_name"] = change.new_category
+            fields["category"] = change.new_category
         if change.counterparty_changed:
-            side = "destination_name" if change.kind == "withdrawal" else "source_name"
-            split[side] = change.new_counterparty
+            fields["counterparty"] = change.new_counterparty
         if change.tags_changed:
-            # The whole list, not a delta: `JournalServiceTrait::storeTags`
-            # syncs rather than appends, so anything omitted here is removed.
-            # `new_tags` is built to carry the row's unmanaged tags through.
-            split["tags"] = list(change.new_tags)
+            # The whole list, not a delta: tags are replaced rather than
+            # appended, so anything omitted here is removed. `new_tags` is
+            # built to carry the row's unmanaged tags through.
+            fields["tags"] = list(change.new_tags)
 
         try:
-            client.update_transaction(
-                change.group_id,
-                {"apply_rules": False, "fire_webhooks": False, "transactions": [split]},
-            )
-        except FireflyError as exc:
+            store.update_transaction(change.external_id, fields)
+        except LedgerError as exc:
             result.failed += 1
             result.failures.append((change.external_id, str(exc)))
             log.warning("in-place update failed for %s: %s", change.external_id, exc)
@@ -1036,7 +913,7 @@ class LedgerAnalysis:
     categories: list[Slice]       # real spend, largest first
     payees: list[Slice]           # real spend by counterparty, largest first
     sources: list[Slice]          # EVERY deposit by counterparty; sums to gross_income
-    # Firefly's Category, Double and Tag reports, which are all the same
+    # The ledger's Category, Double and Tag reports, which are all the same
     # question asked three ways: within one thing, what were the others? §64.
     payees_by_category: list["Breakdown"]   # a category -> who you paid
     categories_by_payee: list["Breakdown"]  # a payee -> what it was for
@@ -1115,11 +992,11 @@ def _quantile(ordered: list[Decimal], q: float) -> Decimal:
 class Breakdown:
     """One thing, and what it is made of. SPEC §64.
 
-    Firefly ships this as three separate report screens — Category, Double
+    Most tools ship this as three separate report screens — Category, payee
     (expense/revenue account) and Tag — with a controller each. They are one
     shape: a named total, and the slices of some *other* dimension inside it.
     Computing them here means all three carry §8/§8.1's exclusions, which
-    Firefly's own versions do not.
+    the previous store's versions do not.
     """
 
     name: str
@@ -1211,8 +1088,30 @@ def balance_series(
 
 
 def _split_amount(split: dict) -> Decimal:
-    """Firefly sends `'48.000000000000'`. Decimal, never float (non-negotiable #1)."""
+    """The row's amount, to the paisa. Decimal, never float (non-negotiable 1).
+
+    `NUMERIC` already reads back as `Decimal`, so this is a quantize rather
+    than a parse — but it still goes through `str`, because a row can reach
+    here from a test fixture or from an archive rebuild as well as from the
+    database.
+    """
     return Decimal(str(split.get("amount") or "0")).quantize(_CENT)
+
+
+def _split_day(split: dict) -> date | None:
+    """The row's date. A `date`, and `None` when there isn't one.
+
+    It used to arrive as a timestamp string that had to be sliced to ten
+    characters at four separate call sites. The column is a `DATE` now, so the
+    slicing is gone and a malformed value cannot quietly become a valid date
+    with the wrong day in it.
+    """
+    value = split.get("txn_date")
+    if isinstance(value, date):
+        return value
+    if not value:
+        return None
+    return date.fromisoformat(str(value)[:10])
 
 
 def _within_coverage(month: str, coverage: tuple[date, date] | None) -> bool:
@@ -1268,7 +1167,7 @@ class Attribution:
     then wrong by a bill.
 
     **This moves a row's REPORTING month and nothing else.** Not its date in
-    Firefly — non-negotiable 14 forbids an update touching `date`, and the
+    The ledger — non-negotiable 14 forbids an update touching `date`, and the
     balance line is the bank's own running figure on the bank's own days, which
     must keep matching the statement. Not the window filter either: a row is
     still in scope on the day the money actually left, because that is the day
@@ -1349,9 +1248,9 @@ def ledger_analysis(
     rules: dict | None = None,
     attribution: "Attribution | None" = None,
 ) -> LedgerAnalysis:
-    """Aggregate Firefly's own splits under §8/§8.1's exclusions.
+    """Aggregate the previous store's splits under §8/§8.1's exclusions.
 
-    **Firefly is the source for money and category, the statement for the
+    **the ledger is the source for money and category, the statement for the
     clock.** The category is assigned by the rules engine at store time (D5), so
     reading it back from the ledger is the only way to report it without
     re-implementing categorisation. `txn_time` is parser-derived and is never
@@ -1373,7 +1272,7 @@ def ledger_analysis(
     excluded_income = [Decimal(0), 0]
     refunds = [Decimal(0), 0]
     by_tag: dict[str, list[Decimal]] = {}
-    # Firefly's own "expense/revenue account" report, computed here rather than
+    # the previous store's "expense/revenue account" report, computed here rather than
     # from the archive so it carries §8/§8.1's exclusions like every other
     # figure on the page (non-negotiable 9). The counterparty is the name
     # `build_payload` pushed, which is the alias the operator chose.
@@ -1398,15 +1297,16 @@ def ledger_analysis(
     clocked = counted = 0
 
     for split in splits:
-        kind = split.get("type")
+        kind = split.get("kind")
         amount = _split_amount(split)
-        month = str(split.get("date") or "")[:7]
+        day = _split_day(split)
+        month = day.isoformat()[:7] if day else ""
         tags = split.get("tags") or []
 
         if kind == "withdrawal":
             withdrawals += 1
             gross_spend += amount
-            category = split.get("category_name") or "(no category)"
+            category = split.get("category") or "(no category)"
             if category in not_spend:
                 bucket = excluded.setdefault(category, [Decimal(0), 0])
                 bucket[0] += amount
@@ -1425,7 +1325,7 @@ def ledger_analysis(
             here, moved, shifted = attribution.split(
                 str(split.get("external_id") or ""),
                 category,
-                date.fromisoformat(str(split.get("date") or "")[:10]) if month else date.min,
+                day or date.min,
                 amount,
             )
 
@@ -1479,8 +1379,8 @@ def ledger_analysis(
                     here, moved, shifted = here + moved, Decimal(0), None
 
             counted += 1
-            if month:
-                wd = date.fromisoformat(str(split.get("date") or "")[:10]).weekday()
+            if day:
+                wd = day.weekday()
                 weekdays[wd] += 1
                 weekday_spend[wd] += amount
             # Tolerant join (§21.1): the split's external_id may be namespaced
@@ -1519,7 +1419,7 @@ def ledger_analysis(
             slot = by_source.setdefault(source, [Decimal(0), 0])
             slot[0] += amount
             slot[1] += 1
-            in_cat = split.get("category_name") or "(no category)"
+            in_cat = split.get("category") or "(no category)"
             cell = cross_cat_source.setdefault((str(in_cat), source), [Decimal(0), 0])
             cell[0] += amount
             cell[1] += 1
@@ -1646,7 +1546,7 @@ def ledger_analysis(
 
 _BARE_TXN_ID = re.compile(r"^\d{14}$")
 
-# Identity lives in `identity.py` so that `firefly.push` can import it —
+# Identity lives in `identity.py` so that `push` can import it —
 # `service` imports the pusher, so the pusher cannot import `service`. The
 # names are re-exported here because every caller already spells them
 # `service.txn_id_of` (§21.1, §119).
@@ -1749,13 +1649,13 @@ def statements_for(
 # --- ledger integrity: the check that was missing -----------------------------
 # SPEC §20. The continuity invariant (§6.6) validates a *file* at parse time.
 # Nothing validated the *ledger*, and on 2026-08-11 that gap cost seven hours: a
-# purge and a re-push that stopped after 21 of 93 rows left Firefly holding a
+# purge and a re-push that stopped after 21 of 93 rows left the ledger holding a
 # self-consistent balance, and 349 tests, `doctor`, `make check` and the status
 # strip all passed while the ledger was a third of itself (§19).
 #
 # So: compare the ledger against the statements that built it. This is the one
 # check that catches that corruption whatever caused it — an interrupted purge, a
-# hand-deleted row in Firefly's own UI, a restore of the wrong dump.
+# hand-deleted row in its own UI, a restore of the wrong dump.
 
 
 @dataclass(frozen=True)
@@ -1801,26 +1701,16 @@ class LedgerVerdict:
 
 
 def verify_ledger(
-    client: FireflyClient,
+    store: LedgerStore,
     account: "Account | Settings",
     archive: Path = Path("archive"),
-    *,
-    trashed: int | None = None,
-    intents: list[str] | None = None,
 ) -> LedgerVerdict:
     """Assert the live ledger still matches the statements that built it.
 
-    `trashed` is passed in rather than looked up: **Firefly's API cannot answer
-    it.** Verified against the pinned tag — `routes/api.php` exposes exactly two
-    `data/*` routes, `DELETE data/destroy` and `DELETE data/purge`, and neither
-    lists soft-deleted journals. Counting them needs the database, which the web
-    container deliberately has no credentials for (§15.1). The CLI supplies it;
-    everywhere else the check reports itself unchecked rather than passing.
-
-    **Reads past the shared cache** (§101). This function's entire job is to say
+    **Reads the ledger, not a view of it.** This function's entire job is to say
     what the ledger holds right now, and a check that compares `archive/`
-    against a cached view of it has not checked the ledger. Non-negotiable 11:
-    a green tick for something you did not check is a lie.
+    against something cached has not checked the ledger. Non-negotiable 11: a
+    green tick for something you did not check is a lie.
     """
     # Accepts an `Account` or, for the pre-registry path, a `Settings`. §21.6:
     # every check below is scoped to ONE account, because a ledger holding two
@@ -1836,33 +1726,30 @@ def verify_ledger(
     statements = statements_for(account, archived_statements(archive))
     checks: list[Check] = []
 
-    # Every read of the ledger below is a FRESH one. §101, and
-    # non-negotiable 11: a check that reads a cache has not checked.
-    with client.fresh() as fresh:
-        account_id = None
-        balance: Decimal | None = None
-        for live_account in fresh.asset_accounts():
-            if live_account["attributes"]["name"] == account.asset_account:
-                account_id = live_account["id"]
-                balance = Decimal(
-                    str(live_account["attributes"]["current_balance"])
-                ).quantize(_CENT)
+    # Every figure below is read from the ledger here and now. Non-negotiable
+    # 11: a check that reads a cache has not checked.
+    balance: Decimal | None = None
+    opening: Decimal | None = None
+    opening_on = None
+    found = False
+    for live_account in store.asset_accounts():
+        if live_account["name"] == account.asset_account:
+            found = True
+            balance = Decimal(str(live_account["current_balance"])).quantize(_CENT)
+            opening = Decimal(str(live_account["opening_balance"])).quantize(_CENT)
+            opening_on = live_account.get("opening_on")
 
-        if account_id is None:
-            return LedgerVerdict([
-                Check(
-                    "account",
-                    False,
-                    f"no asset account named {account.asset_account!r} — "
-                    "nothing can be verified against it",
-                )
-            ])
+    if not found:
+        return LedgerVerdict([
+            Check(
+                "account",
+                False,
+                f"no asset account named {account.asset_account!r} — "
+                "nothing can be verified against it",
+            )
+        ])
 
-        splits = [
-            split
-            for group in fresh.account_transactions(account_id)
-            for split in group["attributes"]["transactions"]
-        ]
+    splits = store.account_transactions(account.asset_account)
     raw_ids = [str(s["external_id"]) for s in splits if s.get("external_id")]
     # Tolerant read (§21.1): a row pushed before the migration carries the bank's
     # bare id, one pushed after carries `<slug>-<txn_id>`. Both map to the same
@@ -1875,7 +1762,6 @@ def verify_ledger(
         for external in raw_ids
         if is_namespaced(external) and slug_of(external) != account.slug
     ]
-    openings = [s for s in splits if s.get("type") == "opening balance"]
 
     # 1. balance against the newest statement's own closing figure ------------
     if not statements:
@@ -1933,65 +1819,32 @@ def verify_ledger(
             if duplicated:
                 sample = ", ".join(duplicated[:5]) + (" …" if len(duplicated) > 5 else "")
                 parts.append(
-                    f"{len(duplicated)} transaction(s) posted MORE THAN ONCE ({sample}) — "
-                    f"{extra} extra row(s), and every figure drawn from this account "
-                    "counts them. `make backup`, then `passbook dedupe` (dry run by "
-                    "default) removes the surplus copies and keeps one of each. This "
-                    "check will not do it for you (non-negotiable 12)"
+                    f"{len(duplicated)} transaction(s) are in the ledger MORE THAN "
+                    f"ONCE ({sample}) — {extra} extra row(s), and every figure drawn "
+                    "from this account counts them. **This should not be reachable**: "
+                    "`external_id` is the primary key, so the only way two rows share "
+                    "an identity is two different namespaces mapping to one bank id — "
+                    "see the id namespace check below, which names the account they "
+                    "came from. This check will not repair it (non-negotiable 12)"
                 )
             checks.append(
                 Check("rows", False, f"{len(raw_ids)} live vs {len(expected_ids)} archived — "
                                      + "; ".join(parts))
             )
 
-    # 3. tombstones — see the docstring for why this is passed in ------------
-    if trashed is None:
-        checks.append(
-            Check(
-                "trashed",
-                None,
-                "needs the database; the ledger store's API cannot list soft-deleted "
-                "journals and this process has no DB access (§15.1). Run "
-                "`passbook verify-ledger` on the host.",
-            )
-        )
-    else:
-        checks.append(
-            Check(
-                "trashed",
-                trashed == 0,
-                "no soft-deleted journals"
-                if trashed == 0
-                # §66. The remedy used to read `passbook purge --confirm
-                # --yes`, which deletes EVERY row carrying an external_id —
-                # the whole managed ledger — to clear a stray trashed journal.
-                # That is a catastrophic answer to a trivial question, and it
-                # was hit for real: deleting an unused Firefly asset account
-                # soft-deletes its opening balance, and this check then told
-                # the operator to purge their ledger. `DELETE /api/v1/data/purge`
-                # only removes what is ALREADY soft-deleted and cannot touch a
-                # live row, which is why it is the right tool.
-                else f"{trashed} soft-deleted journal(s) remain — a re-push of "
-                "identical rows will be refused as duplicates (§7.3). The store's "
-                "own `DELETE /api/v1/data/purge` clears already-deleted records "
-                "and cannot touch a live row; `client.purge_trashed()` calls it. "
-                "Do NOT reach for `passbook purge`, which deletes every managed "
-                "row to solve this.",
-            )
-        )
-
-    # 4. no purge left half-finished -----------------------------------------
-    outstanding = intents if intents is not None else []
-    checks.append(
-        Check(
-            "purge intent",
-            not outstanding,
-            "no purge left unfinished"
-            if not outstanding
-            else f"{len(outstanding)} unfinished purge(s): {', '.join(outstanding)} — "
-            "run `passbook purge --resume`",
-        )
-    )
+    # 3. no row is in the ledger twice ---------------------------------------
+    # Kept as a check even though the primary key makes it unwritable, because
+    # a check that cannot fail is the cheapest possible evidence that the
+    # guarantee is still the one being relied on. Two checks that used to live
+    # here are gone and neither was a passbook concern:
+    #
+    #   * soft-deleted journals. The previous store deleted a row by hiding it,
+    #     and a hidden row still refused a re-push of the same transaction as a
+    #     duplicate. A delete is a delete here.
+    #   * an unfinished purge. Removing an account's rows was thousands of
+    #     separate HTTP deletes that could die halfway, so the intent was
+    #     written to a file first and resumed. It is one statement in one
+    #     transaction now: it happens or it does not.
 
     # 5. the id namespace — the migration, and rows from another account -----
     if foreign:
@@ -2021,31 +1874,30 @@ def verify_ledger(
         )
 
     # 6. the opening balance, which is what makes the balance mean anything ---
-    if len(openings) == 1 and not openings[0].get("external_id"):
-        amount = Decimal(str(openings[0].get("amount") or "0")).quantize(_CENT)
-        checks.append(Check("opening balance", True, f"present, {amount}, no external_id"))
-    elif not openings:
+    #
+    # A column on the account rather than a row in the ledger, and that change
+    # closes a whole class of failure: it used to be a transaction with no
+    # `external_id`, which is what kept `purge` from deleting it — a structural
+    # exclusion, but one that depended on a row staying shaped a certain way.
+    # A column cannot be purged, cannot be duplicated, and cannot acquire an
+    # id. What is left to check is whether it was ever set.
+    earliest = min(statements, key=lambda s: s.meta.period_from) if statements else None
+    expected_opening = earliest.meta.opening_balance if earliest else None
+    if opening is None:
+        checks.append(Check("opening balance", None, "the account could not be read"))
+    elif opening == 0 and expected_opening not in (None, Decimal(0)):
         checks.append(
             Check(
                 "opening balance",
                 False,
-                "MISSING — without it the ledger balance cannot equal the bank's, "
-                "and every figure on the account is short by the opening amount",
+                "zero, but the earliest statement opens at "
+                f"{expected_opening} — every figure on this account is short by "
+                "that amount, and the balance cannot equal the bank's",
             )
-        )
-    elif len(openings) > 1:
-        checks.append(
-            Check("opening balance", False, f"{len(openings)} opening balances on one account")
         )
     else:
-        checks.append(
-            Check(
-                "opening balance",
-                False,
-                "carries an external_id, so `purge` would delete it — that id is "
-                "what makes the exclusion structural (§7.3)",
-            )
-        )
+        when = f" on {opening_on}" if opening_on else ""
+        checks.append(Check("opening balance", True, f"{opening}{when}"))
 
     return LedgerVerdict(checks)
 

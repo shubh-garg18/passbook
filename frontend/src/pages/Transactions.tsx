@@ -1,7 +1,7 @@
 /* The ledger browser. SPEC §61.
  *
- * The page passbook never had, and the last routine reason to open Firefly —
- * what Firefly calls the Audit report. Search, filter, and read one row.
+ * The page passbook never had, and the last routine reason to open a second
+ * application. Search, filter, and read one row.
  *
  * **There is deliberately no running balance column.** `components/Ledger.tsx`
  * has one because it renders a statement in sheet order, complete; §16.4
@@ -44,7 +44,7 @@ export function TransactionsPage() {
   const q = params.get('q') ?? ''
 
   // Debounced into the URL rather than fetched per keystroke: the endpoint
-  // reads every row on the account, and 113 rows is 400ms of Firefly.
+  // reads every row on the account, and 113 rows is one query.
   useEffect(() => {
     const timer = setTimeout(() => {
       setParams(
@@ -290,7 +290,7 @@ export function TransactionsPage() {
                   </thead>
                   <tbody>
                     {data.rows.map((row) => (
-                      <tr key={row.id + row.group}>
+                      <tr key={row.id}>
                         <td className="date">
                           {formatShortDate(row.date)}
                           {row.time && <span className="txns__time">{formatClock(row.time)}</span>}

@@ -6,7 +6,7 @@ socket — `backup` shells into the db container and `verify-backup` starts a
 scratch Postgres. Mounting the socket into the one container that listens on a
 port, parses untrusted uploads and is destined for Tailscale is equivalent to
 granting it root on the host. The blast radius of a web compromise would go
-from "the ledger and the Firefly token" to "the machine, plus the ability to
+from "the ledger" to "the machine, plus the ability to
 delete every backup including the off-site copies".
 
 So the UI *reports* backup health and the operator *runs* backups from the
@@ -15,7 +15,7 @@ lists the remote. It holds no passphrase and no rclone credential, and the
 container is given neither.
 
 The single exception is re-apply (§15.2), which needs no new privilege: it
-talks to Firefly over HTTP with the token it already has.
+talks to the ledger over HTTP with the token it already has.
 """
 
 import logging
@@ -89,7 +89,15 @@ def newest_dump(backups: Path = BACKUPS) -> tuple[str, int] | None:
     """`(filename, age in minutes)` of the newest database dump, or None."""
     if not backups.is_dir():
         return None
-    dumps = [p for p in backups.glob("firefly-*.sql.gz") if p.is_file()]
+    # Both names: an install that has been upgraded still has dumps written
+    # under the old one, and a backup that stops being visible the moment it
+    # is most needed is worse than no backup listing at all.
+    dumps = [
+        p
+        for pattern in ("ledger-*.sql.gz", "the ledger-*.sql.gz")
+        for p in backups.glob(pattern)
+        if p.is_file()
+    ]
     if not dumps:
         return None
     newest = max(dumps, key=lambda p: p.stat().st_mtime)
@@ -102,108 +110,6 @@ def backup_age(backups: Path = BACKUPS) -> int | None:
     dump = newest_dump(backups)
     return None if dump is None else dump[1] // (60 * 24)
 
-
-# --- purge intent: making an interrupted purge detectable ---------------------
-# SPEC §19.7. A purge that can die mid-flight has to leave evidence, because the
-# state it leaves behind is *coherent*: on 2026-08-11 a purge completed and the
-# re-push stopped after 21 of 93 rows, and the result was a ledger with a
-# self-consistent balance and no error anywhere (§19).
-#
-# So intent is recorded BEFORE the first delete and cleared only after the
-# re-push is verified. An intent file that outlives its run therefore means
-# exactly one thing — an unfinished cycle — and it says what remains.
-#
-# A plain JSON file in backups/ rather than a row in Firefly: the whole point is
-# to survive the thing being interrupted, including Firefly being unreachable.
-# `ops.py` never executes anything but rclone (asserted by
-# `test_ops_only_ever_executes_rclone`), so this is file I/O only.
-
-INTENT_GLOB = "purge-intent-*.json"
-
-STAGES = ("purging", "purged", "repushing", "done")
-
-
-def write_purge_intent(
-    account: str,
-    external_ids: list[str],
-    statements: list[str],
-    backups: Path = BACKUPS,
-    slug: str = "",
-) -> Path:
-    """Record what is about to be deleted and what must be pushed back.
-
-    `slug` names the account in registry terms (§21): with more than one account
-    the Firefly asset-account name is not enough to resume against, and the
-    recorded external_ids are namespaced by it.
-    """
-    import json
-
-    backups.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = backups / f"purge-intent-{stamp}.json"
-    path.write_text(
-        json.dumps(
-            {
-                "created": datetime.now().isoformat(timespec="seconds"),
-                "account": account,
-                "slug": slug,
-                "stage": "purging",
-                "external_ids": sorted(external_ids),
-                "expected_rows": len(set(external_ids)),
-                "statements": statements,
-                "deleted": [],
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    path.chmod(0o600)
-    log.warning("purge intent recorded at %s (%d row(s))", path, len(external_ids))
-    return path
-
-
-def read_purge_intent(path: Path) -> dict:
-    import json
-
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def update_purge_intent(path: Path, **fields) -> dict:
-    """Advance the record. Written in place so a crash leaves the last stage."""
-    import json
-
-    data = read_purge_intent(path)
-    data.update(fields)
-    Path(path).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return data
-
-
-def outstanding_purge_intents(backups: Path = BACKUPS) -> list[Path]:
-    """Intent files whose run never finished. Oldest first."""
-    if not backups.is_dir():
-        return []
-    out = []
-    for path in sorted(backups.glob(INTENT_GLOB)):
-        try:
-            if read_purge_intent(path).get("stage") != "done":
-                out.append(path)
-        except (ValueError, OSError):
-            # An unreadable intent file is itself an unfinished cycle: it was
-            # being written when something stopped. Never silently ignored.
-            out.append(path)
-    return out
-
-
-def clear_purge_intent(path: Path) -> None:
-    """Mark done and remove. Only ever called after the ledger is verified."""
-    path = Path(path)
-    try:
-        update_purge_intent(path, stage="done")
-    except (ValueError, OSError):
-        pass
-    path.unlink(missing_ok=True)
-    log.info("purge intent %s cleared", path.name)
 
 
 _RCLONE_LINE = re.compile(r"^\s*(\d+)\s+(.+?)\s*$")

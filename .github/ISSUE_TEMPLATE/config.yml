@@ -5,8 +5,3 @@ contact_links:
     about: >-
       Report privately, never in a public issue. This project handles bank
       statements, so a public write-up is an exploit anyone can copy.
-  - name: Firefly III itself
-    url: https://github.com/firefly-iii/firefly-iii/issues
-    about: >-
-      Ledger, rules engine, or the Firefly UI at :8080 — that is upstream.
-      passbook pins an official image and calls its REST API.

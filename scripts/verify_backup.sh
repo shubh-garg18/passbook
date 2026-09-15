@@ -24,7 +24,6 @@ EXPECTED_CONFIG=(
     config/payee_aliases.yaml
     config/rules.example.yaml
     config/rules.yaml
-    recovery/app-key.env
 )
 
 cd "$(dirname "$0")/.."
@@ -70,25 +69,22 @@ acct_sql="${PASSBOOK_ASSET_ACCOUNT//\'/\'\'}"   # double any quote, SQL-style
 
 read -r -d '' CHECKS <<SQL || true
 \\set acct '${acct_sql}'
-select count(*) from journal_meta m
-  join transaction_journals j on j.id=m.transaction_journal_id
-  where m.name='external_id' and m.deleted_at is null and j.deleted_at is null;
-select count(distinct m.data) from journal_meta m
-  join transaction_journals j on j.id=m.transaction_journal_id
-  where m.name='external_id' and m.deleted_at is null and j.deleted_at is null;
-select to_char(sum(t.amount),'FM9999999.00') from transactions t
-  join transaction_journals j on j.id=t.transaction_journal_id
-  where t.account_id=(select id from accounts where name=:'acct')
-    and t.deleted_at is null and j.deleted_at is null;
-select to_char(sum(t.amount),'FM9999999.00') from transactions t
-  join transaction_journals j on j.id=t.transaction_journal_id
-  join journal_meta m on m.transaction_journal_id=j.id
-       and m.name='external_id' and m.deleted_at is null
-  where t.account_id=(select id from accounts where name=:'acct')
-    and t.amount > 0 and t.deleted_at is null and j.deleted_at is null
-    and not exists (
-      select 1 from tag_transaction_journal tj join tags g on g.id=tj.tag_id
-      where tj.transaction_journal_id=j.id and g.tag='not-earnings');
+-- rows, and rows behind distinct identities. The two disagreeing means the
+-- restore lost rows or the dump was taken mid-write; `external_id` is the
+-- primary key, so they cannot disagree the other way.
+select count(*) from passbook.transactions;
+select count(distinct external_id) from passbook.transactions;
+-- the account's balance, derived rather than stored
+select to_char(a.opening_balance + coalesce(sum(
+         case when t.kind='deposit' then t.amount else -t.amount end), 0), 'FM9999999.00')
+  from passbook.asset_accounts a
+  left join passbook.transactions t on t.account = a.name
+ where a.name=:'acct' group by a.opening_balance;
+-- earnings: deposits that are money earned rather than money coming back
+select to_char(coalesce(sum(t.amount), 0),'FM9999999.00') from passbook.transactions t
+ where t.account=:'acct' and t.kind='deposit'
+   and not exists (select 1 from passbook.transaction_tags g
+                    where g.external_id=t.external_id and g.tag='not-earnings');
 SQL
 
 # With no argument: take a fresh backup and require it to match the live ledger
@@ -104,12 +100,12 @@ if [ -n "$GIVEN" ]; then
     echo "== 1. verifying an existing backup (no fresh dump taken) =="
     [ -f "$GIVEN" ] || { echo "  FAIL  no such file: $GIVEN"; exit 1; }
     dump="$GIVEN"
-    cfg="$(echo "$dump" | sed 's|/firefly-|/config-|; s|\.sql\.gz$|.tar.gz|')"
+    cfg="$(echo "$dump" | sed 's|/ledger-|/config-|; s|/firefly-|/config-|; s|\.sql\.gz$|.tar.gz|')"
     [ -f "$cfg" ] || cfg=""
 else
     echo "== 1. take a fresh backup =="
     make --no-print-directory backup | sed 's/^/  /'
-    dump="$(ls -1t "$BACKUPS"/firefly-*.sql.gz 2>/dev/null | head -1 || true)"
+    dump="$(ls -1t "$BACKUPS"/ledger-*.sql.gz "$BACKUPS"/firefly-*.sql.gz 2>/dev/null | head -1 || true)"
     cfg="$(ls -1t "$BACKUPS"/config-*.tar.gz 2>/dev/null | grep -v 'config-replaced-' | head -1 || true)"
 fi
 [ -n "$dump" ] || { echo "  FAIL  no dump produced"; exit 1; }
@@ -193,9 +189,6 @@ else
     [ -z "$extra" ] || echo "  note  also present: $(echo "$extra" | tr '\n' ' ')"
     # The aliases are the piece with no other copy anywhere; prove it is usable,
     # not merely present.
-    grep -q '^APP_KEY=.\{32\}$' "$tmpdir/recovery/app-key.env" 2>/dev/null \
-        && ok "APP_KEY carried (32 chars) — API tokens survive a rebuild" \
-        || fail "APP_KEY missing or malformed in the archive"
     n="$(python3 -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1])) or {}; print(len(d.get('aliases') or {}))" \
          "$tmpdir/config/payee_aliases.yaml" 2>/dev/null || echo 0)"
     [ "$n" -gt 0 ] && ok "payee_aliases.yaml parses, $n alias(es)" \
