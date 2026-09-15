@@ -927,6 +927,33 @@ tbody tr:last-child td {
   display: none;
 }
 
+/* §46. At phone width the strip scrolled, because four chips want 396px and
+   have 250px — so the third was clipped mid-label, an inch from the Combine
+   button, and read as a collision.
+
+   It was not one. Measured at 390px: the scroll container ends at x=266 and
+   Combine starts at x=276, ten pixels clear, exactly as `flex: 1 1 auto` with
+   `min-width: 0` beside `flex: 0 0 auto` should place them. What looked like
+   an overlap was a scroll container clipping its own content with nothing on
+   screen saying it could be scrolled.
+
+   So the fix is not a fade or a shadow to advertise the scrolling. It is to
+   stop scrolling at a width where the content fits on two short rows: with a
+   handful of accounts nothing is ever cut, and the affordance problem does not
+   need solving because it does not arise. The strip still scrolls above this
+   width, and still scrolls here if someone registers enough accounts to need
+   more rows than fit. */
+@media (max-width: 34rem) {
+  .tabs__inner {
+    flex-wrap: wrap;
+  }
+  .tabs__scroll {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    row-gap: 0.35rem;
+  }
+}
+
 .tab {
   flex: 0 0 auto;
   background: var(--sheet);

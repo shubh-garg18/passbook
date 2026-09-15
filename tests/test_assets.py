@@ -637,3 +637,39 @@ def test_the_drill_finds_a_dump_under_either_name(tmp_path, name):
     found, config = done.stdout.strip().splitlines()
     assert found.endswith(name)
     assert config.endswith("config-2026-09-16.tar.gz")
+
+
+def test_the_tab_strip_cannot_collide_with_the_combine_control():
+    """Three declarations keep them apart, and one of them is easy to lose.
+
+    Measured at 390px with four accounts registered: the scroll container ends
+    at x=266 and Combine starts at x=276. Ten pixels, never a collision — what
+    looked like one was `.tabs__scroll` clipping its own content, because four
+    chips want 396px and had 250px.
+
+    `min-width: 0` is the load-bearing one. A flex item defaults to
+    `min-width: auto`, which refuses to shrink below its content — so without
+    it the strip would push Combine off the row instead of scrolling, and the
+    collision would be real. the strip rule put it there; this keeps it there.
+
+    The narrow-width rule is the other half: below 34rem the strip wraps rather
+    than scrolls, so nothing is clipped at the width where a clipped chip has
+    nowhere to scroll to that the reader can see. §46.
+    """
+    css = (ROOT / "frontend" / "src" / "theme.css").read_text()
+    strip = css[css.index(".tabs__scroll {") :]
+    strip = strip[: strip.index("}")]
+    assert "min-width: 0" in strip, (
+        "a flex item defaults to min-width:auto and will not shrink below its "
+        "content — without this the strip pushes Combine off the row"
+    )
+    assert "flex: 1 1 auto" in strip, "the strip takes the leftover width"
+
+    pinned = css[css.index(".tabs__inner > .combine__button {") :]
+    pinned = pinned[: pinned.index("}")]
+    assert "flex: 0 0 auto" in pinned, "Combine must never be shrunk to fit"
+
+    assert "@media (max-width: 34rem)" in css and ".tabs__scroll {\n    flex-wrap: wrap" in css, (
+        "the strip must wrap rather than scroll at phone width, or a chip is "
+        "clipped with nothing on screen saying it can be scrolled"
+    )

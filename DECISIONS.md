@@ -5428,3 +5428,40 @@ name in turn, and fails on the old form both ways round.
 changed its exit status, and every guard around that command was built to hide
 exactly that.** A drill that fails silently is worse than no drill, because it
 is the thing you believe.
+
+
+---
+
+## 46. The collision that was not one
+
+Reported from a phone-width screenshot: the Combine control overlapping the
+account chips, the third one clipped mid-label behind it.
+
+Measured at 390px before changing anything, because a layout read off a picture
+is a guess:
+
+    .tabs__scroll   x=16  w=250  right=266   scrollWidth=396  overflowing=true
+    Combine         x=276 w=98   right=374   gap=10
+
+**Ten pixels apart, and never otherwise.** `.tabs__scroll` is `flex: 1 1 auto`
+with `min-width: 0` and Combine is `flex: 0 0 auto` — exactly the arrangement
+that cannot collide. What was on screen was the scroll container clipping its
+own content: four chips want 396px and had 250.
+
+`min-width: 0` is the load-bearing declaration and the easy one to lose, since
+a flex item defaults to `min-width: auto` and refuses to shrink below its
+content — without it the strip would push Combine off the row and the collision
+would be real. A test reads all three declarations out of the stylesheet.
+
+The obvious fix is a fade on the right edge saying *there is more*. The better
+one is to stop scrolling at a width where the content fits: below 34rem the
+strip wraps onto two short rows and nothing is clipped. A clipped chip is only
+a problem because the reader cannot tell it was clipped *by a scroll* —
+removing the scroll removes the question instead of answering it. Above that
+width nothing changed, and it still scrolls here for anyone with more accounts
+than two rows hold.
+
+**"It looks like it overlaps" and "it overlaps" are different claims, and the
+second is measurable.** Ten seconds with `getBoundingClientRect` said which,
+and the fix that followed was a different fix from the one the screenshot
+implied.
