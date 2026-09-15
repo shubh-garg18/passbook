@@ -182,18 +182,67 @@ first. It is one statement in one transaction now.
 
 ---
 
+## What changed, and when
+
+**Account menu → What has changed.**
+
+Every import, rename, category, deletion, backup and update, newest first, with
+a filter for each kind.
+
+It exists for one question: *why does this read differently from last time?*
+Your statements are all in `archive/` and the ledger check compares every row
+against them, so the **money** has always had a paper trail. What did not was
+the other half — renaming a payee, moving a category, deleting one. Those change
+what the ledger *says*, and the config files are deliberately not in version
+control, because they name real people. So there was no record of them anywhere.
+
+Two things it is not:
+
+- **It is not a second copy of your ledger.** No figure on any page is
+  calculated from it. What was spent comes from your rows; whether your rows
+  are right comes from [the ledger check](#is-the-ledger-still-right).
+- **It is not an alarm.** Nothing in it is a verdict. It is a list of what was
+  done.
+
+---
+
 ## Updating
 
+**The app tells you.** Status carries a **Version** card: what you are running,
+what has been published, and the list of what changed in between. The Ledger
+page mentions it too, once, in the strip under the balance.
+
+Applying it is one thing:
+
 ```bash
-git pull && make upgrade
+make update          # or double-click launchers/update-passbook.cmd on Windows
 ```
 
-`make upgrade` asks every migration whether it has work — **reading the live
+That backs up, pulls, rebuilds, applies any data migrations, and checks every
+row against the statements in your archive — in that order, because it is the
+order that cannot lose anything. **If a step fails it stops there** and the
+version you had is still the one running. Half-updated is the only outcome
+worth engineering against.
+
+It refuses to start if you have edited tracked files, or if this is a ZIP
+download rather than a clone — a ZIP has no history to pull into.
+
+> ### Why there is no update button in the app
+>
+> Updating rebuilds the container, which needs control of Docker. Handing that
+> to the one process that listens on a port and reads uploaded files would turn
+> any flaw in it into control of your machine, including the power to delete
+> your backups. So passbook tells you, and you run it.
+
+### The migration half, on its own
+
+`make upgrade` is the part of `make update` that touches your data, and you can
+run it alone. It asks every migration whether it has work — **reading the live
 ledger, not a version file** — then takes a database dump, applies what is
 pending in order, and runs `verify-ledger`. It records the new version only if
-that passed. A no-op when nothing is pending, so run it after every pull.
+that passed. A no-op when nothing is pending.
 
-The backup is a precondition, not advice: a migration re-pushes rows, which
+The backup is a precondition, not advice: a migration can re-push rows, which
 starts with a delete. Without a dump newer than an hour it refuses.
 
 ```bash

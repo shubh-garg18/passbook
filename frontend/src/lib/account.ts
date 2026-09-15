@@ -84,7 +84,7 @@ function store(slug: string | null): void {
  * phase — one account behaves exactly as it did.
  */
 export function useAccounts() {
-  const { data } = useQuery({
+  const { data, isPending } = useQuery({
     queryKey: ['accounts'],
     queryFn: () => api.get<Accounts>('/accounts'),
     staleTime: 30_000,
@@ -173,5 +173,10 @@ export function useAccounts() {
     isCombined: effective === ALL_ACCOUNTS || slugs.length > 1,
     label,
     scopeLabel,
+    /** Still asking. `accounts` is empty both before the answer arrives and
+     *  when there genuinely are none, and a page that opens on "you have
+     *  nothing" for a moment before showing a ledger is worse than one that
+     *  waits. */
+    isPending,
   }
 }

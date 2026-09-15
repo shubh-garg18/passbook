@@ -115,6 +115,30 @@ def test_there_is_only_one_door():
     assert "app:8080" not in text, "there is no second application to proxy to"
 
 
+def test_a_fresh_install_is_welcomed_rather_than_diagnosed():
+    """The first screen anyone sees, and it used to be a fault report.
+
+    On somebody's very first sign-in the Ledger page opened with `BALANCE
+    unavailable` in red, `Ledger unverified`, `No backup`, and the sentence
+    *"Set the missing value in .env on the host, then reload."* All of it
+    accurate; all of it wrong. Nothing is broken on a fresh install and nothing
+    needs editing — there is one thing to do, and the page now says it.
+
+    Asserted on the source because there is nothing to render against: the
+    branch fires when the account list comes back empty, which is a state no
+    fixture produces.
+    """
+    home = (ROOT / "frontend/src/pages/Home.tsx").read_text()
+    assert "accounts.length === 0" in home, "the fresh-install branch is gone"
+    assert "<FirstRun />" in home
+    # The three things it must not say to someone who has done nothing wrong.
+    welcome = home[home.index("function FirstRun()"):]
+    welcome = welcome[: welcome.index("\n}\n")]
+    for forbidden in (".env", "unavailable", "unverified"):
+        assert forbidden not in welcome, f"the welcome mentions {forbidden!r}"
+    assert "Upload a statement" in welcome, "it has to say the one thing to do"
+
+
 def test_the_numbered_ports_are_still_published():
     """8081 is what the runbook, the DR drill and every healthcheck use, and
     they run when Caddy may not be up.

@@ -39,11 +39,22 @@ export function Home() {
   // Every query is keyed on the account as well as the endpoint, so switching
   // accounts refetches instead of showing the previous one's figures under a new
   // name — which would be the §19 failure mode again: plausible and wrong.
-  const { param, isAll, scopeLabel } = useAccounts()
+  const { param, isAll, scopeLabel, accounts, isPending: accountsPending } = useAccounts()
   const { data, isPending, error } = useQuery({
     queryKey: ['overview', param],
     queryFn: () => api.get<Overview>(`/overview${param}`),
   })
+
+  // **A fresh install gets a welcome, not a fault report.**
+  //
+  // This page used to open, on somebody's very first sign-in, with `BALANCE
+  // unavailable` in red, `Ledger unverified ✗ No backup`, and the sentence
+  // "Set the missing value in .env on the host, then reload." Every one of
+  // those was technically accurate and all three were wrong: nothing is
+  // broken, nothing needs editing, and the only thing to do is upload a
+  // statement. A person who has done nothing yet should not be shown a
+  // diagnosis of having done nothing.
+  if (!accountsPending && accounts.length === 0) return <FirstRun />
 
   if (isPending)
     return (
@@ -242,6 +253,67 @@ function stampDate(iso: string): string {
   const [year, month, day] = iso.split('-')
   if (!year || !month || !day) return iso
   return `${day} ${MONTHS[Number(month) - 1] ?? month} ${year.slice(2)}`
+}
+
+/**
+ * The first screen, before there is anything to show.
+ *
+ * Deliberately not the Ledger page with every figure reading "unavailable".
+ * Nothing is wrong on a fresh install; there is simply one thing to do, and
+ * saying so is the whole job of this component.
+ */
+function FirstRun() {
+  return (
+    <div className="page">
+      <h1>Welcome</h1>
+      <p className="lede">
+        Nothing here yet. Upload one bank statement and passbook does the rest.
+      </p>
+
+      <Card title="How this works">
+        <ol className="steps">
+          <li>
+            <strong>Download a statement</strong> from your bank's net banking —
+            a spreadsheet (<code>.xls</code>, <code>.xlsx</code>, <code>.csv</code>)
+            or a PDF. Three months is a good first one.
+          </li>
+          <li>
+            <strong>Drop it on Upload.</strong> passbook reads it, checks the
+            arithmetic against the running balance, and shows you what it found
+            <em> before</em> anything is saved.
+          </li>
+          <li>
+            <strong>Name your payees</strong> on Payees when you are ready. Banks
+            shorten them to about ten characters, so only you know who they are —
+            name one once and it sticks, on rows you already have as well as new
+            ones.
+          </li>
+        </ol>
+        <div className="actions">
+          <Link className="button button--primary" to="/upload">
+            Upload a statement
+          </Link>
+        </div>
+      </Card>
+
+      <Why label="Never upload a statement to an online converter">
+        <p>
+          It carries your account number, your address, and the name, bank and
+          account of everyone you have paid. passbook reads it on this machine
+          and sends it nowhere — that is most of the point of it existing.
+        </p>
+      </Why>
+
+      <Why label="Which banks work">
+        <p>
+          Canara, SBI and Union Bank are read without any setup. If yours is not
+          one of them, <Link to="/banks/add">Add a bank</Link> shows you your own
+          file and asks which column is which — about ten minutes, on your
+          machine, and the balance check tells you whether you got it right.
+        </p>
+      </Why>
+    </div>
+  )
 }
 
 /**

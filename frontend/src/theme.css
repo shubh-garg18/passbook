@@ -4216,3 +4216,17 @@ svg .mark:focus-visible {
     justify-self: start;
   }
 }
+
+/* ── The first screen, before there is anything to show ──────────────────────
+ *
+ * Numbered because they are in order and there are three of them. Set in the
+ * reading face, not the data face: this is prose a person reads once, not a
+ * column of figures they scan. */
+.steps {
+  margin: 0 0 1rem;
+  padding-left: 1.4rem;
+  line-height: 1.55;
+}
+.steps li + li {
+  margin-top: 0.6rem;
+}

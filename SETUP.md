@@ -176,6 +176,27 @@ before the first transaction. That detail matters: an account opened at your
 
 More in [operations.md](docs/operations.md).
 
+## Keeping it up to date
+
+passbook checks whether a newer version has been published and says so on its
+**Status** page, with the list of what changed. Applying it is one thing:
+
+| | |
+|---|---|
+| **Windows** | double-click `launchers\update-passbook.cmd` |
+| **macOS** | double-click `launchers/update-passbook.command` |
+| **Linux / WSL** | `make update` |
+
+It backs up first, then pulls, rebuilds, applies any data migrations, and checks
+every row against your statements. If a step fails it stops there and the
+version you had is still running.
+
+There is deliberately no update button inside the app — updating rebuilds the
+container, which needs control of Docker, and the process that reads your
+uploads is the last place that belongs.
+
+---
+
 ## Managing your sign-in later
 
 ```bash
@@ -211,6 +232,7 @@ exactly what the `make` target does — the target is only a shortcut for it:
 | `make web-totp FORGET_DEVICES=yes` | `uv run passbook web-totp --forget-devices` |
 | `make upgrade` | `uv run passbook upgrade` |
 | `make verify-ledger` | `uv run passbook verify-ledger` |
+| `make update` | double-click `launchers\update-passbook.cmd` |
 
 **`make check`, `make backup`, `make verify-backup` and `make dr-drill` have no
 native-Windows equivalent.** They are shell scripts that source `.env` and drive
