@@ -84,8 +84,16 @@ services:
       # DSN is assembled here rather than read from `.env` — the values there
       # are the ones the HOST needs, and the two are different by definition.
       PASSBOOK_DATABASE_URL: postgresql://${DB_USERNAME}:${DB_PASSWORD}@db:5432/${DB_DATABASE}
-      PASSBOOK_ACCOUNT_NUMBER: ${PASSBOOK_ACCOUNT_NUMBER:?required for the account assertion}
-      PASSBOOK_ASSET_ACCOUNT: ${PASSBOOK_ASSET_ACCOUNT:?which account to write into}
+      # `:-` and not `:?`. These are blank on a fresh clone and they are filled
+      # in by setup's step 4, which reads them out of the first statement — and
+      # step 4 needs the stack already running to create the asset account. A
+      # `:?` here made that impossible: `make setup` died at step 3 with a raw
+      # compose interpolation error, so the one command a new install runs did
+      # not work at all. The app already handles both being blank and says so
+      # on Status — "(not set) · account assertion: NOT configured" — which is
+      # the honest state, and `make check` is where the nudge belongs. §44.2.
+      PASSBOOK_ACCOUNT_NUMBER: ${PASSBOOK_ACCOUNT_NUMBER:-}
+      PASSBOOK_ASSET_ACCOUNT: ${PASSBOOK_ASSET_ACCOUNT:-}
       LARGE_TXN_THRESHOLD: ${LARGE_TXN_THRESHOLD:-10000}
       # Auth lives in config/web-auth.json (already mounted, and writable so
       # the change-password form and TOTP enrolment can write it). Nothing
@@ -110,40 +118,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-
-  # ── Phase 11: clean URLs. SPEC §17.3, D9. ─────────────────────────────────
-  # A third listener, and the only one on a privileged port. Still 127.0.0.1
-  # only — D9 is about reachability, not port numbers, and nothing here is
-  # bound to 0.0.0.0.
-  #
-  # 8081 keeps working exactly as before: this is an additional way in, not a
-  # replacement. The runbook, the DR drill and every healthcheck reference the
-  # numbered port and must keep doing so — they run when Caddy may not be up.
-  caddy:
-    image: caddy:2.8-alpine
-    container_name: passbook_caddy
-    restart: unless-stopped
-    depends_on:
-      web:
-        condition: service_started
-    ports:
-      - "127.0.0.1:80:80"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddydata:/data
-      - caddyconfig:/config
-    environment:
-      TZ: ${TZ:-Asia/Kolkata}
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "--header", "Host: passbook.localhost", "http://127.0.0.1/api/session"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
 # Named volumes, not bind mounts: a bind mount under /mnt/c breaks Postgres
 # file permissions outright. SPEC D8.
 volumes:
   pgdata:
-  caddydata:
-  caddyconfig:

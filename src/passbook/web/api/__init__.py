@@ -31,7 +31,6 @@ ever converting it.
 from ._base import MAX_UPLOAD_BYTES, api, close_clients  # noqa: F401
 from . import (  # noqa: F401,E402
     accounts,
-    banks,
     ledger,
     ops,
     payees,

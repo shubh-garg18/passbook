@@ -5602,3 +5602,72 @@ right-hand rule survived and drew a line down the middle of every card —
 **visible only on the banded rows**, because on the others it fell on a
 background of its own colour. The selector repeats `:not(:last-child)` now, to
 match the specificity of what it is undoing.
+
+
+---
+
+## 50. The one command did not work, and CI had been saying so
+
+Asked to prove a fresh clone boots, the way to answer is to clone one and run
+what a new person runs. It failed at step 3.
+
+`make setup` writes `.env` at step 2 with the account number and the asset
+account blank, starts the stack at step 3, and reads both **out of the first
+statement** at step 4 — which needs the stack already running, because that is
+where the asset account is created. Both values were `:?required` in
+`docker-compose.yml`, so step 3 died with a compose interpolation error naming
+a variable the person had never seen, and step 4 never ran.
+
+**The one command a new install runs did not work at all**, and the same is
+true of the double-click launchers, which hand a first run to the same wizard.
+
+Two changes. Compose takes `:-` instead of `:?`, because the app already
+handles both being blank and says so on Status — *"(not set) · account
+assertion: NOT configured"* — and being stricter than the app made the honest
+state unreachable. And setup starts the stack a second time after step 4,
+because environment is fixed at container-create time: without it the web
+container kept serving with a blank account number until the next `make up`,
+on an install that had just been told the answer.
+
+Proven rather than reasoned about, twice, on a machine with the ports free:
+`make setup` from a fresh clone, then the actual double-click
+(`./launchers/start-passbook.sh`) on another. Both reach three healthy
+containers, `configured: true`, and a served page. The second double-click —
+the returning-user branch — starts the stack and opens the browser.
+
+### 50.1 Stop was the missing verb
+
+The start launcher finished by printing *"To stop it: docker compose down"*: a
+terminal command at the end of the one path built so that a person never opens
+a terminal. Invisible to whoever wrote it, because they already knew the
+command. There is a stop launcher for all three platforms now, over one shared
+`scripts/stop.py`, and a test that asserts three verbs times three platforms
+exist, run the script they claim to, and carry the executable bit in git.
+
+`stop.py` treats two states as success rather than failure, both of which the
+bare command gets wrong: no daemon, and nothing running. Both mean "there is
+nothing to stop", which is the state it is trying to reach. And it counts what
+is left afterwards, because `down` returning 0 is a claim about a command.
+
+### 50.2 What CI had been saying the whole time
+
+Every push in this stretch was red and I did not look once, while reporting
+local runs as green. Three failures, and two were an absolute path to another
+checkout on one machine — `/home/<user>/projects/<other repo>/...` — written
+into this repository's tests during a port. They passed there, because that
+path exists there.
+
+One of them is `test_ops_only_ever_executes_rclone`: the AST check that this
+process can execute nothing but rclone, reading **the wrong repository's file**
+and reporting a pass for it. A security test can be wrong in the direction that
+still says yes.
+
+The third was the only one of three sibling tests missing the "bundle not
+built" guard. Without the file the SPA route falls through to `index.html` and
+the assertion reports `text/html` — which looks exactly like the mimetype bug
+it exists to catch. CI's test job does not build the frontend; a separate job
+does.
+
+`test_nothing_reads_an_absolute_path_into_somebody_s_home` refuses the class
+now, in both repositories. **A path that is right by coincidence is wrong**,
+and the coincidence is precisely what stops anyone noticing.

@@ -50,11 +50,14 @@ def read_env() -> dict[str, str]:
 
 
 def configured(env: dict[str, str]) -> bool:
-    """The two the web service refuses to start without.
+    """The two that mean this install has been through the wizard.
 
-    Checked here rather than left to compose, because compose's message for a
-    missing one is an interpolation error naming a variable the user has never
-    seen, and it aborts the whole stack rather than the one service.
+    They used to be `:?required` in compose, which made a blank one abort the
+    whole stack with an interpolation error naming a variable the user had
+    never seen — and, worse, made the wizard itself impossible, because the
+    wizard reads them out of the first statement *after* starting the stack.
+    They are `:-` now and the app reports them as not configured, which is the
+    honest state; this stays as the test for whether to run the wizard.
     """
     return all(env.get(key) for key in
                ("PASSBOOK_ACCOUNT_NUMBER", "PASSBOOK_ASSET_ACCOUNT"))
@@ -84,6 +87,18 @@ def wait_for(url: str, seconds: int = 120) -> bool:
         print(".", end="", flush=True)
         time.sleep(2)
     return False
+
+
+def stopper() -> str:
+    """The stop launcher for whichever platform this is.
+
+    Named rather than guessed at by the reader: three files exist and only one
+    of them is the one in front of them.
+    """
+    return {
+        "nt": "launchers\\stop-passbook.cmd",
+        "darwin": "launchers/stop-passbook.command",
+    }.get("nt" if os.name == "nt" else sys.platform, "launchers/stop-passbook.sh")
 
 
 def hold(status: int) -> int:
@@ -135,7 +150,9 @@ def main() -> int:
     except Exception:  # noqa: BLE001 — the URL is printed either way
         pass
     print(f"  {DIM}Leave this window open or close it — the stack keeps running.{OFF}")
-    print(f"  {DIM}To stop it:  docker compose down{OFF}\n")
+    # Not `docker compose down`. This is the one path built so that a person
+    # never opens a terminal, and it ended by giving them a terminal command.
+    print(f"  {DIM}To stop it, double-click {stopper()}{OFF}\n")
     return 0
 
 

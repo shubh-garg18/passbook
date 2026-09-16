@@ -24,7 +24,7 @@ Three properties, in the order they matter:
 Adding one: write `migrations/mNNN_*.py` exposing `VERSION`, `NAME`,
 `DESCRIPTION`, `pending(ctx)`, `run(ctx)` and `verify(ctx)`, then bump nothing —
 `SCHEMA_VERSION` is derived from the highest module found. See
-`CONTRIBUTING.md`.
+`DECISIONS.md` §41.
 """
 
 from __future__ import annotations

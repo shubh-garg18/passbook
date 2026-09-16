@@ -1,10 +1,10 @@
 # Screenshots
 
-[← README](../../README.md) · [Setup](../../SETUP.md) · [Usage](../usage.md) ·
-[Backups](../backups.md) · [Operations](../operations.md)
+[← README](../../README.md) · [Setup](../SETUP.md) · [Usage](../usage.md) ·
+[Backups](../backups.md)
 
 **Everything in this directory is generated from `tests/fixtures/statement.xls`.**
-Never from a real ledger. CONTRIBUTING.md, non-negotiable 16.
+Never from a real ledger. DECISIONS.md §40, non-negotiable 16.
 
 `docs/shots/` — where `scripts/shoot.py` writes by default — is gitignored,
 because on a working install it renders real payees, real balances and a real

@@ -22,9 +22,9 @@ If you could not verify something, say so here rather than leaving it implied.
 - [ ] `make audit-docs` passes — no real balance, payee, account number or UTR
       in any tracked file
 - [ ] No statement file, real screenshot or backup is in this PR
-- [ ] No check was loosened to make a test pass (see CONTRIBUTING.md)
+- [ ] No check was loosened to make a test pass (see DECISIONS.md §40)
 - [ ] If this changes the shape of stored data, it ships a migration under
-      `src/passbook/migrations/` (see CONTRIBUTING.md)
+      `src/passbook/migrations/` (see DECISIONS.md §41)
 - [ ] If this changes anything rendered, I ran `make web-build` and then
       `scripts/shoot.py`, and **looked at the PNGs**
 

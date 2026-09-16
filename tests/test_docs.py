@@ -21,7 +21,7 @@ literals included, because a 12-digit run has no innocent form here.
 **What it deliberately cannot catch.** A payee token, a category name, or a
 person's name. Those have no machine-checkable shape, and pretending otherwise
 would be a green tick for something never looked at (non-negotiable 11).
-`CONTRIBUTING.md` carries the human half of the rule.
+`DECISIONS.md` §40 carries the human half of the rule.
 
 The amount allowlist is **derived from `tests/fixtures/statement.golden.json`**,
 not typed out, so a regenerated fixture updates it and a figure that is not in

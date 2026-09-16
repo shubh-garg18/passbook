@@ -17,6 +17,16 @@ import re
 import shutil
 from pathlib import Path
 
+
+#: This repository's own root. Four tests read source files out of the tree and
+#: three of them had an **absolute path to another checkout on one machine**
+#: hardcoded — `/home/shubh/projects/Bank-Spend/...`, written during a port.
+#: They passed there, because that path exists there, and one of them is the
+#: AST check that this process can execute nothing but rclone: a security test
+#: reading the wrong repository's file and reporting a pass for it. Every one
+#: of them failed on CI from the moment they landed.
+REPO = Path(__file__).resolve().parent.parent
+
 import pyotp
 import pytest
 
@@ -964,7 +974,7 @@ def _codes_for(signed_in, path: str, staged_name: str = "statement.pdf") -> tupl
     return none, wrong
 
 
-@pytest.mark.parametrize("path", ["/statement", "/accounts/inspect", "/banks/inspect"])
+@pytest.mark.parametrize("path", ["/statement", "/accounts/inspect"])
 def test_a_wrong_password_is_a_different_code_from_needing_one(signed_in, app, path):
     """The bug that produced "nothing happens after that". SPEC §41.
 
@@ -984,7 +994,7 @@ def test_a_wrong_password_is_a_different_code_from_needing_one(signed_in, app, p
     assert none != wrong, "the client cannot show a new state for an identical code"
 
 
-@pytest.mark.parametrize("path", ["/statement", "/accounts/inspect", "/banks/inspect"])
+@pytest.mark.parametrize("path", ["/statement", "/accounts/inspect"])
 def test_a_rejected_password_says_what_to_look_at(signed_in, app, path):
     """Not "invalid input". The remedy is a specific one and the message names
     the three things that are actually wrong with a mistyped bank password."""
@@ -1044,87 +1054,6 @@ def test_the_password_is_not_a_field_in_any_response(signed_in, app):
 
 
 # --- adding a bank from the browser (§34) ------------------------------------
-
-
-def test_inspect_reads_a_grid_without_staging_anything(signed_in, app):
-    """It must be safe on a file passbook cannot parse — that is the only case
-    it exists for. So it reads and writes nothing."""
-    r = signed_in.upload_to("/banks/inspect", XLS_FIXTURE.read_bytes(), "statement.xls")
-    assert r.status_code == 200
-    body = r.get_json()
-    assert body["container"] == "xls"
-    assert body["headerRow"] is not None
-    # repr(), so a single space is visibly a space and not ''.
-    assert any("' '" in cell for row in body["grid"] for cell in row)
-    # Nothing staged, so nothing a later `make sync` could pick up.
-    assert signed_in.get("/statement/pending").status_code == 404
-
-
-def test_inspect_asks_for_a_password_on_an_encrypted_pdf(signed_in, app):
-    from conftest import FIXTURES
-
-    r = signed_in.upload_to("/banks/inspect", (FIXTURES / "statement.pdf").read_bytes(), "s.pdf")
-    assert r.status_code == 422
-    assert r.get_json()["code"] == "pdf_password"
-
-
-def test_inspect_reads_an_encrypted_pdf_with_its_password(signed_in, app):
-    """The whole point: a locked statement can be inspected on this machine,
-    so nobody has to send it anywhere to add their bank."""
-    from conftest import FIXTURES, FIXTURE_ACCOUNT
-
-    r = signed_in.client.post(
-        "/api/banks/inspect",
-        data={
-            "statement": (io.BytesIO((FIXTURES / "statement.pdf").read_bytes()), "s.pdf"),
-            "password": FIXTURE_ACCOUNT[-4:],
-        },
-        content_type="multipart/form-data",
-        headers=signed_in._headers,
-    )
-    assert r.status_code == 200, r.get_json()
-    assert r.get_json()["rows"] > 10
-
-
-def test_a_profile_is_written_and_loaded_back(signed_in, tmp_path, monkeypatch):
-    from passbook.loaders import profiles
-
-    monkeypatch.setattr(profiles, "PROFILES_DIR", tmp_path / "banks")
-    body = {
-        "bank": "union",
-        "columns": {
-            "Txn Date": "date", "Ref No": "txn_id", "Withdrawal": "debit",
-            "Deposit": "credit", "Balance": "balance", "Description": "narration",
-        },
-    }
-    r = signed_in.post("/banks", body)
-    assert r.status_code == 200
-    assert "union" in r.get_json()["banks"]
-    assert (tmp_path / "banks" / "union.yaml").exists()
-
-
-def test_an_incomplete_profile_is_refused_with_what_is_missing(signed_in, tmp_path, monkeypatch):
-    from passbook.loaders import profiles
-
-    monkeypatch.setattr(profiles, "PROFILES_DIR", tmp_path / "banks")
-    r = signed_in.post("/banks", {"bank": "union", "columns": {"Txn Date": "date"}})
-    assert r.status_code == 422
-    assert "balance" in r.get_json()["error"]
-    assert not (tmp_path / "banks").exists() or not list((tmp_path / "banks").glob("*.yaml"))
-
-
-def test_a_builtin_bank_needs_no_profile(signed_in, tmp_path, monkeypatch):
-    from passbook.loaders import profiles
-
-    monkeypatch.setattr(profiles, "PROFILES_DIR", tmp_path / "banks")
-    r = signed_in.post("/banks", {"bank": "canara", "columns": {}})
-    assert r.status_code == 422
-    assert "built in" in r.get_json()["error"]
-
-
-# --- the date window --------------------------------------------------------
-# SPEC §25. A filtered list that does not say it is filtered is how a payee gets
-# decided twice, or never.
 
 
 def test_payees_narrows_to_a_custom_window(signed_in, app, config_files):
@@ -1362,82 +1291,6 @@ def _try_bank(signed_in, **overrides):
         content_type="multipart/form-data",
         headers=signed_in._headers,
     )
-
-
-def test_try_parses_an_unsaved_profile_and_writes_nothing(signed_in, app, tmp_path):
-    from passbook.loaders import profiles
-
-    response = _try_bank(signed_in)
-    assert response.status_code == 200, response.get_json()
-    body = response.get_json()
-
-    assert body.get("ok") is True, body.get("error")
-    assert body["rows"] == FIXTURE_TXN_COUNT
-    assert body["account"] == "****1111"
-    assert body["opening"] == "10000.00"
-    # Nothing was written: no profile, no registry entry, no staged file.
-    assert not list(profiles.PROFILES_DIR.glob("*.yaml")) if profiles.PROFILES_DIR.is_dir() else True
-    assert signed_in.get("/statement/pending").status_code == 404
-
-
-def test_try_infers_the_date_format_from_the_operators_own_dates(signed_in, app):
-    """§49.1. The next wall after the columns is always `unparseable date`, and
-    the fix was a strftime string in a YAML file."""
-    body = _try_bank(signed_in).get_json()
-    assert body["dateCandidates"] == ["%d-%m-%Y"]
-    assert body["dateSample"]
-
-
-def test_try_reports_where_every_column_was_found(signed_in, app):
-    """§51. Both sides — where the values start and where the figures end —
-    because a heading is not its column and the operator has to be able to see
-    which of the two went wrong."""
-    body = _try_bank(signed_in).get_json()
-    assert set(body["columns"]) == set(CANARA_TRY.values())
-    assert body["edges"]["balance"] == 573.0
-    assert body["edges"]["date"] == pytest.approx(23.0, abs=2.0)
-
-
-def test_try_hands_back_the_rows_when_it_fails(signed_in, app):
-    """The whole reason it exists: the operator sees their own statement laid
-    out as the mapping reads it, because nobody else may look at it (§46)."""
-    wrong = {**CANARA_TRY}
-    wrong["Balance"] = "credit"
-    del wrong["Deposits"]
-    body = _try_bank(signed_in, columns=json.dumps(wrong)).get_json()
-
-    assert body.get("ok") is not True
-    assert body["error"]
-    assert body["banded"], "no rows to look at, which is the point of the screen"
-
-
-def test_try_reports_a_wrong_password_as_such_not_as_a_crash(signed_in, app):
-    response = _try_bank(signed_in, password="0000")
-    assert response.status_code == 422
-    assert response.get_json()["code"] == "pdf_password_wrong"
-
-
-def test_try_shares_shapes_and_never_content(signed_in, app):
-    """§50. The dump is offered to be pasted to someone who must not see the
-    statement, so it must carry no statement."""
-    body = _try_bank(signed_in).get_json()
-    blob = "\n".join(body["shapes"])
-
-    assert blob
-    assert "999900001111" not in blob
-    assert "Particulars" not in blob and "Withdrawals" not in blob
-    assert "UPI" not in blob
-    # It does carry the geometry, which is the part that debugs a banding bug.
-    assert "@" in blob and "92-92-94" in blob
-
-
-def test_try_refuses_an_empty_mapping_rather_than_guessing(signed_in, app):
-    response = _try_bank(signed_in, columns="{}")
-    assert response.status_code == 422
-    assert "Name the columns" in response.get_json()["error"]
-
-
-# --- renaming an account. SPEC §40 ------------------------------------------
 
 
 def test_an_unnamed_account_is_shown_as_bank_plus_last_four(signed_in, three_accounts):
@@ -2080,11 +1933,28 @@ def test_a_valid_change_signs_you_out_and_keeps_totp(app, signed_in):
 # --- enrolment --------------------------------------------------------------
 
 
-def test_enrolment_is_required_when_no_secret_exists(app, api):
+def test_enrolment_is_offered_not_demanded(app, api):
+    """The second factor is opt-in, and required once taken up.
+
+    It used to be forced at the first sign-in, which put an authenticator app,
+    a QR code and eight codes to write down between somebody and their own
+    statement before they had seen a single page — on software that listens on
+    127.0.0.1, where the password is the boundary and the ledger is already on
+    the same machine as the person reading it.
+
+    Both halves are asserted here, because only the pair is the contract: no
+    secret means the password signs you in, and a secret means it does not.
+    """
     app.config["WEB_AUTH_FIXED"] = make_auth(totp_secret=None, totp_enrolled_at=None)
     r = api.post("/session", {"username": USER, "password": PASSWORD})
-    assert r.get_json()["stage"] == "enroll"
-    assert api.get("/overview").status_code == 401, "enrolment was skippable"
+    assert r.get_json()["stage"] == "done", "the password alone should sign in"
+    assert api.get("/overview").status_code == 200
+
+    app.config["WEB_AUTH_FIXED"] = make_auth()
+    fresh = Api(app.test_client())
+    second = fresh.post("/session", {"username": USER, "password": PASSWORD})
+    assert second.get_json()["stage"] == "totp", "an enrolled factor is not optional"
+    assert fresh.get("/overview").status_code == 401
 
 
 def test_enrolment_issues_eight_codes_and_signs_in(app, api):
@@ -2175,7 +2045,7 @@ def test_ops_only_ever_executes_rclone():
     ability to shell out to docker, gpg, or anything else. §15.3."""
     import ast
 
-    source = Path("/home/shubh/projects/Bank-Spend/src/passbook/ops.py").read_text()
+    source = (REPO / "src" / "passbook" / "ops.py").read_text()
     executables = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -2255,7 +2125,7 @@ def test_the_qr_is_dark_on_light_and_not_theme_dependent():
     """A decoder needs dark modules on a light field. Inverting the QR in dark
     mode produces a code many phone cameras will not read at all, so the
     backing must not be a theme token."""
-    css = Path("/home/shubh/projects/Bank-Spend/frontend/src/theme.css").read_text()
+    css = (REPO / "frontend" / "src" / "theme.css").read_text()
     block = css[css.index(".qr {") : css.index(".qr svg {")]
     assert "background: #fff" in block, "the QR backing must be literally white"
     assert "var(--" not in block.split("border:")[0], "QR backing must not follow the theme"
@@ -2300,12 +2170,12 @@ def test_reset_invalidates_the_old_secret_codes_and_devices(tmp_path, monkeypatc
     assert webauth.verify_password(after.password_hash, PASSWORD)
 
 
-def test_a_reset_forces_enrolment_and_new_codes_differ(app, api):
+def test_a_reset_retires_the_old_secret_and_its_codes(app, api):
     old_codes = webauth.generate_backup_codes(app.config["WEB_AUTH_FIXED"])
     app.config["WEB_AUTH_FIXED"] = make_auth(totp_secret=None, totp_enrolled_at=None)
 
     r = api.post("/session", {"username": USER, "password": PASSWORD})
-    assert r.get_json()["stage"] == "enroll"
+    assert r.get_json()["stage"] == "done", "a reset leaves the password working"
 
     started = api.post("/totp/enroll/start").get_json()
     assert started["secret"] != SECRET, "enrolment reissued the same secret"
@@ -2681,7 +2551,11 @@ def test_web_password_then_enrolment_is_the_whole_recovery(tmp_path, monkeypatch
     assert api.get("/session").get_json()["configured"] is True
 
     r = api.post("/session", {"username": "restored", "password": "a-restored-password"})
-    assert r.get_json()["stage"] == "enroll", "enrolment must be mandatory on a fresh credential"
+    assert r.get_json()["stage"] == "done", (
+        "a restored credential signs in on its own — the second factor is opt-in "
+        "on a machine serving 127.0.0.1, and recovery that demands an "
+        "authenticator app is recovery with an extra way to fail"
+    )
 
     started = api.post("/totp/enroll/start").get_json()
     confirmed = api.post(
@@ -2700,8 +2574,7 @@ def test_web_password_then_enrolment_is_the_whole_recovery(tmp_path, monkeypatch
 
 
 @pytest.mark.skipif(
-    not (Path("/home/shubh/projects/Bank-Spend/src/passbook/web/dist")
-         / "manifest.webmanifest").is_file(),
+    not (REPO / "src" / "passbook" / "web" / "dist" / "manifest.webmanifest").is_file(),
     reason="bundle not built; run `make web-build`",
 )
 def test_the_manifest_is_served_as_manifest_json(app):
@@ -2714,8 +2587,18 @@ def test_the_manifest_is_served_as_manifest_json(app):
     assert json.loads(response.data)["display"] == "standalone"
 
 
+@pytest.mark.skipif(
+    not (REPO / "src" / "passbook" / "web" / "dist" / "manifest.webmanifest").is_file(),
+    reason="bundle not built; run `make web-build`",
+)
 def test_the_manifest_type_does_not_depend_on_the_interpreter(app, monkeypatch):
     """Pins the app, not CPython.
+
+    Guarded like its two neighbours, and it was the only one of the three that
+    was not. Without the file the SPA route falls through to `index.html` and
+    the assertion reports `text/html` — which looks like the mimetype bug this
+    test exists to catch and is actually "there is no bundle here". CI's test
+    job does not build the frontend; a separate job does.
 
     Written first as a plain request, which passed even with the app's explicit
     `mimetype` line deleted — because CPython has known `.webmanifest` since
@@ -2742,7 +2625,7 @@ def test_the_manifest_type_does_not_depend_on_the_interpreter(app, monkeypatch):
 
 
 @pytest.mark.skipif(
-    not (Path("/home/shubh/projects/Bank-Spend/src/passbook/web/dist") / "icon-512.png").is_file(),
+    not (REPO / "src" / "passbook" / "web" / "dist" / "icon-512.png").is_file(),
     reason="bundle not built; run `make web-build`",
 )
 def test_the_icons_the_manifest_names_are_served(app):

@@ -285,7 +285,13 @@ def totp_status(auth: WebAuth) -> dict:
         "backupCodesLeft": auth.backup_codes_left,
         # Computed here so the strip, the Status card and the Account page cannot
         # disagree about when to start worrying. See webauth.LOW_BACKUP_CODES.
-        "backupCodesLow": auth.backup_codes_left <= webauth.LOW_BACKUP_CODES,
+        # **Only once enrolled.** Un-enrolled means zero codes, and zero codes
+        # used to read as "none left: lose the phone now and the only way back
+        # in is a terminal command" — an alarm about losing a thing nobody had,
+        # on every page, forever.
+        "backupCodesLow": (
+            auth.totp_enrolled and auth.backup_codes_left <= webauth.LOW_BACKUP_CODES
+        ),
         "rememberedDevices": len(
             [d for d in auth.devices if _not_expired(d)]
         ),

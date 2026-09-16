@@ -19,7 +19,7 @@ import pytest
 
 PKG = Path(__file__).resolve().parent.parent / "src" / "passbook" / "web" / "api"
 
-#: `@api.get("/status")`, `@api.post("/banks/try")`, …
+#: `@api.get("/status")`, `@api.post("/accounts")`, …
 DECORATOR = re.compile(r'^@api\.(get|post|put|delete|patch)\("([^"]+)"\)', re.M)
 
 
@@ -73,15 +73,17 @@ def test_the_route_count_is_the_one_the_split_produced():
     and emailed sign-in recovery to 53. Moving the ledger in-house took it back
     to 52: `/bootstrap` pushed `rules.yaml` into a separate rules engine, and
     there is no separate rules engine — the rules are applied when a row is
-    written. `/update` and `/activity` took it to 54."""
-    assert len(declared()) == 54
+    written. `/update` and `/activity` took it to 54, and removing *Add a bank*
+    to 51 — that page's three endpoints could only ever describe a statement
+    that prints its column headings, which is not the shape of the bank most
+    people arrive with."""
+    assert len(declared()) == 51
 
 
 @pytest.mark.parametrize(
     "module",
     [
         "accounts",
-        "banks",
         "ledger",
         "ops",
         "payees",

@@ -90,11 +90,20 @@ def login():
     A.record_success(username)
     auth = A.current_auth()
 
-    # Enrolment is mandatory, so an un-enrolled operator cannot slip past it by
-    # simply not visiting the page.
+    # **Not mandatory.** This listens on 127.0.0.1, and the ledger is on the
+    # same machine as the person reading it: the password is the boundary and a
+    # second factor is mostly a second thing to lose. Forcing enrolment at the
+    # first sign-in also put an authenticator app, a QR code and eight codes to
+    # write down between somebody and their own statement, before they had seen
+    # a single page.
+    #
+    # It still matters the day this is reachable from another device, so the
+    # whole flow stays and Account turns it on. Once enrolled it is required
+    # again — the branch below — because a factor you can skip is not one.
     if not auth.totp_enrolled:
-        A.begin_pending(username)
-        return jsonify({"stage": "enroll"})
+        A.begin_session(username)
+        log.info("signed in; no second factor enrolled")
+        return jsonify({"stage": "done"})
 
     # A remembered device skips the second factor, never the first.
     if webauth.device_valid(auth, request.cookies.get(A.DEVICE_COOKIE)):

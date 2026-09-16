@@ -56,9 +56,6 @@ export function AccountsPage() {
         <Link className="button button--primary" to="/accounts/add">
           Add an account
         </Link>
-        <Link className="button" to="/banks/add">
-          Add a bank
-        </Link>
       </div>
 
       {/* §115.1. A disclosure, not a notice. It is the difference between the

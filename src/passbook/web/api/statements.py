@@ -29,7 +29,6 @@ from ._base import (
     _pending_password,
     api,
 )
-from .banks import _with_try_hint
 
 
 # --- upload / preview / confirm -------------------------------------------
@@ -110,7 +109,7 @@ def upload_statement():
         return jsonify({"error": str(exc), "code": code}), 422
     except (ParseError, UnsupportedFormat) as exc:
         staging.unlink(missing_ok=True)
-        return _fail(f"Rejected: {_with_try_hint(exc)}", "rejected", 422)
+        return _fail(f"Rejected: {exc}", "rejected", 422)
     except (BalanceBreak, IntegrityError) as exc:
         staging.unlink(missing_ok=True)
         # `balance_break`, not `invalid`: the client attaches "re-download the

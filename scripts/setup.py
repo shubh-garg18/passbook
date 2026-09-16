@@ -516,6 +516,14 @@ def main() -> int:
                 say(f"   {DIM}It is created, with the right opening balance, by the{OFF}")
                 say(f"   {DIM}first statement you upload.{OFF}")
 
+    # The web container was started at step 3, before any of this was known.
+    # Environment is baked in at create time, so without this it keeps serving
+    # with a blank account number until the next `make up` — the Status page
+    # saying "(not set)" on an install that has just been told the answer.
+    if read_env() != env:
+        say(f"   {DIM}restarting so the app can see it…{OFF}")
+        compose("up", "-d", "--wait", check=False)
+
     step(5, "A password for passbook itself")
     auth = ROOT / "config" / "web-auth.json"
     if auth.is_file():

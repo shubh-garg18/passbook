@@ -11,5 +11,5 @@ One module per migration, named `mNNN_<slug>.py`, exposing:
     verify(ctx)  -> str | None   what is still wrong, or None if it worked
 
 `ctx` is a `passbook.migrate` context carrying `settings`, `store`, `registry`
-and a `say(message)` for progress. See `CONTRIBUTING.md`.
+and a `say(message)` for progress. See `DECISIONS.md` §41.
 """

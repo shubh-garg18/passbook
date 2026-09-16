@@ -102,7 +102,11 @@ def load(path, password: str | None = None) -> tuple[StatementMeta, list[Transac
                 return unchained
             if refused is not None:
                 raise refused from None
-            raise
+            # Canara's reader is tried last, so its complaint is the one that
+            # surfaces — and it said "this is not a Canara statement" on an
+            # install that reads three banks, which reads as "only Canara is
+            # supported" to somebody holding an SBI export.
+            raise ParseError(_unreadable(path)) from None
     if kind == "xlsx":
         raise UnsupportedFormat(
             "file is a ZIP container (.xlsx). The Canara export is OLE2 .xls and "
@@ -111,6 +115,36 @@ def load(path, password: str | None = None) -> tuple[StatementMeta, list[Transac
             "If the bank has switched formats, say so and it gets wired up."
         )
     raise UnsupportedFormat(f"no loader is wired up for {kind!r}")
+
+
+def _unreadable(path) -> str:
+    """Why no reader could read this PDF, and what can actually be done.
+
+    Names the banks this install reads, because the alternative — naming the
+    one bank whose bespoke reader happened to run last — tells somebody with an
+    SBI statement that passbook is a Canara tool.
+
+    **And it does not promise that Add a bank will fix it.** That page maps
+    column headings, so it works when the statement prints them. A statement
+    that prints none cannot be described that way, and sending somebody there
+    to name headings that do not exist is a loop, not a remedy. §51.
+    """
+    # `supported_banks`, not `known_banks`: the latter lists profiles, and
+    # Canara has a bespoke reader rather than a profile — so the message that
+    # exists to stop passbook looking Canara-only left Canara out of it.
+    from ..config import supported_banks
+
+    banks = ", ".join(supported_banks()) or "none"
+    return (
+        f"no reader could make sense of this PDF. This install reads: {banks}. "
+        "If your bank is in that list, the file may be a different export from "
+        "the same bank, or a print-to-file rather than the bank's own download. "
+        "If it is not in the list, and your statement prints its column "
+        "headings, Accounts \u2192 Add a bank can describe it. If it prints no "
+        "headings \u2014 the columns are part of a background image \u2014 it "
+        "cannot be described that way, and the layout has to be measured off "
+        "the page instead."
+    )
 
 
 def _profiled_pdf(path, password: str | None):

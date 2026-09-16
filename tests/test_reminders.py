@@ -165,7 +165,7 @@ def test_the_uid_is_random_and_carries_nothing_from_the_install():
     for uid in (a, b):
         assert re.fullmatch(
             r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
-            r"@passbook\.localhost",
+            r"@passbook\.local",
             uid,
         ), uid
 

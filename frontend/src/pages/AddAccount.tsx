@@ -295,11 +295,10 @@ export function AddAccount() {
 
       <Notice>
         <p>
-          passbook reads <strong>{(candidates?.banks ?? ['canara']).join(', ')}</strong>{' '}
-          — some of those ship with it, some were added here. A bank not in that list needs
-          a one-off description of where its columns are: no code, about ten minutes, and
-          the statement never leaves this machine.{' '}
-          <Link to="/banks/add">Add a bank</Link> walks through it.
+          passbook reads <strong>{(candidates?.banks ?? ['canara']).join(', ')}</strong>. If
+          yours is not one of them,{' '}
+          <a href="https://github.com/shubh-garg18/passbook/issues">say which bank it is</a>{' '}
+          and it can be added — your statement stays on this machine either way.
         </p>
       </Notice>
     </div>

@@ -307,9 +307,12 @@ function FirstRun() {
       <Why label="Which banks work">
         <p>
           Canara, SBI and Union Bank are read without any setup. If yours is not
-          one of them, <Link to="/banks/add">Add a bank</Link> shows you your own
-          file and asks which column is which — about ten minutes, on your
-          machine, and the balance check tells you whether you got it right.
+          one of them,{' '}
+          <a href="https://github.com/shubh-garg18/passbook/issues">say which bank it is</a>.
+          Describing a layout used to be a page here, and it could only ever
+          work for banks that print their column headings — the ones that do
+          not, like SBI, have to be measured off the page instead, which is why
+          they ship built in.
         </p>
       </Why>
     </div>

@@ -125,7 +125,7 @@ def check_disk(report: Report) -> None:
         free_gb = shutil.disk_usage(ROOT).free / 1e9
     except OSError:
         return
-    # Postgres, Caddy and the built web image, plus room for the database.
+    # Postgres and the built web image, plus room for the database.
     if free_gb < 2:
         report.fail(
             f"only {free_gb:.1f} GB free on this disk",

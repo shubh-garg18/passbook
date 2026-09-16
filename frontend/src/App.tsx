@@ -28,7 +28,6 @@ import { StatusPage } from './pages/Status'
 import { Password } from './pages/Password'
 import { AccountsPage } from './pages/Accounts'
 import { AddAccount } from './pages/AddAccount'
-import { AddBank } from './pages/AddBank'
 
 export function useSession() {
   return useQuery({
@@ -449,7 +448,6 @@ export default function App() {
             <Route path="/password" element={<Password />} />
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/accounts/add" element={<AddAccount />} />
-            <Route path="/banks/add" element={<AddBank />} />
             <Route path="*" element={<Navigate to="/" replace state={{ from: location.pathname }} />} />
           </Routes>
         )}

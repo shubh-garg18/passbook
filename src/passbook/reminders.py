@@ -107,7 +107,7 @@ class Schedule:
             # Random, not derived from the account: a UID travels into Google
             # Calendar and there is nothing about this install worth putting in
             # it (§11).
-            self.uid = f"{uuid.uuid4()}@passbook.localhost"
+            self.uid = f"{uuid.uuid4()}@passbook.local"
 
     @property
     def label(self) -> str:
@@ -429,7 +429,7 @@ def to_ics(
     *,
     now: datetime | None = None,
     stamped: datetime | None = None,
-    url: str = "http://passbook.localhost",
+    url: str = "http://localhost:8081",
     method: str = "PUBLISH",
     organizer: str | None = None,
     attendee: str | None = None,

@@ -31,7 +31,6 @@ from ._base import (
     log,
 )
 from .accounts import _store_asset_account
-from .banks import _with_try_hint
 
 
 @api.post("/accounts/inspect")
@@ -83,7 +82,7 @@ def account_inspect():
         return jsonify({"error": str(exc), "code": "pdf_password"}), 422
     except (ParseError, UnsupportedFormat) as exc:
         staging.unlink(missing_ok=True)
-        return _fail(f"Rejected: {_with_try_hint(exc)}", "rejected", 422)
+        return _fail(f"Rejected: {exc}", "rejected", 422)
     except (BalanceBreak, IntegrityError) as exc:
         staging.unlink(missing_ok=True)
         # `balance_break`, not `invalid`: the client attaches "re-download the

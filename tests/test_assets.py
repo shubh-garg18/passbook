@@ -23,7 +23,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 CSS = ROOT / "frontend/src/theme.css"
 MANIFEST = ROOT / "frontend/public/manifest.webmanifest"
-CADDYFILE = ROOT / "Caddyfile"
 PUBLIC = ROOT / "frontend/public"
 
 
@@ -67,54 +66,6 @@ def test_the_theme_colour_matches_the_board_token():
 # --- 2. Caddy, statically --------------------------------------------------
 
 
-def test_caddy_disables_automatic_https():
-    """Left on, Caddy mints a cert from its internal CA for a `.localhost`
-    name and tries to install that CA in the system trust store."""
-    assert re.search(r"^\s*auto_https\s+off\s*$", CADDYFILE.read_text(), re.M)
-
-
-def _site_block(host: str) -> str:
-    """The body of `http://<host> { … }`, comments stripped.
-
-    Naive splitting matched the explanatory comment block at the top of the
-    file instead of the site block, so this walks braces.
-    """
-    text = re.sub(r"(?m)^\s*#.*$", "", CADDYFILE.read_text())
-    start = text.index(f"http://{host}")
-    open_brace = text.index("{", start)
-    depth, index = 0, open_brace
-    for index in range(open_brace, len(text)):
-        if text[index] == "{":
-            depth += 1
-        elif text[index] == "}":
-            depth -= 1
-            if depth == 0:
-                break
-    return text[open_brace + 1 : index]
-
-
-def test_caddy_routes_the_one_host_over_plain_http():
-    text = CADDYFILE.read_text()
-    assert "http://passbook.localhost" in text, "the host must be pinned to http://"
-    assert "web:8081" in _site_block("passbook.localhost")
-
-
-def test_there_is_only_one_door():
-    """A second hostname once served a separate ledger application's UI beside
-    this one, and the operator ran both because passbook had no charts, no
-    reports and no transaction browser. It has all three, and the instruction
-    was explicit: *"I want only one localhost and it have all required
-    features"*. That application is gone entirely now, so the block it was
-    commented out as is gone too.
-
-    Asserted on the whole file, uncommented or not: there is nothing left to
-    bring back for a debugging session.
-    """
-    text = CADDYFILE.read_text()
-    assert "khata.localhost" not in text
-    assert "app:8080" not in text, "there is no second application to proxy to"
-
-
 def test_a_fresh_install_is_welcomed_rather_than_diagnosed():
     """The first screen anyone sees, and it used to be a fault report.
 
@@ -145,12 +96,16 @@ def test_the_numbered_ports_are_still_published():
 
     The database's *host* port is settable — a Postgres already installed on
     this machine makes the bind fail outright — so what is pinned there is the
-    default and the container port, not a literal. 8081 and 80 stay literal
-    because nothing has needed to move them."""
+    default and the container port, not a literal. 8081 stays literal because
+    nothing has needed to move it.
+
+    Port 80 is gone with Caddy: it bought `http://passbook.localhost`, which no
+    launcher, doc or healthcheck ever used, and cost a third container and the
+    one port two installs on a machine are most likely to fight over."""
     compose = (ROOT / "docker-compose.yml").read_text()
     assert '"127.0.0.1:${PASSBOOK_DB_PORT:-5433}:5432"' in compose
     assert '"127.0.0.1:8081:8081"' in compose
-    assert '"127.0.0.1:80:80"' in compose
+    assert ":80:80" not in compose, "Caddy is gone; nothing should bind port 80"
 
 
 def test_nothing_is_bound_beyond_loopback():
@@ -162,7 +117,7 @@ def test_nothing_is_bound_beyond_loopback():
     # and a mapping this check cannot see is a mapping it cannot hold to
     # loopback — the failure would have been silent and in the unsafe direction.
     ports = [p for p in published if re.match(r"^[\d.]*:?[\d${}:a-zA-Z_-]+:\d+$", p)]
-    assert len(ports) >= 3, f"expected the app, web and caddy mappings, found {ports}"
+    assert len(ports) >= 2, f"expected the database and web mappings, found {ports}"
     for port in ports:
         assert port.startswith("127.0.0.1:"), f"{port} is reachable beyond loopback"
 
@@ -765,3 +720,75 @@ def test_the_transactions_table_survives_becoming_cards():
         "every row has both an Out and an In cell and one is always blank — "
         "without this it prints a heading over nothing"
     )
+
+
+def test_nothing_reads_an_absolute_path_into_somebody_s_home():
+    """A path that is right by coincidence is wrong.
+
+    Four tests carried `/home/<user>/projects/<repo>/...`, written during a
+    port. In this repository they resolved, because this is that directory. In
+    the public one the identical lines pointed **here** — so they passed on the
+    machine they were written on and failed everywhere else, and CI had been
+    red since the moment they landed. One of them is the AST check that the web
+    process can execute nothing but rclone: a security test reading the wrong
+    repository's file and reporting a pass for it.
+
+    Comments are allowed to mention such a path — this file's own explanation
+    does — because a comment is not something a test reads.
+    """
+    import re
+
+    absolute = re.compile(r"""['"](?:/home/|/Users/|[A-Z]:\\\\Users)""")
+    offenders = []
+    for folder in ("tests", "src", "scripts"):
+        for path in sorted((ROOT / folder).rglob("*.py")):
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if absolute.search(line):
+                    offenders.append(f"{path.relative_to(ROOT)}:{number}  {line.strip()[:60]}")
+
+    assert not offenders, (
+        "these read an absolute path into one machine's home directory:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse a path relative to the repository root."
+    )
+
+
+def test_every_launcher_exists_on_every_platform():
+    """Nothing about running passbook should need a terminal.
+
+    Three verbs — start, stop, update — times three platforms, each a
+    double-clickable file that hands over to one Python script shared between
+    them. `stop` was the one that did not exist: the start launcher finished by
+    printing *"To stop it: docker compose down"*, a terminal command at the end
+    of the one path built so that a person never opens a terminal. Invisible to
+    whoever wrote it, because they already knew the command.
+    """
+    launchers = ROOT / "launchers"
+    missing = [
+        f"{verb}-passbook{suffix}"
+        for verb in ("start", "stop", "update")
+        for suffix in (".sh", ".command", ".cmd")
+        if not (launchers / f"{verb}-passbook{suffix}").is_file()
+    ]
+    assert not missing, f"no double-click path for: {', '.join(missing)}"
+
+    for verb, script in (("start", "launch.py"), ("stop", "stop.py"), ("update", "update.py")):
+        target = ROOT / "scripts" / script
+        if not target.is_file():
+            continue
+        for suffix in (".sh", ".command", ".cmd"):
+            body = (launchers / f"{verb}-passbook{suffix}").read_text()
+            assert script in body, f"{verb}-passbook{suffix} does not run scripts/{script}"
+
+    # The unix ones are double-clicked, which means the bit has to be set in git.
+    import subprocess
+    listing = subprocess.run(
+        ["git", "ls-files", "-s", "launchers"], cwd=ROOT, capture_output=True, text=True
+    ).stdout
+    for line in listing.splitlines():
+        mode, _, rest = line.partition(" ")
+        name = rest.split("\t")[-1]
+        if name.endswith((".sh", ".command")):
+            assert mode == "100755", f"{name} is not executable in git ({mode})"

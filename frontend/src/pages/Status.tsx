@@ -63,17 +63,39 @@ export function StatusPage() {
           <BackupNow />
         </Card>
 
+        {/* Off is a state, not a fault. passbook serves 127.0.0.1 and the
+            ledger is already on this machine, so the password is the boundary
+            and the second factor is worth having the day this is reachable
+            from somewhere else. Un-enrolled used to render as "0 backup codes
+            left" over "None left: lose the phone now" — an alarm about losing
+            a thing nobody had. */}
         <Card title="Second factor" state={data.auth.backupCodesLow ? 'warn' : undefined}>
-          <p className="figure">{data.auth.backupCodesLeft}</p>
-          <p className="muted">
-            backup codes left · {count(data.auth.rememberedDevices, 'remembered device')}
-          </p>
-          {data.auth.backupCodesLow && (
-            <p className="warn">
-              {data.auth.backupCodesLeft === 0
-                ? 'None left: lose the phone now and the only way back in is make web-totp RESET=yes on the host.'
-                : 'Running low. Re-issue a full set from Account while you can still sign in.'}
-            </p>
+          {!data.auth.enrolled ? (
+            <>
+              <p className="figure">Off</p>
+              <p className="muted">
+                Your password is the only lock, which is the right trade while
+                passbook is only reachable from this computer.
+              </p>
+              <p className="muted">
+                Turning it on takes a minute: <Link to="/password">Account</Link>.
+                Worth doing before you reach this from a phone or another machine.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="figure">{data.auth.backupCodesLeft}</p>
+              <p className="muted">
+                backup codes left · {count(data.auth.rememberedDevices, 'remembered device')}
+              </p>
+              {data.auth.backupCodesLow && (
+                <p className="warn">
+                  {data.auth.backupCodesLeft === 0
+                    ? 'None left. Re-issue a set from Account while you can still sign in.'
+                    : 'Running low. Re-issue a full set from Account while you can still sign in.'}
+                </p>
+              )}
+            </>
           )}
         </Card>
       </div>
